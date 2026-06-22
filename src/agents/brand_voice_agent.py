@@ -5,8 +5,7 @@ from typing import Any
 import ldclient
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from ldai.client import ModelConfig, ProviderConfig, LDMessage
-from ldai.models import AICompletionConfig
+from ldai.client import LDMessage
 
 from ..graph.state import AgentState
 from ..utils.llm_config import get_model_invoker
@@ -40,16 +39,18 @@ Transform the specialist's response into a customer-facing message that:
 
 Provide ONLY the final customer-facing response. Do not include meta-commentary."""
 
-DEFAULT_BRAND_AGENT_CONFIG = AICompletionConfig(
-    key="brand_agent",
-    enabled=True,
-    model=ModelConfig(
-        name="us.anthropic.claude-haiku-4-5-20251001-v1:0",
-        parameters={"temperature": 0.7, "maxTokens": 2000}
-    ),
-    provider=ProviderConfig(name="bedrock"),
-    messages=[LDMessage(role="system", content=DEFAULT_BRAND_VOICE_SYSTEM_PROMPT)]
-)
+# Passed to LDClientManager.get_ai_config as the `default_config` fallback, which
+# expects a plain dict (see _dict_to_ai_config in launchdarkly_config.py).
+DEFAULT_BRAND_AGENT_CONFIG = {
+    "key": "brand_agent",
+    "enabled": True,
+    "model": {
+        "name": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "parameters": {"temperature": 0.7, "maxTokens": 2000},
+    },
+    "provider": "bedrock",
+    "messages": [LDMessage(role="system", content=DEFAULT_BRAND_VOICE_SYSTEM_PROMPT)],
+}
 
 
 def calculate_model_cost(model_id: str, input_tokens: int, output_tokens: int) -> float:
@@ -354,7 +355,7 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
                 
                 # Build messages from hardcoded default config
                 fallback_messages = []
-                for msg in DEFAULT_BRAND_AGENT_CONFIG.messages:
+                for msg in DEFAULT_BRAND_AGENT_CONFIG["messages"]:
                     content = msg.content
                     # Replace template variables
                     for key, value in context_vars.items():

@@ -119,12 +119,14 @@ def get_llm_from_config(
 
     # Extract model configuration
     model_config = config.get("model", {})
-    model_name = model_config.get("name", os.getenv("LLM_MODEL", "gpt-4-turbo-preview"))
-    provider_raw = config.get("provider", os.getenv("LLM_PROVIDER", "openai"))
-    
+    model_name = model_config.get("name") or os.getenv("LLM_MODEL", "gpt-4-turbo-preview")
+    if not (model_name.startswith("global.") or model_name.startswith("us.")):
+        model_name = f"us.{model_name}"
+    provider_raw = config.get("provider") or os.getenv("LLM_PROVIDER", "openai")
+
     # Parse provider - LaunchDarkly returns formats like "Bedrock:Anthropic" or "Bedrock:Nova"
     # We need to extract just the main provider (the part before the colon)
-    provider = provider_raw.split(':')[0].lower() if ':' in provider_raw else provider_raw.lower()
+    provider = provider_raw.split(":")[0].lower() if ":" in provider_raw else provider_raw.lower()
 
     # Extract parameters
     params = model_config.get("parameters", {})
@@ -163,47 +165,53 @@ def get_model_invoker(
     # Convert AIConfig to dict if provided
     default_config_dict = None
     if default_config:
-        # If it's an AIConfig object, convert it to dict using the client's method
-        default_config_dict = ld_client._ai_config_to_dict(default_config)
-    
+        # default_config may be a plain dict (already in the shape get_ai_config
+        # expects) or an SDK AIConfig object that needs converting.
+        if isinstance(default_config, dict):
+            default_config_dict = default_config
+        else:
+            default_config_dict = ld_client._ai_config_to_dict(default_config)
+
     config, tracker, ld_context = ld_client.get_ai_config(config_key, context, default_config_dict)
-    
+
     # Create LLM directly from the config (don't call get_llm_from_config which would retrieve again)
-    provider = config.get("provider", "bedrock")
+    provider = config.get("provider") or "bedrock"
     # Parse provider name (e.g., "Bedrock:Anthropic" -> "bedrock")
     if ":" in provider:
         provider = provider.split(":")[0]
     provider = provider.lower().strip()
-    
+
     model_config = config.get("model", {})
-    model_name = model_config.get("name", "claude-3-5-sonnet")
-    
+    model_name = model_config.get("name") or "claude-3-5-sonnet"
+    if not (model_name.startswith("global.") or model_name.startswith("us.")):
+        model_name = f"us.{model_name}"
+
     # Get temperature from config or use default
     parameters = model_config.get("parameters", {})
     temperature = parameters.get("temperature", default_temperature)
     max_tokens = parameters.get("max_tokens") or parameters.get("maxTokens", 2000)
-    
+
     llm = _create_llm_for_provider(provider, model_name, temperature, max_tokens)
-    
+
     # Determine if this is an agent-based config (has _instructions vs messages)
     is_agent_config = "_instructions" in config or config.get("_enabled", False)
-    
+
     # Pass ld_context to ModelInvoker for ld.variation() correlation
-    return ModelInvoker(
-        llm,
-        tracker,
-        config_key=config_key,
-        is_agent_config=is_agent_config,
-        user_context=ld_context,
-        skip_span_annotation=skip_span_annotation
-    ), config
+    return (
+        ModelInvoker(
+            llm,
+            tracker,
+            config_key=config_key,
+            is_agent_config=is_agent_config,
+            user_context=ld_context,
+            skip_span_annotation=skip_span_annotation,
+        ),
+        config,
+    )
 
 
 def _create_llm_for_provider(
-    provider: str, 
-    model_name: str, 
-    temperature: float, 
-    max_tokens: int
+    provider: str, model_name: str, temperature: float, max_tokens: int
 ) -> BaseChatModel:
     """Create LLM instance for the specified provider.
 
@@ -221,8 +229,8 @@ def _create_llm_for_provider(
         ValueError: If provider is not supported
     """
     # Normalize provider name - handle formats like "Bedrock:Anthropic" from LaunchDarkly
-    provider_normalized = provider.split(':')[0].lower() if ':' in provider else provider.lower()
-    
+    provider_normalized = provider.split(":")[0].lower() if ":" in provider else provider.lower()
+
     if provider_normalized == "bedrock":
         from .bedrock_llm import BedrockConverseLLM, get_bedrock_model_id
 

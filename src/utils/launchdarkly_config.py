@@ -159,7 +159,7 @@ class LaunchDarklyClient:
                     # Store instructions separately (not as messages)
                     config_dict["_instructions"] = agent_dict.get("instructions", "")
                     
-                    tracker = agent.tracker
+                    tracker = agent.create_tracker()
                     # Variation logging is now handled by individual agents
                     return config_dict, tracker, ld_context
                 # If no instructions, this is a completion-based config, fall through
@@ -167,12 +167,12 @@ class LaunchDarklyClient:
             # Agent-based retrieval failed, will try completion-based
             pass
 
-        # Fall back to completion-based config (using .config() method)
+        # Fall back to completion-based config (using .completion_config() method)
         try:
-            config_value = self.ai_client.config(
+            config_value = self.ai_client.completion_config(
                 config_key, ld_context, default_ai_config, {}
             )
-            tracker = config_value.tracker
+            tracker = config_value.create_tracker()
             
             config_dict = self._ai_config_to_dict(config_value)
             
