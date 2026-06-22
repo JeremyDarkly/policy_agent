@@ -26,8 +26,8 @@ interface AgentStep {
 }
 
 // Demo "login switcher" presets. The user key drives LaunchDarkly targeting:
-// - marek-internal-dev is in the `internal-developers` segment
-// - marek-commercial-plan is in the `insurancebot-commercial-experience` segment
+// - eric-internal-dev is in the `internal-developers` segment
+// - eric-commercial-plan is in the `insurancebot-commercial-experience` segment
 // The two segments are mutually exclusive (each excludes the other's key).
 interface DemoUser {
   id: 'internal' | 'commercial';
@@ -45,10 +45,10 @@ interface DemoUser {
 const DEMO_USERS: Record<DemoUser['id'], DemoUser> = {
   internal: {
     id: 'internal',
-    label: 'Marek Poliks',
+    label: 'Eric Pietrowicz',
     badge: 'Internal Dev',
-    userKey: 'marek-internal-dev',
-    userName: 'Marek Poliks',
+    userKey: 'eric-internal-dev',
+    userName: 'Eric Pietrowicz',
     userType: 'internal_dev',
     role: 'Developer',
     plan: 'internal',
@@ -57,10 +57,10 @@ const DEMO_USERS: Record<DemoUser['id'], DemoUser> = {
   },
   commercial: {
     id: 'commercial',
-    label: 'Marek Poliks',
+    label: 'Eric Pietrowicz',
     badge: 'Commercial Plan',
-    userKey: 'marek-commercial-plan',
-    userName: 'Marek Poliks',
+    userKey: 'eric-commercial-plan',
+    userName: 'Eric Pietrowicz',
     userType: 'commercial',
     role: 'Member',
     plan: 'gold',
@@ -408,7 +408,7 @@ function App() {
                 className={`user-switcher-btn ${activeUserId === 'internal' ? 'active' : ''}`}
                 onClick={() => switchUser('internal')}
                 disabled={isLoading || activeUserId === 'internal'}
-                title="Login as Marek Poliks (Internal Dev)"
+                title="Login as Eric Pietrowicz (Internal Dev)"
               >
                 Internal Dev
               </button>
@@ -417,7 +417,7 @@ function App() {
                 className={`user-switcher-btn ${activeUserId === 'commercial' ? 'active' : ''}`}
                 onClick={() => switchUser('commercial')}
                 disabled={isLoading || activeUserId === 'commercial'}
-                title="Login as Marek Poliks (Commercial Plan)"
+                title="Login as Eric Pietrowicz (Commercial Plan)"
               >
                 Commercial Plan
               </button>

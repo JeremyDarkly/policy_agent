@@ -8,7 +8,7 @@ VENV := venv
 VENV_BIN := $(VENV)/bin
 PYTHON_VENV := $(VENV_BIN)/python
 PIP := $(VENV_BIN)/pip
-AWS_PROFILE := marek
+AWS_PROFILE := eric
 AWS_REGION := us-east-1
 
 # Colors for output

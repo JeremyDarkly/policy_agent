@@ -5,8 +5,8 @@ import { useSyncExternalStore } from "react";
  *
  * Each preset drives LaunchDarkly user-key targeting so the same AI Configs
  * can resolve to different variations depending on who is "logged in":
- *   - commercial  -> user_key "marek-commercial-plan" (a regular banking customer)
- *   - internal    -> user_key "marek-internal-dev"    (an internal/employee user)
+ *   - commercial  -> user_key "eric-commercial-plan" (a regular banking customer)
+ *   - internal    -> user_key "eric-internal-dev"    (an internal/employee user)
  *
  * The fields below are forwarded to POST /api/chat and become the LaunchDarkly
  * context attributes (see backend create_user_profile). `domain: "togglebank"`
@@ -15,10 +15,10 @@ import { useSyncExternalStore } from "react";
 export const DEMO_USERS = {
   commercial: {
     id: "commercial",
-    name: "Marek Poliks",
+    name: "Eric Pietrowicz",
     badge: "Customer",
-    userName: "Marek Poliks",
-    userKey: "marek-commercial-plan",
+    userName: "Eric Pietrowicz",
+    userKey: "eric-commercial-plan",
     userType: "customer",
     role: "customer",
     plan: "commercial",
@@ -30,8 +30,8 @@ export const DEMO_USERS = {
     id: "internal",
     name: "Dev Mode",
     badge: "Internal",
-    userName: "Marek Poliks",
-    userKey: "marek-internal-dev",
+    userName: "Eric Pietrowicz",
+    userKey: "eric-internal-dev",
     userType: "internal",
     role: "employee",
     plan: "internal",

@@ -4,17 +4,14 @@
     "version": "2.1.0",
     "created": "2024-11-13",
     "total_questions": 50,
-    "description": "Demo-optimized dataset for single user (Marek Poliks, San Francisco, Gold HMO)",
+    "description": "Demo-optimized dataset for single user (Eric Pietrowicz, San Francisco, Gold HMO)",
     "user_profile": {
-      "name": "Marek Poliks",
+      "name": "Eric Pietrowicz",
       "location": "San Francisco, CA",
       "policy_id": "TH-HMO-GOLD-2024",
       "coverage_type": "Gold HMO"
     },
-    "categories": [
-      "policy",
-      "provider"
-    ]
+    "categories": ["policy", "provider"]
   },
   "questions": [
     {

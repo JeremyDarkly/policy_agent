@@ -18,6 +18,7 @@ cd ui && ./start.sh
 ```
 
 The script will:
+
 - ✅ Auto-install dependencies if missing
 - ✅ Start both backend and frontend
 - ✅ Display URLs to access
@@ -89,6 +90,7 @@ ui/
 ## ✨ Features
 
 ### Real-Time Agent Status
+
 The UI displays a dynamic status box showing which agent is currently working:
 
 - 🔍 **Triage Router**: Analyzing your question
@@ -100,6 +102,7 @@ The UI displays a dynamic status box showing which agent is currently working:
 The status box disappears when the response is ready!
 
 ### Metrics Panel
+
 After each response, users can expand the metrics panel to see:
 
 - **Query Type**: The classified intent (e.g., POLICY_QUESTION, PROVIDER_LOOKUP)
@@ -109,6 +112,7 @@ After each response, users can expand the metrics panel to see:
 - **Agent Count**: Total agents involved in the response
 
 ### User Experience
+
 - Gradient header with ToggleHealth branding
 - Smooth animations for agent transitions
 - Feedback buttons (good/bad service)
@@ -146,12 +150,15 @@ npm run preview
 ## 🎨 Customization
 
 ### Styling
+
 Modify `ui/frontend/src/App.css` to customize colors, fonts, and layout.
 
 ### Avatar
+
 Replace `ui/public/assets/ToggleAvatar.png` with your own avatar image.
 
 ### Agent Icons
+
 Edit the `icon` field in `ui/backend/server.py` to customize agent emojis.
 
 ## 🧪 Testing
@@ -175,10 +182,11 @@ curl http://localhost:8000/health
 ### POST `/api/chat`
 
 **Request:**
+
 ```json
 {
   "userInput": "What are my dental benefits?",
-  "userName": "Marek Poliks",
+  "userName": "Eric Pietrowicz",
   "location": "San Francisco, CA",
   "policyId": "TH-HMO-GOLD-2024",
   "coverageType": "Gold HMO"
@@ -186,6 +194,7 @@ curl http://localhost:8000/health
 ```
 
 **Response:**
+
 ```json
 {
   "response": "Your Gold HMO plan includes comprehensive dental coverage...",
@@ -224,20 +233,24 @@ curl http://localhost:8000/health
 ## 🐛 Troubleshooting
 
 **Backend not connecting to LaunchDarkly?**
+
 - Check your `.env` file in the project root
 - Verify `LAUNCHDARKLY_SDK_KEY` is set correctly
 - Ensure `LAUNCHDARKLY_ENABLED=true`
 
 **AWS credentials expired?**
+
 - Run `make aws-login` from the project root
-- Or manually: `aws sso login --profile marek`
+- Or manually: `aws sso login --profile eric`
 
 **Frontend can't reach backend?**
+
 - Ensure backend is running on port 8000
 - Check CORS settings in `server.py`
 - Verify proxy configuration in `vite.config.ts`
 
 **Avatar not displaying?**
+
 - Ensure `ui/public/assets/ToggleAvatar.png` exists
 - Check browser console for 404 errors
 - Use relative path `/assets/ToggleAvatar.png`
@@ -245,11 +258,13 @@ curl http://localhost:8000/health
 ## 📦 Dependencies
 
 ### Backend
+
 - FastAPI: Web framework
 - Uvicorn: ASGI server
 - Pydantic: Data validation
 
 ### Frontend
+
 - React 18: UI framework
 - Vite: Build tool
 - TypeScript: Type safety
@@ -260,4 +275,3 @@ curl http://localhost:8000/health
 - [Main README](../README.md)
 - [Lambda Synthetic Traffic](../lambda/synthetic_traffic/README.md)
 - [Simulations](../simulations/README.md)
-

@@ -11,7 +11,7 @@ import random
 
 
 def create_user_profile(
-    name: str = "Marek Poliks",
+    name: str = "Eric Pietrowicz",
     location: str = "San Francisco, CA",
     policy_id: str = "POL-12345",
     coverage_type: str = "Gold Plan",
@@ -22,33 +22,33 @@ def create_user_profile(
     plan_override: str | None = None,
 ) -> dict[str, Any]:
     """Create a comprehensive user profile for LaunchDarkly context.
-    
+
     This follows LaunchDarkly's best practices for rich context attributes,
     enabling targeted feature flags, A/B testing, and personalized experiences.
-    
+
     The profile adapts to the domain (togglehealth, togglecell, togglebank) so
     that context fields are coherent with the brand the customer is interacting
     with. This prevents the coherence judge from flagging domain mismatches
     (e.g. health-insurance fields on a banking customer).
-    
+
     Args:
         name: User's full name
         location: City and state
         policy_id: Insurance policy identifier (health) or account ID (bank/cell)
         coverage_type: Type of coverage plan (health) or account type (bank/cell)
         domain: Brand domain — ``togglehealth``, ``togglecell``, or ``togglebank``
-        
+
     Returns:
         Dictionary of user attributes for LaunchDarkly context
     """
     # Parse location
     city, state = location.split(", ") if ", " in location else (location, "CA")
-    
+
     # User key: explicit override wins (used by the demo "login switcher" so we
     # can target by user key directly in LaunchDarkly), otherwise derive from name.
     if not user_key:
         user_key = name.lower().replace(" ", "-")
-    
+
     # Determine timezone from location
     timezone_map = {
         "MA": "America/New_York",
@@ -75,7 +75,6 @@ def create_user_profile(
         "user_key": user_key,
         "name": name,
         "email": f"{user_key}@{email_domain}",
-
         # Location & Time — always US-based
         "location": location,
         "city": city,
@@ -83,33 +82,27 @@ def create_user_profile(
         "zip_code": "94102",
         "timezone": timezone,
         "country": "US",
-
         # Demographics (for segmentation)
         "age_range": "35-44",
         "family_size": 1,
         "has_dependents": False,
         "employment_status": "employed",
-
         # Preferences & Behavior
         "preferred_language": "en",
         "communication_preference": "email",
         "notification_enabled": True,
         "paperless_billing": True,
-
         # Segmentation Attributes (for targeting)
         "engagement_level": "high",
         "lifetime_value": "high",
-
         # Feature Flags Context
         "beta_tester": False,
         "early_access": True,
-
         # Session Metadata
         "session_id": f"session-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
         "last_login": datetime.now().isoformat(),
         "device_type": "web",
         "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-
         # Domain tag (consumed by judges, triage, brand voice)
         "domain": domain,
     }
@@ -128,74 +121,76 @@ def create_user_profile(
         # ("Gold HMO") resolves correctly and the LD segment rules
         # (plan=gold, customer_tier=gold) continue to match.
         account_tier_map = {
-            "Basic": 1, "Standard": 2, "Gold": 3,
-            "Premium": 3, "Private": 4, "Platinum": 4,
+            "Basic": 1,
+            "Standard": 2,
+            "Gold": 3,
+            "Premium": 3,
+            "Private": 4,
+            "Platinum": 4,
         }
         account_tier = next(
             (t for label, t in account_tier_map.items() if label in coverage_type),
             3,
         )
-        tier_label = {1: "bronze", 2: "silver", 3: "gold", 4: "platinum"}.get(
-            account_tier, "gold"
-        )
-        profile.update({
-            "account_id": policy_id,
-            "account_type": coverage_type,
-            "account_tier": account_tier,
-            "plan": tier_label,
-            "customer_segment": f"{tier_label}_member",
-            "customer_tier": tier_label,
-            "member_since": "2023-01-15",
-            "account_status": "active",
-            "currency": "USD",
-
-            "billing_status": "current",
-            "payment_method": "auto_pay",
-            "autopay_enabled": True,
-
-            "risk_profile": "low",
-
-            "search_context": {
-                "primary_location": f"{city}, {state}",
-                "account_type_filter": coverage_type,
+        tier_label = {1: "bronze", 2: "silver", 3: "gold", 4: "platinum"}.get(account_tier, "gold")
+        profile.update(
+            {
+                "account_id": policy_id,
+                "account_type": coverage_type,
                 "account_tier": account_tier,
-            },
-        })
+                "plan": tier_label,
+                "customer_segment": f"{tier_label}_member",
+                "customer_tier": tier_label,
+                "member_since": "2023-01-15",
+                "account_status": "active",
+                "currency": "USD",
+                "billing_status": "current",
+                "payment_method": "auto_pay",
+                "autopay_enabled": True,
+                "risk_profile": "low",
+                "search_context": {
+                    "primary_location": f"{city}, {state}",
+                    "account_type_filter": coverage_type,
+                    "account_tier": account_tier,
+                },
+            }
+        )
 
     elif domain == "togglecell":
         plan_tier_map = {
-            "Basic": 1, "Standard": 2, "Gold": 3,
-            "Plus": 3, "Unlimited": 4,
+            "Basic": 1,
+            "Standard": 2,
+            "Gold": 3,
+            "Plus": 3,
+            "Unlimited": 4,
         }
         plan_tier = next(
             (t for label, t in plan_tier_map.items() if label in coverage_type),
             3,
         )
-        tier_label = {1: "bronze", 2: "silver", 3: "gold", 4: "platinum"}.get(
-            plan_tier, "gold"
-        )
-        profile.update({
-            "account_id": policy_id,
-            "plan_name": coverage_type,
-            "plan_tier": plan_tier,
-            "plan": tier_label,
-            "customer_segment": f"{tier_label}_member",
-            "customer_tier": tier_label,
-            "member_since": "2023-01-15",
-            "account_status": "active",
-
-            "billing_status": "current",
-            "payment_method": "auto_pay",
-            "monthly_amount": 75.00,
-            "billing_cycle": "monthly",
-            "autopay_enabled": True,
-
-            "search_context": {
-                "primary_location": f"{city}, {state}",
-                "plan_type_filter": coverage_type,
+        tier_label = {1: "bronze", 2: "silver", 3: "gold", 4: "platinum"}.get(plan_tier, "gold")
+        profile.update(
+            {
+                "account_id": policy_id,
+                "plan_name": coverage_type,
                 "plan_tier": plan_tier,
-            },
-        })
+                "plan": tier_label,
+                "customer_segment": f"{tier_label}_member",
+                "customer_tier": tier_label,
+                "member_since": "2023-01-15",
+                "account_status": "active",
+                "billing_status": "current",
+                "payment_method": "auto_pay",
+                "monthly_amount": 75.00,
+                "billing_cycle": "monthly",
+                "autopay_enabled": True,
+                "search_context": {
+                    "primary_location": f"{city}, {state}",
+                    "plan_type_filter": coverage_type,
+                    "plan_tier": plan_tier,
+                },
+            }
+        )
 
     else:
         # togglehealth (default)
@@ -204,9 +199,7 @@ def create_user_profile(
             (t for label, t in plan_tier_map.items() if label in coverage_type),
             3,
         )
-        tier_label = {1: "bronze", 2: "silver", 3: "gold", 4: "platinum"}.get(
-            plan_tier, "gold"
-        )
+        tier_label = {1: "bronze", 2: "silver", 3: "gold", 4: "platinum"}.get(plan_tier, "gold")
         network = "Premier Network"
         if "HMO" in coverage_type:
             network = "HMO Network"
@@ -215,40 +208,38 @@ def create_user_profile(
         elif "EPO" in coverage_type:
             network = "EPO Network"
 
-        profile.update({
-            "policy_id": policy_id,
-            "coverage_type": coverage_type,
-            "plan_tier": plan_tier,
-            "plan": tier_label,
-            "network": network,
-            "network_type": "Premier",
-            "member_since": "2023-01-15",
-            "policy_status": "active",
-            "renewal_date": "2025-01-15",
-
-            "billing_status": "current",
-            "payment_method": "auto_pay",
-            "premium_amount": 650.00,
-            "billing_cycle": "monthly",
-            "autopay_enabled": True,
-
-            "customer_segment": f"{tier_label}_member",
-            "customer_tier": tier_label,
-            "risk_profile": "low",
-
-            "primary_care_assigned": True,
-            "has_chronic_conditions": False,
-            "recent_claims_count": 3,
-            "last_claim_date": "2024-10-15",
-            "preferred_providers": ["SPEC-MA-001", "PCP-MA-002"],
-
-            "search_context": {
-                "primary_location": f"{city}, {state}",
-                "network_filter": network,
-                "plan_type_filter": coverage_type,
-                "coverage_tier": plan_tier,
-            },
-        })
+        profile.update(
+            {
+                "policy_id": policy_id,
+                "coverage_type": coverage_type,
+                "plan_tier": plan_tier,
+                "plan": tier_label,
+                "network": network,
+                "network_type": "Premier",
+                "member_since": "2023-01-15",
+                "policy_status": "active",
+                "renewal_date": "2025-01-15",
+                "billing_status": "current",
+                "payment_method": "auto_pay",
+                "premium_amount": 650.00,
+                "billing_cycle": "monthly",
+                "autopay_enabled": True,
+                "customer_segment": f"{tier_label}_member",
+                "customer_tier": tier_label,
+                "risk_profile": "low",
+                "primary_care_assigned": True,
+                "has_chronic_conditions": False,
+                "recent_claims_count": 3,
+                "last_claim_date": "2024-10-15",
+                "preferred_providers": ["SPEC-MA-001", "PCP-MA-002"],
+                "search_context": {
+                    "primary_location": f"{city}, {state}",
+                    "network_filter": network,
+                    "plan_type_filter": coverage_type,
+                    "coverage_tier": plan_tier,
+                },
+            }
+        )
 
     # Plan override: forces both `plan` and `customer_tier` to a non-gold label
     # (e.g. "internal") so the internal-dev user doesn't accidentally satisfy
@@ -263,14 +254,14 @@ def create_user_profile(
 
 def get_targeted_search_context(user_profile: dict[str, Any]) -> dict[str, str]:
     """Extract search-optimized context from user profile.
-    
+
     This creates a focused context dict specifically for RAG queries,
     enabling highly targeted retrieval.  Adapts to the domain stored in
     the profile so only relevant fields are included.
-    
+
     Args:
         user_profile: Full user profile dictionary
-        
+
     Returns:
         Focused context for RAG searches
     """
@@ -284,37 +275,43 @@ def get_targeted_search_context(user_profile: dict[str, Any]) -> dict[str, str]:
     }
 
     if domain == "togglebank":
-        base.update({
-            "account_id": user_profile.get("account_id", ""),
-            "account_type": user_profile.get("account_type", ""),
-            "account_tier": str(user_profile.get("account_tier", "")),
-            "currency": user_profile.get("currency", "USD"),
-        })
+        base.update(
+            {
+                "account_id": user_profile.get("account_id", ""),
+                "account_type": user_profile.get("account_type", ""),
+                "account_tier": str(user_profile.get("account_tier", "")),
+                "currency": user_profile.get("currency", "USD"),
+            }
+        )
     elif domain == "togglecell":
-        base.update({
-            "account_id": user_profile.get("account_id", ""),
-            "plan_name": user_profile.get("plan_name", ""),
-            "plan_tier": str(user_profile.get("plan_tier", "")),
-        })
+        base.update(
+            {
+                "account_id": user_profile.get("account_id", ""),
+                "plan_name": user_profile.get("plan_name", ""),
+                "plan_tier": str(user_profile.get("plan_tier", "")),
+            }
+        )
     else:
-        base.update({
-            "network": user_profile.get("network", ""),
-            "network_type": user_profile.get("network_type", ""),
-            "coverage_type": user_profile.get("coverage_type", ""),
-            "plan_tier": str(user_profile.get("plan_tier", "")),
-            "policy_id": user_profile.get("policy_id", ""),
-            "has_chronic_conditions": str(user_profile.get("has_chronic_conditions", False)),
-        })
+        base.update(
+            {
+                "network": user_profile.get("network", ""),
+                "network_type": user_profile.get("network_type", ""),
+                "coverage_type": user_profile.get("coverage_type", ""),
+                "plan_tier": str(user_profile.get("plan_tier", "")),
+                "policy_id": user_profile.get("policy_id", ""),
+                "has_chronic_conditions": str(user_profile.get("has_chronic_conditions", False)),
+            }
+        )
 
     return base
 
 
 def format_profile_summary(user_profile: dict[str, Any]) -> str:
     """Format user profile as a readable summary.
-    
+
     Args:
         user_profile: User profile dictionary
-        
+
     Returns:
         Formatted string summary
     """
@@ -387,10 +384,9 @@ def format_profile_summary(user_profile: dict[str, Any]) -> str:
 
 # Default profile for demo purposes
 DEFAULT_PROFILE = create_user_profile(
-    name="Marek Poliks",
+    name="Eric Pietrowicz",
     location="San Francisco, CA",
     policy_id="TH-HMO-GOLD-2024",
     coverage_type="Gold HMO",
     domain="togglehealth",
 )
-
