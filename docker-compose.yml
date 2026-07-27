@@ -1,0 +1,107 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: app/backend/Dockerfile
+    container_name: togglebank-backend
+    ports:
+      - "8000:8000"
+    environment:
+      # LaunchDarkly Configuration
+      LAUNCHDARKLY_ENABLED: "true"
+      LAUNCHDARKLY_SDK_KEY: ${LAUNCHDARKLY_SDK_KEY:-}
+      LAUNCHDARKLY_PROJECT_KEY: ${LAUNCHDARKLY_PROJECT_KEY:-}
+      LAUNCHDARKLY_ACCESS_TOKEN: ${LAUNCHDARKLY_ACCESS_TOKEN:-}
+      LAUNCHDARKLY_ENVIRONMENT: ${LAUNCHDARKLY_ENVIRONMENT:-test}
+
+      # Demo user display name
+      DEMO_USER_NAME: ${DEMO_USER_NAME:-Demo User}
+
+      # LLM Provider Configuration
+      LLM_PROVIDER: ${LLM_PROVIDER:-bedrock}
+      LLM_MODEL: ${LLM_MODEL:-claude-3-5-sonnet}
+
+      # AWS Configuration
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_PROFILE: ${AWS_PROFILE:-default}
+
+      # API Keys (if using OpenAI/Anthropic directly)
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # (PYTHONUNBUFFERED / PYTHONDONTWRITEBYTECODE are set in the Dockerfile)
+
+    volumes:
+      # Mount backend code for live reloading
+      - ./app/backend:/app/app/backend
+      - ./.env:/app/.env:ro
+      # Mount AWS credentials for SSO login
+      - ~/.aws:/root/.aws:ro
+
+    networks:
+      - togglebank
+
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: app/ui/Dockerfile
+    container_name: togglebank-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      # Frontend environment (API is reached via the Vite proxy in vite.config.ts)
+      # Same DEMO_USER_NAME drives the UI (Vite requires the VITE_ prefix)
+      VITE_DEMO_USER_NAME: ${DEMO_USER_NAME:-Demo User}
+
+    volumes:
+      # Mount only source code for hot-reload, protect node_modules
+      - ./app/ui/src:/app/src
+      - ./app/ui/public:/app/public
+      - /app/node_modules
+
+    networks:
+      - togglebank
+
+    restart: unless-stopped
+
+  # Opt-in provisioning tool — NOT started by `docker-compose up`.
+  # Runs only when explicitly requested via its profile:
+  #   docker compose run --rm terraform init
+  #   docker compose run --rm terraform apply
+  terraform:
+    image: hashicorp/terraform:latest
+    profiles: ["tools"]
+    working_dir: /infra
+    environment:
+      # Terraform reads TF_VAR_* to populate input variables
+      TF_VAR_launchdarkly_access_token: ${LAUNCHDARKLY_ACCESS_TOKEN:-}
+      TF_VAR_project_key: ${LAUNCHDARKLY_PROJECT_KEY:?LAUNCHDARKLY_PROJECT_KEY must be set in .env}
+      # Same LAUNCHDARKLY_ENVIRONMENT the backend uses; drives target_environment
+      TF_VAR_target_environment: ${LAUNCHDARKLY_ENVIRONMENT:-test}
+    volumes:
+      # Terraform configs + state persist on the host (state is gitignored)
+      - ./infrastructure/launchdarkly:/infra
+    entrypoint: ["terraform"]
+
+networks:
+  togglebank:
+    driver: bridge
+
+# Local development setup
+# Run: docker compose up
+#
+# Access:
+# - Frontend (with hot-reload): http://localhost:5173
+# - Backend API: http://localhost:8000
+# - API Docs: http://localhost:8000/docs
+#
+# Setup:
+# 1. cp .env.example .env
+# 2. aws sso login --profile "$AWS_PROFILE"
+# 3. docker compose up
+#
+# Provision LaunchDarkly AI tools (opt-in, requires no local Terraform install):
+#   docker compose run --rm terraform init
+#   docker compose run --rm terraform apply
+# See TERRAFORM_MIGRATION.md for the full workflow.
