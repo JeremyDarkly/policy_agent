@@ -1,0 +1,21 @@
+# Terraform state — never commit; may contain sensitive values
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Provider plugins and lock cache
+.terraform/
+
+# Plan output files
+*.tfplan
+tfplan
+
+# Local variable overrides (may hold the access token)
+*.auto.tfvars
+terraform.tfvars
+!terraform.tfvars.example
+.env.local

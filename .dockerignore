@@ -1,0 +1,77 @@
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# IDE and editor files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Dependencies
+node_modules
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.tox
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis
+
+# Test and build directories
+.pytest_cache
+.mypy_cache
+.venv
+venv
+env
+build
+dist
+*.egg-info
+
+# Environment files (don't include .env in Docker)
+.env.local
+.env.*.local
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+.DS_Store
+
+# Docker files
+docker-compose.override.yml
+Dockerfile.*
+.dockerignore
+
+# Documentation
+README.md
+CONTRIBUTING.md
+LICENSE
+docs
+
+# CI/CD
+.github
+.gitlab-ci.yml
+.circleci
+
+# OS files
+Thumbs.db
+.AppleDouble
+.LSOverride
+
+# Project specific
+.next
+.nuxt
+dist
+coverage
