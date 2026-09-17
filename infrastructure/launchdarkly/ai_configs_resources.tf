@@ -111,24 +111,6 @@ resource "launchdarkly_ai_config_variation" "triage_agent" {
   ]
 }
 
-resource "launchdarkly_feature_flag_environment" "triage_agent" {
-  flag_id = "${var.project_key}/${launchdarkly_ai_config.triage_agent.key}"
-  env_key = var.target_environment
-
-  on = true
-
-  # Index 0 is LaunchDarkly's auto-added "disabled" variation; index 1 is our
-  # "Default". Serve Default here. Add `rules`/`targets` or change this
-  # fallthrough to let this config deviate from the default.
-  fallthrough = {
-    variation = 1
-  }
-
-  off_variation = 0
-
-  depends_on = [launchdarkly_ai_config_variation.triage_agent]
-}
-
 resource "launchdarkly_ai_config" "account_agent" {
   project_key = var.project_key
   key         = "account_agent"
@@ -213,24 +195,6 @@ resource "launchdarkly_ai_config_variation" "account_agent" {
   ]
 }
 
-resource "launchdarkly_feature_flag_environment" "account_agent" {
-  flag_id = "${var.project_key}/${launchdarkly_ai_config.account_agent.key}"
-  env_key = var.target_environment
-
-  on = true
-
-  # Index 0 is LaunchDarkly's auto-added "disabled" variation; index 1 is our
-  # "Default". Serve Default here. Add `rules`/`targets` or change this
-  # fallthrough to let this config deviate from the default.
-  fallthrough = {
-    variation = 1
-  }
-
-  off_variation = 0
-
-  depends_on = [launchdarkly_ai_config_variation.account_agent]
-}
-
 resource "launchdarkly_ai_config" "branch_agent" {
   project_key = var.project_key
   key         = "branch_agent"
@@ -301,24 +265,6 @@ resource "launchdarkly_ai_config_variation" "branch_agent" {
     launchdarkly_ai_tool.verify_network_status.key,
     launchdarkly_ai_tool.verify_prior_authorization.key,
   ]
-}
-
-resource "launchdarkly_feature_flag_environment" "branch_agent" {
-  flag_id = "${var.project_key}/${launchdarkly_ai_config.branch_agent.key}"
-  env_key = var.target_environment
-
-  on = true
-
-  # Index 0 is LaunchDarkly's auto-added "disabled" variation; index 1 is our
-  # "Default". Serve Default here. Add `rules`/`targets` or change this
-  # fallthrough to let this config deviate from the default.
-  fallthrough = {
-    variation = 1
-  }
-
-  off_variation = 0
-
-  depends_on = [launchdarkly_ai_config_variation.branch_agent]
 }
 
 resource "launchdarkly_ai_config" "scheduler_agent" {
@@ -428,24 +374,6 @@ resource "launchdarkly_ai_config_variation" "scheduler_agent" {
   ]
 }
 
-resource "launchdarkly_feature_flag_environment" "scheduler_agent" {
-  flag_id = "${var.project_key}/${launchdarkly_ai_config.scheduler_agent.key}"
-  env_key = var.target_environment
-
-  on = true
-
-  # Index 0 is LaunchDarkly's auto-added "disabled" variation; index 1 is our
-  # "Default". Serve Default here. Add `rules`/`targets` or change this
-  # fallthrough to let this config deviate from the default.
-  fallthrough = {
-    variation = 1
-  }
-
-  off_variation = 0
-
-  depends_on = [launchdarkly_ai_config_variation.scheduler_agent]
-}
-
 resource "launchdarkly_ai_config" "brand_agent" {
   project_key = var.project_key
   key         = "brand_agent"
@@ -518,24 +446,6 @@ resource "launchdarkly_ai_config_variation" "brand_agent" {
     launchdarkly_ai_tool.check_accessibility_requirements.key,
     launchdarkly_ai_tool.translate_text_aws_translate.key,
   ]
-}
-
-resource "launchdarkly_feature_flag_environment" "brand_agent" {
-  flag_id = "${var.project_key}/${launchdarkly_ai_config.brand_agent.key}"
-  env_key = var.target_environment
-
-  on = true
-
-  # Index 0 is LaunchDarkly's auto-added "disabled" variation; index 1 is our
-  # "Default". Serve Default here. Add `rules`/`targets` or change this
-  # fallthrough to let this config deviate from the default.
-  fallthrough = {
-    variation = 1
-  }
-
-  off_variation = 0
-
-  depends_on = [launchdarkly_ai_config_variation.brand_agent]
 }
 
 resource "launchdarkly_ai_config" "ai_judge_accuracy" {
@@ -627,24 +537,6 @@ resource "launchdarkly_ai_config_variation" "ai_judge_accuracy" {
   tool_keys = []
 }
 
-resource "launchdarkly_feature_flag_environment" "ai_judge_accuracy" {
-  flag_id = "${var.project_key}/${launchdarkly_ai_config.ai_judge_accuracy.key}"
-  env_key = var.target_environment
-
-  on = true
-
-  # Index 0 is LaunchDarkly's auto-added "disabled" variation; index 1 is our
-  # "Default". Serve Default here. Add `rules`/`targets` or change this
-  # fallthrough to let this config deviate from the default.
-  fallthrough = {
-    variation = 1
-  }
-
-  off_variation = 0
-
-  depends_on = [launchdarkly_ai_config_variation.ai_judge_accuracy]
-}
-
 resource "launchdarkly_ai_config" "ai_judge_coherence" {
   project_key = var.project_key
   key         = "ai-judge-coherence"
@@ -707,24 +599,6 @@ resource "launchdarkly_ai_config_variation" "ai_judge_coherence" {
   }]
 
   tool_keys = []
-}
-
-resource "launchdarkly_feature_flag_environment" "ai_judge_coherence" {
-  flag_id = "${var.project_key}/${launchdarkly_ai_config.ai_judge_coherence.key}"
-  env_key = var.target_environment
-
-  on = true
-
-  # Index 0 is LaunchDarkly's auto-added "disabled" variation; index 1 is our
-  # "Default". Serve Default here. Add `rules`/`targets` or change this
-  # fallthrough to let this config deviate from the default.
-  fallthrough = {
-    variation = 1
-  }
-
-  off_variation = 0
-
-  depends_on = [launchdarkly_ai_config_variation.ai_judge_coherence]
 }
 
 # Keyed maps of the explicit resources above, consumed by outputs.tf.

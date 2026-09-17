@@ -34,8 +34,12 @@ services:
       # Mount backend code for live reloading
       - ./app/backend:/app/app/backend
       - ./.env:/app/.env:ro
-      # Mount AWS credentials for SSO login
+      # Mount AWS credentials for SSO login (config/credentials stay read-only)
       - ~/.aws:/root/.aws:ro
+      # ...but botocore must write refreshed SSO tokens back to the cache, so this
+      # nested mount overlays the cache dir as writable. Without it, Bedrock calls
+      # fail with "[Errno 30] Read-only file system: /root/.aws/sso/cache/...".
+      - ~/.aws/sso/cache:/root/.aws/sso/cache
 
     networks:
       - togglebank
