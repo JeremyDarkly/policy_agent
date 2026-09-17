@@ -34,14 +34,18 @@ No local Python, Node, or Terraform install is required.
 cp .env.example .env
 $EDITOR .env                       # fill in the LaunchDarkly + AWS values
 
-# 2. Authenticate to AWS (the backend uses these credentials for Bedrock)
-aws sso login --profile "$AWS_PROFILE"
+# 2. Authenticate to AWS (the backend uses these credentials for Bedrock).
+#    Use the literal profile name — $AWS_PROFILE lives in .env, not your shell.
+aws sso login --profile <your-profile>
 
 # 3. Provision the LaunchDarkly AI Configs, model configs, tools, and agent graph
 docker compose run --rm terraform init
 docker compose run --rm terraform apply
 
-# 4. Run the app
+# 4. Point each AI Config at its Default variation (Terraform can't — see below)
+python3 scripts/set_ai_config_targeting.py
+
+# 5. Run the app
 docker compose up
 ```
 
@@ -51,7 +55,12 @@ Then open:
 - **API docs** — http://localhost:8000/docs
 - **Health** — http://localhost:8000/health
 
-Steps 1–3 are one-time. On later runs, `aws sso login` + `docker compose up` is enough.
+Steps 1–4 are one-time. On later runs, `aws sso login` + `docker compose up` is enough.
+
+> Step 4 is required, not optional. `terraform apply` creates each AI Config with its
+> fallthrough still on variation index 0 — LaunchDarkly's auto-added *disabled*
+> variation — so the agents resolve to nothing until it's moved to `Default`. The
+> script is idempotent; `--dry-run` reports without writing.
 
 > The backend fails fast if the AI Configs don't exist in your project — there are no
 > hardcoded prompts to fall back to, so run the Terraform apply before `docker compose up`.
@@ -98,14 +107,34 @@ docker compose run --rm terraform output     # show managed keys and IDs
 |---|---|---|
 | AI Configs (5 agents + 2 judges) | 7 | `ai_configs_resources.tf` |
 | AI Config variations (`default`, published) | 7 | `ai_configs_resources.tf` |
-| Flag environment settings (turn each config on in `LAUNCHDARKLY_ENVIRONMENT`) | 7 | `ai_configs_resources.tf` |
 | Reusable model configs | 6 | `model_configs.tf` |
 | AI tool definitions | 20 | `tools.tf` |
 | AI agent graph (`banking_agent_graph`) | 1 | `agent_graph.tf` |
 
-Each config is created with a single `Default` variation and its fallthrough pointed at
-it, so no manual targeting step is needed. Variation index 0 is LaunchDarkly's
-auto-added "disabled" variation; index 1 is `Default`.
+41 resources total. Each config is created with a single `Default` variation, and
+LaunchDarkly auto-adds a "disabled" variation ahead of it — so variation index 0 is
+`disabled` and index 1 is `Default`.
+
+### Required after apply: AI Config targeting
+
+`apply` leaves every config's fallthrough on index 0 (`disabled`), so the agents resolve
+to nothing. Fixing that is **not** expressible in Terraform:
+
+- LaunchDarkly rejects writes to AI Config-backed flags through the feature flag API:
+  `401 Unauthorized: {"code":"unauthorized","message":"AI flags may not be modified directly."}`
+- The LaunchDarkly Terraform provider (v3.1.5, latest 3.x) exposes no AI Config
+  targeting resource — `launchdarkly_ai_config` has no `on`/environment attributes.
+
+So the targeting step runs against the AI Configs API instead:
+
+```bash
+python3 scripts/set_ai_config_targeting.py             # move fallthrough to Default
+python3 scripts/set_ai_config_targeting.py --dry-run   # report without writing
+```
+
+It reads `.env` for the token, project, and environment, and is idempotent. The
+equivalent manual step is toggling each of the 7 configs to serve `Default` in the
+LaunchDarkly UI's Targeting tab.
 
 ### Overriding the models
 
@@ -118,13 +147,16 @@ docker compose run --rm \
   terraform apply
 ```
 
-### Known gap: tool attachment
+### Tool attachment (previously a known gap — now works)
 
-Each variation declares `tool_keys`, but the LaunchDarkly Terraform provider sends them
-to an API field that is accepted and ignored — the tools are created, and the intended
-wiring is exposed via the `ai_config_tool_attachments` output, but they are **not**
-actually attached to the served variations by `apply`. Attach them in the LaunchDarkly
-UI if you need them visible in AI Config monitoring; the agents run fine without them.
+Each variation declares `tool_keys`, and provider v3.1.5 **does** attach them to the
+served variation. Verified against a live apply: the tools on each served variation
+match the declared counts exactly (triage 7, accounts 7, branch 6, scheduler 5, brand
+voice 4; the two judges declare none).
+
+Earlier provider versions sent `tool_keys` to an API field that was accepted and
+ignored, so no manual attachment step is needed anymore. The `ai_config_tool_attachments`
+output in `outputs.tf` is a leftover from that workaround and is now redundant.
 
 ## Architecture
 
@@ -256,6 +288,8 @@ policy_agent/
 │   ├── tools.tf
 │   ├── agent_graph.tf
 │   ├── variables.tf  outputs.tf  main.tf  versions.tf
+├── scripts/
+│   └── set_ai_config_targeting.py      # post-apply: point fallthrough at Default
 ├── docker-compose.yml                 # backend + frontend + terraform (tools profile)
 ├── commands.md                        # Command cheat sheet
 └── .env.example
@@ -321,9 +355,15 @@ Compose service hostname. Point it at `http://localhost:8000` before running
 | Symptom | Cause / fix |
 |---|---|
 | Workflow fails at the triage step | AI Configs missing from your project. Run `docker compose run --rm terraform apply` |
-| `ExpiredTokenException` from Bedrock | AWS SSO session expired. Run `aws sso login --profile "$AWS_PROFILE"` on the host; the container reads the refreshed `~/.aws` |
+| Agents resolve to nothing after a clean apply | Fallthrough is still on the `disabled` variation. Run `python3 scripts/set_ai_config_targeting.py` |
+| Terraform: `401 "AI flags may not be modified directly"` | You're on a version of the config that still has `launchdarkly_feature_flag_environment` resources. LaunchDarkly blocks the flag API for AI Config flags — use `scripts/set_ai_config_targeting.py` instead |
+| `docker: unknown command: docker compose` | Compose v2 isn't installed. `brew install docker` gives only the CLI client — no daemon and no Compose plugin. Install a runtime (Colima, OrbStack, Docker Desktop) |
+| `dial unix /var/run/docker.sock: no such file or directory` | No container runtime is running. With Colima: `colima start` |
+| `[Errno 30] Read-only file system: /root/.aws/sso/cache/...` | botocore can't persist a refreshed SSO token. `docker-compose.yml` overlays that cache dir as writable — make sure you have that mount |
+| `ExpiredTokenException` from Bedrock | AWS SSO session expired. Run `aws sso login --profile <your-profile>` on the host; the container reads the refreshed `~/.aws` |
 | Terraform: `LAUNCHDARKLY_PROJECT_KEY must be set in .env` | The `terraform` service requires it — no default, so a missing value fails loudly instead of targeting the wrong project |
-| `AccessDeniedException` on a model | That Bedrock model isn't enabled in your account. Use `TF_VAR_model_override` |
+| Terraform: `403 forbidden` on every create | `LAUNCHDARKLY_ACCESS_TOKEN` is read-only. A personal token can't exceed its owner's member role, so a Reader can't mint a writer token — you need Writer on the member, or a service token |
+| `AccessDeniedException` on a model | Either the model isn't enabled in your account (use `TF_VAR_model_override`), or your IAM role lacks `bedrock:InvokeModel`. If *every* model is denied it's IAM, and no override will help — check with `aws bedrock-runtime converse --model-id <id> ...` |
 | UI loads but chat calls 502 | Backend isn't up yet, or crashed on startup. Check `docker compose logs backend` |
 | Config changes not showing up | Terraform writes to the environment in `LAUNCHDARKLY_ENVIRONMENT`; confirm the backend's SDK key belongs to that same environment |
 

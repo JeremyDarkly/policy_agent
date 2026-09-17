@@ -18,13 +18,14 @@ output "tools" {
   }
 }
 
-// The provider sends tool_keys to the API's `toolKeys` field, which LaunchDarkly
-// accepts and ignores -- the tools never reach the served variation. Only the
-// `tools: [{key, version}]` field attaches them, and no released provider version
-// sends it. This output exposes the intended wiring (with the tool versions the
-// API requires) so scripts/attach_ai_config_tools.py can apply it after apply.
+// Historical: older provider versions sent tool_keys to an API field LaunchDarkly
+// accepted and ignored, so the tools never reached the served variation and had to be
+// attached out-of-band. Provider v3.1.5 attaches them correctly (verified against a
+// live apply -- attached counts match the declared tool_keys), so this output is
+// redundant. Kept for now in case anything downstream reads it; the script it once
+// fed (scripts/attach_ai_config_tools.py) was never committed to this repo.
 output "ai_config_tool_attachments" {
-  description = "Intended tool attachments per AI Config, for scripts/attach_ai_config_tools.py."
+  description = "Redundant as of provider v3.1.5: tool attachments per AI Config, which apply now handles."
   value = {
     for key, variation in local.ai_config_variation_resources : key => {
       variation_key = variation.key
