@@ -1,412 +1,331 @@
-# ToggleHealth / ToggleCell / ToggleBank Multi-Agent System
+# ToggleBank Multi-Agent Support Demo
 
-Multi-agent customer support system demonstrating **LaunchDarkly AI Configs**, **LangGraph**, **AWS Bedrock RAG**, and **G-Eval** evaluation across three demo brands:
+A multi-agent banking support assistant that demonstrates **LaunchDarkly AI Configs**
+end to end: every agent's prompt, model, and tool list is resolved from LaunchDarkly at
+runtime, the whole agent topology is provisioned with Terraform, and two online
+LLM-as-a-judge evaluators score every response back into LaunchDarkly.
 
-- **ToggleHealth** — Medical insurance support (policy coverage, provider lookup, scheduling)
-- **ToggleCell** — Mobile/telecom support (plans, stores, billing)
-- **ToggleBank** — Banking support (accounts, branches, mortgages, loans)
+The stack is **LangGraph** (orchestration) + **AWS Bedrock** (models) + **FastAPI**
+(backend) + **React/Vite** (UI), all run through Docker Compose.
 
-All brands share the same AI agent architecture and LaunchDarkly configuration. Prompts adapt per-domain via the `{{domain}}` template variable in AI Config prompts.
-
-## Quick Start
-
-### Web Interface (Recommended)
-
-First time: `make setup`, fill in `.env`, then provision the LaunchDarkly AI Configs
-with `python scripts/setup_ld_ai_configs.py` (see [LaunchDarkly AI Config Setup](#launchdarkly-ai-config-setup)).
-
-```bash
-# ToggleHealth (medical insurance)
-make togglehealth      # (or just `make`, or `cd ui && ./start.sh`)
-# Open http://localhost:3000
-
-# ToggleCell (telecom)
-make togglecell
-# Open http://localhost:8080
-
-# ToggleBank (banking)
-make togglebank
-# Open http://localhost:8081
+```
+Frontend (Vite, :5173)  ──/api proxy──>  Backend (FastAPI, :8000)  ──>  LangGraph  ──>  Bedrock
+                                                    │
+                                          LaunchDarkly AI Configs
+                                     (prompts, models, tools, judges)
 ```
 
-### Terminal Interface
+## Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| Docker + Compose v2 | Everything (including Terraform) runs in containers |
+| AWS account with Bedrock access | `us-east-1`, with the models in [Models](#models) enabled |
+| AWS CLI with an SSO profile | `~/.aws` is mounted read-only into the backend container |
+| LaunchDarkly account with AI Configs | Plus an existing project to provision into |
+| LaunchDarkly API access token | Needs write access to the project (used only by Terraform) |
+
+No local Python, Node, or Terraform install is required.
+
+## Quick start
 
 ```bash
-make setup   # First time only
-make run     # Interactive chatbot
+# 1. Configure
+cp .env.example .env
+$EDITOR .env                       # fill in the LaunchDarkly + AWS values
+
+# 2. Authenticate to AWS (the backend uses these credentials for Bedrock)
+aws sso login --profile "$AWS_PROFILE"
+
+# 3. Provision the LaunchDarkly AI Configs, model configs, tools, and agent graph
+docker compose run --rm terraform init
+docker compose run --rm terraform apply
+
+# 4. Run the app
+docker compose up
 ```
+
+Then open:
+
+- **UI** — http://localhost:5173
+- **API docs** — http://localhost:8000/docs
+- **Health** — http://localhost:8000/health
+
+Steps 1–3 are one-time. On later runs, `aws sso login` + `docker compose up` is enough.
+
+> The backend fails fast if the AI Configs don't exist in your project — there are no
+> hardcoded prompts to fall back to, so run the Terraform apply before `docker compose up`.
+
+## Environment variables
+
+All of these live in `.env` (copied from `.env.example`). Compose reads that file for
+variable substitution and also bind-mounts it into the backend container.
+
+| Variable | Required | Used by | Description |
+|---|---|---|---|
+| `LAUNCHDARKLY_SDK_KEY` | yes | backend | Server-side SDK key (`sdk-...`) |
+| `LAUNCHDARKLY_PROJECT_KEY` | yes | Terraform | Project to provision into (`TF_VAR_project_key`) |
+| `LAUNCHDARKLY_ACCESS_TOKEN` | yes | Terraform | API token (`api-...`) with project write access |
+| `LAUNCHDARKLY_ENVIRONMENT` | yes | backend + Terraform | Environment key. Drives observability tagging **and** which LD environment Terraform turns each config on in (`TF_VAR_target_environment`). Default `test` |
+| `LAUNCHDARKLY_ENABLED` | no | backend | Set `false` to disable the LD SDK. Default `true` |
+| `AWS_PROFILE` | yes | backend | AWS SSO profile name for Bedrock |
+| `AWS_REGION` | no | backend | Default `us-east-1` |
+| `DEMO_USER_NAME` | no | backend + UI | Display name for the demo user (exported to the UI as `VITE_DEMO_USER_NAME`). Default `Demo User` |
+| `LLM_PROVIDER` | no | backend | Provider fallback. Default `bedrock` |
+| `LLM_MODEL` | no | backend | Model fallback used only if an AI Config carries no model. Default `claude-3-5-sonnet` |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | no | backend | Only if you point the agents at those providers directly |
+
+`.env` is gitignored. Don't commit it.
+
+## Provisioning LaunchDarkly with Terraform
+
+The Terraform config in `infrastructure/launchdarkly/` is the source of truth for the
+demo's LaunchDarkly resources. It runs through the opt-in `terraform` Compose service,
+which maps your `.env` values to `TF_VAR_*` inputs and persists state on the host at
+`infrastructure/launchdarkly/` (gitignored).
+
+```bash
+docker compose run --rm terraform init       # first time only
+docker compose run --rm terraform plan       # preview changes
+docker compose run --rm terraform apply      # create / update
+docker compose run --rm terraform destroy    # tear everything down
+docker compose run --rm terraform output     # show managed keys and IDs
+```
+
+### What gets created
+
+| Resource | Count | File |
+|---|---|---|
+| AI Configs (5 agents + 2 judges) | 7 | `ai_configs_resources.tf` |
+| AI Config variations (`default`, published) | 7 | `ai_configs_resources.tf` |
+| Flag environment settings (turn each config on in `LAUNCHDARKLY_ENVIRONMENT`) | 7 | `ai_configs_resources.tf` |
+| Reusable model configs | 6 | `model_configs.tf` |
+| AI tool definitions | 20 | `tools.tf` |
+| AI agent graph (`banking_agent_graph`) | 1 | `agent_graph.tf` |
+
+Each config is created with a single `Default` variation and its fallthrough pointed at
+it, so no manual targeting step is needed. Variation index 0 is LaunchDarkly's
+auto-added "disabled" variation; index 1 is `Default`.
+
+### Overriding the models
+
+If your AWS account doesn't have all the default Bedrock models enabled, force one
+model across every variation:
+
+```bash
+docker compose run --rm \
+  -e TF_VAR_model_override=us.anthropic.claude-haiku-4-5-20251001-v1:0 \
+  terraform apply
+```
+
+### Known gap: tool attachment
+
+Each variation declares `tool_keys`, but the LaunchDarkly Terraform provider sends them
+to an API field that is accepted and ignored — the tools are created, and the intended
+wiring is exposed via the `ai_config_tool_attachments` output, but they are **not**
+actually attached to the served variations by `apply`. Attach them in the LaunchDarkly
+UI if you need them visible in AI Config monitoring; the agents run fine without them.
 
 ## Architecture
+
+LangGraph `StateGraph` (`app/backend/src/graph/workflow.py`) drives the flow. Triage
+classifies the query and routes to one specialist — or straight to brand voice for
+general questions — and the specialist hands off to brand voice for the final
+customer-facing answer. Judges then score that answer asynchronously.
 
 ```
                         ┌─────────────────┐
                         │   USER QUERY    │
                         └────────┬────────┘
                                  │
-                    ┌────────────┴────────────┐
-                    │                         │
-           ┌───────▼────────┐       ┌────────▼───────┐
-           │   LangGraph    │       │  LD Agent      │
-           │   StateGraph   │       │  Graph SDK     │
-           │  (workflow.py) │       │ (agent_graph   │
-           │                │       │  _runner.py)   │
-           └───────┬────────┘       └────────┬───────┘
-                   └────────────┬────────────┘
-                                │
-                       ┌────────▼────────┐
-                       │ TRIAGE ROUTER   │
-                       │ (triage_agent)  │
-                       └────────┬────────┘
-                                │
-           ┌────────────────────┼────────────────────┐
-           │                    │                    │
-   ┌───────▼────────┐  ┌───────▼────────┐  ┌───────▼────────┐
-   │ POLICY AGENT   │  │ PROVIDER AGENT │  │ SCHEDULER      │
-   │ + RAG (Bedrock)│  │ + RAG (Bedrock)│  │ AGENT          │
-   └───────┬────────┘  └───────┬────────┘  └───────┬────────┘
-           │                    │                    │
-           └────────────────────┼────────────────────┘
-                                │
-                       ┌────────▼────────┐
-                       │  BRAND VOICE    │
-                       │  (brand_agent)  │
-                       └────────┬────────┘
-                                │
-                       ┌────────▼────────┐
-                       │ EVALUATION      │
-                       │ (G-Eval Judges) │
-                       │ → LaunchDarkly  │
-                       └─────────────────┘
+                        ┌────────▼────────┐
+                        │ TRIAGE          │
+                        │ (triage_agent)  │
+                        └────────┬────────┘
+                                 │
+         ┌───────────────┬───────┴───────┬───────────────┐
+         │               │               │               │
+ ┌───────▼──────┐ ┌──────▼───────┐ ┌─────▼────────┐      │
+ │ ACCOUNTS     │ │ BRANCH/ATM   │ │ SCHEDULER    │      │ (general
+ │ account_agent│ │ branch_agent │ │ scheduler_   │      │  questions)
+ │              │ │              │ │ agent        │      │
+ └───────┬──────┘ └──────┬───────┘ └─────┬────────┘      │
+         └───────────────┴───────┬───────┴───────────────┘
+                                 │
+                        ┌────────▼────────┐
+                        │ BRAND VOICE     │
+                        │ (brand_agent)   │
+                        └────────┬────────┘
+                                 │
+                        ┌────────▼────────┐
+                        │ ONLINE JUDGES   │
+                        │ accuracy +      │
+                        │ coherence       │
+                        │ → LaunchDarkly  │
+                        └─────────────────┘
 ```
 
-Two workflow engines can drive the same agent graph:
+The same topology is mirrored in LaunchDarkly as `banking_agent_graph`. That resource is
+a LaunchDarkly-side *representation* for monitoring — the app orchestrates in code via
+LangGraph and does not read it at runtime.
 
-| Engine | Entry Point | Description |
-|--------|-------------|-------------|
-| **LangGraph** | `src/graph/workflow.py` | LangGraph `StateGraph` with explicit node/edge definitions |
-| **LD Agent Graph** | `src/graph/agent_graph_runner.py` | Traverses the graph structure defined in LaunchDarkly, resolving AI Configs at each node |
+### Agents
 
-## Agents & Judges
+| Component | AI Config key | Mode | Model | Purpose |
+|---|---|---|---|---|
+| Triage | `triage_agent` | agent | Claude Sonnet 5 | Classify intent, route to a specialist |
+| Accounts & Products | `account_agent` | agent | Llama 3.1 70B | Account types, balances, fees, interest, product terms |
+| Branch & ATM | `branch_agent` | agent | Claude Haiku 4.5 | Find nearby branches and ATMs, their services and hours |
+| Scheduler | `scheduler_agent` | agent | Amazon Nova Pro | Books time with a banker, requests callbacks |
+| Brand Voice | `brand_agent` | agent | Claude Haiku 4.5 | Rewrites the specialist answer in brand voice (terminal node) |
 
-| Component | LD Config Key | RAG | Purpose |
-|-----------|---------------|-----|---------|
-| **Triage Router** | `triage_agent` | No | Classify query intent and route |
-| **Policy Specialist** | `policy_agent` | Yes | Coverage, benefits, claims |
-| **Provider Specialist** | `provider_agent` | Yes | Find doctors, network status |
-| **Scheduler** | `scheduler_agent` | No | Schedule callbacks |
-| **Brand Voice** | `brand_agent` | No | Personalize response tone |
-| **Accuracy Judge** | `ai-judge-accuracy` | - | G-Eval factual accuracy (threshold: 0.8) |
-| **Coherence Judge** | `ai-judge-coherence` | - | G-Eval response quality (threshold: 0.7) |
+There is **no RAG** in the current build. The customer's account/location profile
+(`app/backend/src/utils/user_profile.py`) is the source of truth the specialists answer
+from — and what the accuracy judge grades against.
 
-## LaunchDarkly AI Config Setup
+### Judges
 
-Every agent prompt and model is resolved from LaunchDarkly AI Configs at runtime — if
-they don't exist in your project, the workflow fails at the triage step. The project
-needs these seven configs:
+Both judges use LaunchDarkly's `judge` config mode, which backs them with an
+auto-generated metric. They run in background threads on every response.
 
-**Agents (Agent-based configs):**
-- `triage_agent`
-- `policy_agent` (custom param: `awskbid` = your-policy-kb-id)
-- `provider_agent` (custom param: `awskbid` = your-provider-kb-id)
-- `scheduler_agent`
+| Judge | AI Config key | Metric key | Passing threshold |
+|---|---|---|---|
+| Accuracy | `ai-judge-accuracy` | `$ld:ai:judge:accuracy` | 0.8 |
+| Coherence | `ai-judge-coherence` | `$ld:ai:judge:coherence` | 0.7 |
 
-**Brand (Completion-based config):**
-- `brand_agent`
+### Demo users
 
-**Judges (Agent-based configs):**
-- `ai-judge-accuracy`
-- `ai-judge-coherence`
+The UI ships a "fake login" switcher (`app/ui/src/lib/demoUser.ts`) with two presets
+that map to different LaunchDarkly user keys, so the same AI Configs can resolve to
+different variations depending on who is signed in:
 
-### Create them automatically
+| Preset | LD user key | Context |
+|---|---|---|
+| Customer | `eric-commercial-plan` | Everyday Current Account holder |
+| Internal | `eric-internal-dev` | Internal/employee user, Premier Current Account |
 
-Don't build these by hand. Set `LAUNCHDARKLY_ACCESS_TOKEN` (with the **writeProject**
-scope) and `LAUNCHDARKLY_PROJECT_KEY` in `.env`, then run:
+### Observability
 
-```bash
-python scripts/setup_ld_ai_configs.py --dry-run   # preview
-python scripts/setup_ld_ai_configs.py             # create all 7 (idempotent)
-```
+The backend initializes OpenTelemetry **before** any LLM imports and exports traces to
+**LaunchDarkly Monitor** via `ObservabilityPlugin` from `ldobserve`. Bedrock, FastAPI,
+botocore, and LangChain are auto-instrumented; workflow nodes add explicit parent spans,
+and the model invoker annotates spans with `ld.ai_config.key` so traces correlate to AI
+Configs. See `app/backend/src/utils/observability.py`.
 
-This reads the canonical definitions in [`scripts/ld_ai_configs/`](scripts/ld_ai_configs/)
-(real prompts, models, and `awskbid` params, with the `{{domain}}` template preserved)
-and creates each config with its variation served by default. Models can be overridden
-for every config with `LD_SETUP_MODEL=<bedrock-model-id>` if your AWS account doesn't
-have the defaults enabled.
+## API
 
-If you're driving this from Claude Code, the [`setup-launchdarkly`](.claude/skills/setup-launchdarkly/SKILL.md)
-skill walks through the whole flow.
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/chat` | Run the full workflow, return the answer with metrics |
+| `POST` | `/api/chat/stream` | Server-sent-events variant with per-stage updates |
+| `GET` | `/api/logs/stream` | SSE feed of pipeline logs (drives the UI terminal) |
+| `GET` | `/api/evaluation/{request_id}` | Judge scores for a completed request |
+| `POST` | `/api/feedback` | Send thumbs up/down to LaunchDarkly as feedback |
+| `GET` | `/api/token-status` | AWS SSO token expiry status |
+| `GET` | `/health` | Health check |
 
-You can **reuse the same shared Bedrock Knowledge Bases** as the reference demo — the
-policy/provider definitions already point at them (`PHC7IW8FTM`, `RV4PHKDQA4`). See
-[RAG Knowledge Base Data](#rag-knowledge-base-data) to use your own instead.
-
-## Observability
-
-All execution is instrumented with OpenTelemetry and exported to **LaunchDarkly Monitor > Traces** via the `ObservabilityPlugin` from `ldobserve`.
-
-- `BedrockInstrumentor` auto-creates spans for every LLM call
-- Explicit spans in workflow/handler code provide the parent context
-- `ModelInvoker` annotates spans with `ld.ai_config.key` for AI Config correlation
-
-See `src/utils/observability.py` for initialization details.
-
-## UI
-
-Three React frontends share a single FastAPI backend:
-
-| Frontend | Brand | Port | Command |
-|----------|-------|------|---------|
-| `ui/frontend/` | ToggleHealth (medical insurance) | 3000 | `make ui` |
-| `ui/frontend-togglecell/` | ToggleCell (telecom) | 8080 | `make togglecell` |
-| `ui/frontend-togglebank/` | ToggleBank (banking) | 8081 | `make togglebank` |
-
-The backend (`ui/backend/server.py`) runs on port 8000 and proxies requests to the multi-agent workflow.
-
-See [ui/README.md](ui/README.md) for full UI documentation.
-
-## Lambda: Synthetic Traffic Generator
-
-Scheduled Lambda functions generate synthetic traffic by exercising the full agent pipeline on a timer (default: hourly, 10 iterations per invocation).
-
-| Handler | File | Engine |
-|---------|------|--------|
-| **LangGraph** | `lambda/synthetic_traffic/handler.py` | `src/graph/workflow.py` |
-| **Agent Graph** | `lambda/synthetic_traffic/handler_agent_graph.py` | LD Agent Graph SDK |
-
-Infrastructure is defined in Terraform (`lambda/synthetic_traffic/terraform/main.tf`) with deployment via `deploy.sh`.
-
-See [lambda/synthetic_traffic/README.md](lambda/synthetic_traffic/README.md) for architecture, trace hierarchy, and deployment instructions.
-
-## Simulations
-
-Scripts in `simulations/` generate synthetic metrics for LaunchDarkly experiments **without** making real model calls:
-
-| Script | Purpose |
-|--------|---------|
-| `simulate_experiments.py` | General experiment simulator for policy & provider agents |
-| `simulate_policy_prompts.py` | Prompt-variation experiments |
-| `simulate_brand_agent.py` | Brand voice agent metrics |
-| `run_batched_experiments.py` | Orchestrate batch runs with configurable intervals |
-| `guarded_release_accuracy_simulator.py` | Demo guarded-release rollback with fake accuracy timelines |
-
-```bash
-ITERATIONS=200 python simulations/simulate_experiments.py
-```
-
-See [simulations/README.md](simulations/README.md) for details.
-
-## Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `scripts/setup_ld_ai_configs.py` | Create all 7 AI Configs (triage/policy/provider/scheduler/brand + 2 judges) in your LaunchDarkly project from `ld_ai_configs/` |
-| `scripts/ld_ai_configs/*.json` | Canonical AI Config definitions (prompts, models, `awskbid`) used by the setup script |
-| `scripts/upload_tools_to_launchdarkly.py` | Upload tool definitions from `launchdarkly_tools_library.json` to LaunchDarkly |
-| `scripts/launchdarkly_tools_library.json` | 20 pre-built MCP tool definitions (Snowflake, calendar, NLP, healthcare, etc.) |
-
-```bash
-make upload-tools
-```
-
-See [scripts/README.md](scripts/README.md) for the full tool catalog.
-
-## Testing & Evaluation
-
-Test harnesses live in `tests/` and run real agent evaluations:
-
-```bash
-# Full test suite (50 iterations)
-make test-suite
-
-# Quick test (5 iterations)
-make test-quick
-
-# Evaluate a specific agent
-python tests/test_agent_suite.py --evaluate policy_agent --limit 10
-```
-
-| Script | Purpose |
-|--------|---------|
-| `test_agent_suite.py` | End-to-end circuit test with real model calls, CSV/JSON export |
-| `test_agent_evaluation.py` | Per-agent evaluation with G-Eval scoring |
-| `test_evaluation_mode_demo.py` | Demo script for evaluation mode |
-| `test_metrics_diagnostic.py` | Diagnostic for metric delivery and attribution |
-
-Test datasets are in `test_data/`:
-- `qa_dataset.json` — Full question-answer dataset
-- `qa_dataset_demo.json` — Smaller demo subset
-
-## RAG Knowledge Base Data
-
-Markdown documents in `data/markdown/` serve as the source corpus for AWS Bedrock Knowledge Bases:
-
-| Directory | Count | Content |
-|-----------|-------|---------|
-| `policies/` | 90 | ToggleHealth insurance plans (HMO Gold, PPO Platinum, EPO Silver, HDHP Bronze), claims, pharmacy, special programs |
-| `providers/` | 280 | ToggleHealth provider directory (PCPs, specialists, mental health, pharmacies across 20 states) |
-| `togglecell-plans/` | 23 | ToggleCell mobile plans (5G Unlimited, Family Share, SIM Flex, Pay-As-You-Go), coverage, devices |
-| `togglecell-stores/` | 20 | ToggleCell retail store locations across the UK |
-| `togglebank-accounts/` | 64 | ToggleBank account products (current accounts, savings, ISAs, mortgages, loans, credit cards, insurance, investments), guides, and reference docs |
-| `togglebank-branches/` | 30 | ToggleBank branch locations across the UK and international |
-
-## Environment Setup
-
-Copy `.env.example` to `.env` and fill in your values:
-
-```bash
-cp .env.example .env
-```
-
-Required variables:
-
-| Variable | Description |
-|----------|-------------|
-| `LAUNCHDARKLY_SDK_KEY` | Server-side SDK key (`sdk-...`) |
-| `LAUNCHDARKLY_PROJECT_KEY` | LaunchDarkly project key |
-| `LAUNCHDARKLY_ACCESS_TOKEN` | LaunchDarkly API access token (`api-...`) for tool uploads |
-| `AWS_PROFILE` | AWS SSO profile name |
-| `AWS_REGION` | AWS region (default: `us-east-1`) |
-
-Optional:
-
-| Variable | Description |
-|----------|-------------|
-| `BEDROCK_POLICY_KB_ID` | Bedrock Knowledge Base ID for policy documents |
-| `BEDROCK_PROVIDER_KB_ID` | Bedrock Knowledge Base ID for provider documents |
-| `LLM_PROVIDER` | LLM provider fallback (default: `bedrock`) |
-| `LLM_MODEL` | Model fallback (default: `claude-3-5-sonnet`) |
-
-## Makefile Commands
-
-```bash
-make setup          # Install dependencies & check AWS
-make run            # Interactive chatbot (terminal)
-make ui             # ToggleHealth web UI (alias for run-ui; also the default `make`)
-make togglehealth   # ToggleHealth web UI (alias for run-ui)
-make togglecell     # ToggleCell web UI
-make togglebank     # ToggleBank web UI
-make test-suite     # Full agent test suite (50 iterations)
-make test-quick     # Quick test (5 iterations)
-make upload-tools   # Upload tools to LaunchDarkly
-make verify         # Check AWS + system status
-make info           # Show system information
-make format         # Format code with black
-make lint           # Lint with ruff
-make clean          # Remove cache files
-```
-
-## Project Structure
+## Project structure
 
 ```
 policy_agent/
-├── src/
-│   ├── agents/                     # Agent implementations
-│   │   ├── triage_router.py
-│   │   ├── policy_specialist.py
-│   │   ├── provider_specialist.py
-│   │   ├── scheduler_specialist.py
-│   │   └── brand_voice_agent.py
-│   ├── evaluation/                 # G-Eval judges
-│   │   ├── judge.py
-│   │   └── agent_evaluator.py
-│   ├── graph/                      # Workflow orchestration
-│   │   ├── workflow.py             # LangGraph StateGraph
-│   │   ├── agent_graph_runner.py   # LD Agent Graph traversal
-│   │   └── state.py               # Shared state definitions
-│   ├── tools/                      # RAG & utility tools
-│   │   ├── bedrock_rag.py
-│   │   ├── policy_db.py
-│   │   ├── provider_db.py
-│   │   └── calendar.py
-│   └── utils/
-│       ├── launchdarkly_config.py  # LD SDK initialization
-│       ├── observability.py        # OpenTelemetry + LD tracing
-│       ├── bedrock_llm.py          # Bedrock model invoker
-│       ├── llm_config.py           # Model config resolution
-│       ├── user_profile.py         # User context for LD
-│       ├── aws_sso.py              # AWS SSO token management
-│       ├── aws_token_monitor.py    # Token expiry monitoring
-│       └── fetch_ai_config_prompts.py
-├── data/
-│   └── markdown/                   # RAG knowledge base source
-│       ├── policies/               # ToggleHealth policy docs (90)
-│       ├── providers/              # ToggleHealth provider directory (280)
-│       ├── togglecell-plans/       # ToggleCell plan docs (23)
-│       ├── togglecell-stores/      # ToggleCell store locations (20)
-│       ├── togglebank-accounts/   # ToggleBank account products (64)
-│       └── togglebank-branches/    # ToggleBank branch locations (30)
-├── ui/
-│   ├── backend/                    # FastAPI server
-│   │   ├── server.py
-│   │   └── requirements.txt
-│   ├── frontend/                   # React + Vite (ToggleHealth)
-│   ├── frontend-togglecell/        # React + Vite (ToggleCell)
-│   ├── frontend-togglebank/        # React + Vite (ToggleBank)
-│   ├── public/                     # Shared static assets
-│   └── start.sh                    # Auto-setup launcher
-├── lambda/
-│   └── synthetic_traffic/          # Scheduled Lambda traffic generator
-│       ├── handler.py              # LangGraph handler
-│       ├── handler_agent_graph.py  # LD Agent Graph handler
-│       ├── common.py               # Shared user/question pools
-│       ├── terraform/main.tf       # Infrastructure as code
-│       ├── deploy.sh               # Build & deploy script
-│       ├── Dockerfile
-│       └── requirements-lambda.txt
-├── simulations/                    # Synthetic metric generators (no AI calls)
-│   ├── simulate_experiments.py
-│   ├── simulate_policy_prompts.py
-│   ├── simulate_brand_agent.py
-│   ├── run_batched_experiments.py
-│   └── guarded_release_accuracy_simulator.py
-├── scripts/
-│   ├── upload_tools_to_launchdarkly.py
-│   └── launchdarkly_tools_library.json
-├── tests/                          # Agent evaluation harnesses
-│   ├── test_agent_suite.py
-│   ├── test_agent_evaluation.py
-│   ├── test_evaluation_mode_demo.py
-│   └── test_metrics_diagnostic.py
-├── test_data/
-│   ├── qa_dataset.json
-│   └── qa_dataset_demo.json
-├── interactive_chatbot.py          # Terminal chatbot
-├── Makefile
-├── requirements.txt
-├── pyproject.toml
+├── app/
+│   ├── backend/                       # FastAPI + LangGraph service (:8000)
+│   │   ├── server.py                  # API, SSE streaming, metrics, feedback
+│   │   ├── requirements.txt
+│   │   ├── Dockerfile
+│   │   └── src/
+│   │       ├── agents/                # triage_router, account_specialist,
+│   │       │                          # branch_specialist, scheduler_specialist,
+│   │       │                          # brand_voice_agent
+│   │       ├── graph/                 # workflow.py (StateGraph), state.py
+│   │       ├── evaluation/            # judge.py, agent_evaluator.py (G-Eval)
+│   │       ├── tools/                 # calendar.py (appointment slots/booking)
+│   │       └── utils/                 # LD client, observability, Bedrock invoker,
+│   │                                  # model config resolution, user profiles,
+│   │                                  # AWS SSO + token monitoring
+│   └── ui/                            # React + Vite + shadcn/ui (:5173)
+│       ├── src/
+│       │   ├── pages/                 # Index, NotFound
+│       │   ├── components/            # ChatWidget, Terminal, ui/ (shadcn)
+│       │   └── lib/demoUser.ts        # Demo login presets → LD context
+│       ├── vite.config.ts             # /api proxied to http://backend:8000
+│       └── Dockerfile
+├── infrastructure/launchdarkly/       # Terraform: AI Configs, models, tools, graph
+│   ├── ai_configs_resources.tf
+│   ├── model_configs.tf
+│   ├── tools.tf
+│   ├── agent_graph.tf
+│   ├── variables.tf  outputs.tf  main.tf  versions.tf
+├── docker-compose.yml                 # backend + frontend + terraform (tools profile)
+├── commands.md                        # Command cheat sheet
 └── .env.example
 ```
 
-## Key Features
+## Models
 
-### Dynamic AI Config Management
-All prompts and model configurations are managed in LaunchDarkly AI Configs -- zero hardcoded prompts in application code. Model selection, prompt engineering, and agent behavior can be changed via LaunchDarkly without redeployment.
+Enable these in Bedrock (`us-east-1`), or set `TF_VAR_model_override` to a model you do
+have. Model configs are reusable resources referenced by variation via
+`model_config_key`.
 
-### Multi-Domain Support
-A single set of AI Configs powers ToggleHealth, ToggleCell, and ToggleBank. The `{{domain}}` template variable in prompts adapts agent behavior to the active brand.
+| Model config key | Bedrock model id | Params |
+|---|---|---|
+| `claude-sonnet-5` | `us.anthropic.claude-sonnet-5` | defaults |
+| `llama-3-1-70b-accounts` | `us.meta.llama3-1-70b-instruct-v1:0` | `temperature=0.1` |
+| `claude-haiku-4-5-branch` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | `temperature=0.1` |
+| `nova-pro` | `us.amazon.nova-pro-v1:0` | defaults |
+| `claude-haiku-4-5-brand-voice` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | `temperature=0.9`, `max_tokens=10000` |
+| `claude-sonnet-4` | `us.anthropic.claude-sonnet-4-20250514-v1:0` | `temperature=0.1` |
 
-### Dual Workflow Engines
-The system supports two orchestration approaches: a LangGraph `StateGraph` with explicit Python node/edge definitions, and the LaunchDarkly Agent Graph SDK which resolves graph structure from the LaunchDarkly platform.
+Every model config is a ForceNew resource in the provider — editing one replaces it
+rather than updating in place.
 
-### RAG-Only Specialists
-Policy and Provider agents use exclusively Bedrock Knowledge Base retrieval. All responses are grounded in RAG documents with no database fallback or hardcoded data.
+## Development
 
-### Online G-Eval Judges
-Evaluation runs asynchronously on every response, sending scores to LaunchDarkly as experiment metrics (`$ld:ai:judge:accuracy`, `$ld:ai:judge:coherence`).
+```bash
+docker compose up                  # both services
+docker compose up backend          # backend only
+docker compose logs -f backend     # tail backend logs
+docker compose restart backend     # pick up backend code changes
+docker compose down                # stop
+```
 
-### AI Config Experiments
-Full LaunchDarkly experiment support: duration, tokens, cost per agent, per-agent accuracy evaluation, A/B testing across models (Sonnet, Nova, Llama, Haiku), and CUPED variance reduction.
+- **Frontend** hot-reloads: `app/ui/src` and `app/ui/public` are bind-mounted, and
+  `node_modules` is protected by an anonymous volume.
+- **Backend** does *not* auto-reload. The source is bind-mounted, but uvicorn runs
+  without `--reload`, so restart the container after editing Python.
+- **Rebuild** after dependency changes: `docker compose build backend` (or `frontend`).
 
-### Observability
-OpenTelemetry instrumentation exports structured traces to LaunchDarkly Monitor, with auto-instrumented Bedrock LLM spans nested under explicit workflow spans.
+### UI tests
 
-## Requirements
+```bash
+docker compose exec frontend npm run test    # vitest
+docker compose exec frontend npm run lint    # eslint
+```
 
-- Python 3.12+ (the code uses PEP 701 multiline f-strings — 3.11 will not parse `ui/backend/server.py`)
-- Node.js 18+ (for UI frontends)
-- AWS CLI with SSO configured
-- LaunchDarkly account with AI Configs enabled (run `scripts/setup_ld_ai_configs.py` to provision them)
-- AWS Bedrock access (us-east-1)
+### Running outside Docker
+
+Supported but not the primary path. The backend needs **Python 3.12+** (the code uses
+PEP 701 multiline f-strings, which 3.11 cannot parse):
+
+```bash
+pip install -r app/backend/requirements.txt
+python app/backend/server.py          # run from the repo root so .env is found
+```
+
+For the frontend, `app/ui/vite.config.ts` proxies `/api` to `http://backend:8000` — the
+Compose service hostname. Point it at `http://localhost:8000` before running
+`npm ci && npm run dev` outside Docker.
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| Workflow fails at the triage step | AI Configs missing from your project. Run `docker compose run --rm terraform apply` |
+| `ExpiredTokenException` from Bedrock | AWS SSO session expired. Run `aws sso login --profile "$AWS_PROFILE"` on the host; the container reads the refreshed `~/.aws` |
+| Terraform: `LAUNCHDARKLY_PROJECT_KEY must be set in .env` | The `terraform` service requires it — no default, so a missing value fails loudly instead of targeting the wrong project |
+| `AccessDeniedException` on a model | That Bedrock model isn't enabled in your account. Use `TF_VAR_model_override` |
+| UI loads but chat calls 502 | Backend isn't up yet, or crashed on startup. Check `docker compose logs backend` |
+| Config changes not showing up | Terraform writes to the environment in `LAUNCHDARKLY_ENVIRONMENT`; confirm the backend's SDK key belongs to that same environment |
 
 ## License
 
