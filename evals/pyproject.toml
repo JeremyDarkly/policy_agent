@@ -1,0 +1,24 @@
+[project]
+name = "policy-agent-evals"
+version = "0.1.0"
+description = "Offline evaluations of the ToggleBank policy agent, run from code with the LaunchDarkly AI SDK"
+requires-python = ">=3.12"
+dependencies = [
+  "launchdarkly-ai-server @ git+https://github.com/launchdarkly/python-ai-sdk.git@main#subdirectory=packages/client",
+  "launchdarkly-ai-openai-messages @ git+https://github.com/launchdarkly/python-ai-sdk.git@main#subdirectory=packages/openai-messages",
+  "launchdarkly-ai-langchain-messages @ git+https://github.com/launchdarkly/python-ai-sdk.git@main#subdirectory=packages/langchain-messages",
+  "langchain-aws>=1.0",
+  "launchdarkly-server-sdk>=9.0",
+  "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+notebook = [
+  "jupytext>=1.16",
+  "ipykernel>=6",
+  "nbclient>=0.10",
+  "jupyterlab>=4",
+]
+
+[tool.uv]
+package = false
