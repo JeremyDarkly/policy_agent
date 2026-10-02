@@ -112,12 +112,16 @@
 # %% [markdown]
 # ## Settings
 #
+# - **`ENV_FILE_NAME`** picks the env file, and so the LaunchDarkly account and project, from the repo root.
+#   `POLICY_AGENT_ENV_FILE` overrides it. **Restart the kernel after changing it:** the SDK client keeps the account
+#   it started with.
 # - **`RUN`** turns each section on or off.
 # - **`QUICK`** switches to the 2-row dataset `evals/policy_agent_dataset_quick.jsonl`, uploaded with the key `policy_agent_dataset_quick`.
 # - **`CREATE_MISSING_ASSETS`** lets Step 1 create the `find_branch` tool and the two OpenAI judges in the project
 #   when they're missing. Off by default, because these live outside Terraform.
 
 # %%
+ENV_FILE_NAME = ".env.staging"  # e.g. ".env.staging-org" for another LaunchDarkly account
 RUN = {
     "first_eval": True,
     "smoke": True,
@@ -159,8 +163,10 @@ def repo_root() -> Path:
     raise FileNotFoundError("Run the notebook from inside the policy_agent repo")
 
 
-ENV_FILE = Path(os.getenv("POLICY_AGENT_ENV_FILE") or repo_root() / ".env.staging")
-load_dotenv(ENV_FILE)
+ENV_FILE = Path(os.getenv("POLICY_AGENT_ENV_FILE") or repo_root() / ENV_FILE_NAME)
+if not ENV_FILE.is_file():
+    raise FileNotFoundError(f"{ENV_FILE} not found: check ENV_FILE_NAME in Settings")
+load_dotenv(ENV_FILE, override=True)  # the chosen file wins over anything loaded earlier in this kernel
 for target, source in {
     "LD_API_TOKEN": "LAUNCHDARKLY_ACCESS_TOKEN",
     "LD_SDK_KEY": "LAUNCHDARKLY_SDK_KEY",
@@ -169,8 +175,10 @@ for target, source in {
     "LD_STREAM_URI": "LAUNCHDARKLY_STREAM_URI",
     "LD_EVENTS_URI": "LAUNCHDARKLY_EVENTS_URI",
 }.items():
-    if not os.getenv(target) and os.getenv(source):
+    if os.getenv(source):
         os.environ[target] = os.environ[source]
+    else:
+        os.environ.pop(target, None)  # don't keep a value from a previously chosen file
 
 PROJECT_KEY = os.environ["LAUNCHDARKLY_PROJECT_KEY"]  # policy-agent
 DATASET_KEY = "policy_agent_dataset_quick" if QUICK else "policy_agent_dataset"
@@ -200,7 +208,7 @@ def report(result) -> None:
     print(f"run page: {result.url}")
 
 
-print(f"project={PROJECT_KEY}  api={os.environ['LD_API_BASE_URI']}  dataset={DATASET_KEY}")
+print(f"env file={ENV_FILE.name}  project={PROJECT_KEY}  dataset={DATASET_KEY}")
 
 # %% [markdown]
 # ## Step 1: Check the assets in LaunchDarkly
@@ -423,7 +431,7 @@ class RunLog:
 #
 # A generation-only run: every row goes to OpenAI, and with no criteria every row that produces an output passes.
 
-# %% jupyter={"outputs_hidden": true}
+# %%
 if RUN["first_eval"]:
     log = RunLog()
     result = await evals.run(
