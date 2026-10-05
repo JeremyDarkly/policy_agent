@@ -5,6 +5,7 @@ Evaluations run from code with the LaunchDarkly Python AI SDK against the stagin
 | File | What it is |
 |---|---|
 | `offline_evals_walkthrough.py` | Notebook (jupytext percent format) that walks through the *Offline Evals from Code* guide |
+| `offline_evals_customer.py` | Customer version of the notebook: runs against your own production project, with no staging setup or asset checks |
 | `run_policy_agent_eval.py` | Script: evaluates the running agent via `/api/chat` with a judge and a routing scorer |
 | `policy_agent_dataset.jsonl` | 6-row dataset; upload in the staging UI with key `policy_agent_dataset` |
 | `policy_agent_dataset_quick.jsonl` | 2-row dataset for cheap practice runs; key `policy_agent_dataset_quick` |
@@ -30,6 +31,28 @@ because it carries run outputs; edit the `.py`.
 
 Every run counts against the project's daily LaunchDarkly token limit. Use the notebook's `RUN` switches and `QUICK`
 mode to keep practice runs small.
+
+## Customer notebook
+
+`offline_evals_customer.py` is the version to give customers. It uses production LaunchDarkly. The project, dataset,
+judge and tool keys are settings at the top. It doesn't create or check anything in LaunchDarkly: its "Before you
+start" section lists what to create in the UI, with the rubrics and tool schema to copy. It reads `LD_API_TOKEN`,
+`LD_SDK_KEY` and `OPENAI_API_KEY` from the environment, and asks for any that are missing with hidden input.
+
+It imports from [`launchdarkly-ai-python`](https://pypi.org/project/launchdarkly-ai-python/). This folder's
+`pyproject.toml` includes that package, so the notebook runs in `evals/.venv`. There it uses the git `main` SDK that the
+internal notebook is pinned to. Customers install from PyPI into any Python 3.12+ environment:
+
+```sh
+pip install launchdarkly-ai-python launchdarkly-ai-openai-messages launchdarkly-ai-langchain-messages langchain-aws
+```
+
+Build the blank copy to share it. Rerun this after any edit to the `.py`:
+
+```sh
+uv run jupytext --to ipynb --update-metadata '{"jupytext":null}' \
+  -o offline_evals_customer_blank.ipynb offline_evals_customer.py
+```
 
 ## Share a blank notebook
 

@@ -10,6 +10,7 @@ dependencies = [
   "langchain-aws>=1.0",
   "launchdarkly-server-sdk>=9.0",
   "python-dotenv>=1.0",
+  "launchdarkly-ai-python>=0.1.8",
 ]
 
 [dependency-groups]

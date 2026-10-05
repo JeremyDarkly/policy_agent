@@ -1158,6 +1158,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "launchdarkly-ai-python"
+version = "0.1.8"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "launchdarkly-ai-server" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/29/ca/ab7fa7457597d93541d2233d821988a4d9a234f38aeed116af91c717ec19/launchdarkly_ai_python-0.1.8.tar.gz", hash = "sha256:f1619aa9276438a13df3cb1d4bbd026922ff6083053f77348837fcf791d17120", size = 6289, upload-time = "2026-09-30T23:30:21.165Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/df/bd/eacc47d5bc7e0b3785fee4bd48b7ad94456ef7317d88840c2f7b4787e595/launchdarkly_ai_python-0.1.8-py3-none-any.whl", hash = "sha256:a6ef502099a34fc9db29e6bbaa726468b78e50e693ac96bec1147018deaa2f40", size = 3431, upload-time = "2026-09-30T23:30:20.147Z" },
+]
+
+[[package]]
 name = "launchdarkly-ai-server"
 version = "0.2.3"
 source = { git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Fclient&rev=main#656d922a334e84ebea7aee4b871d176a96a21f96" }
@@ -1597,6 +1609,7 @@ dependencies = [
     { name = "langchain-aws" },
     { name = "launchdarkly-ai-langchain-messages" },
     { name = "launchdarkly-ai-openai-messages" },
+    { name = "launchdarkly-ai-python" },
     { name = "launchdarkly-ai-server" },
     { name = "launchdarkly-server-sdk" },
     { name = "python-dotenv" },
@@ -1615,6 +1628,7 @@ requires-dist = [
     { name = "langchain-aws", specifier = ">=1.0" },
     { name = "launchdarkly-ai-langchain-messages", git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Flangchain-messages&rev=main" },
     { name = "launchdarkly-ai-openai-messages", git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Fopenai-messages&rev=main" },
+    { name = "launchdarkly-ai-python", specifier = ">=0.1.8" },
     { name = "launchdarkly-ai-server", git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Fclient&rev=main" },
     { name = "launchdarkly-server-sdk", specifier = ">=9.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
