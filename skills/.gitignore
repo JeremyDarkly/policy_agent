@@ -1,0 +1,7 @@
+# Generated from agent_skills_demo.py by jupytext; holds run outputs, so not committed.
+*.ipynb
+.ipynb_checkpoints/
+# Skill files the notebook materializes from LaunchDarkly at run time.
+.materialized/
+# Presenter notes from internal sources. This repo is public: keep them local.
+internal/

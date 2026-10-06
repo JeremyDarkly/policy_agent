@@ -29,6 +29,9 @@ and uploading the dataset. Staging support (Terraform `api_host`, SDK endpoint v
 exists only in this repo, so other copies of the app target production. The `.ipynb` is gitignored
 because it carries run outputs; edit the `.py`.
 
+For the Agent Skills demo, which evaluates the same agents with and without library skills, see
+[`../skills/README.md`](../skills/README.md).
+
 Every run counts against the project's daily LaunchDarkly token limit. Use the notebook's `RUN` switches and `QUICK`
 mode to keep practice runs small.
 
