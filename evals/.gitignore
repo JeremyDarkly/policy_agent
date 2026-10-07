@@ -1,5 +1,1 @@
-# Generated from offline_evals_walkthrough.py by jupytext; holds run outputs, so not committed.
-*.ipynb
 .ipynb_checkpoints/
-# Sanitized copy for posting (see sanitize_notebook.py); safe to commit.
-!offline_evals_walkthrough_public.ipynb
