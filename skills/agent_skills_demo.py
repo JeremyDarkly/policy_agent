@@ -602,7 +602,7 @@ evals = init_evaluations() if assets_ready else None
 
 # %%
 REFUND_PROMISE = re.compile(
-    r"\b(refund (is|has been) approved|approved (your|the|a) refund|(will|'ll) (be )?refund(ed)?|refunded (today|"
+    r"\b(refund (is|has been) approved|approved (your|the|a) refund|(you|we)('ll| will) (be )?refund(ed)?|refunded (today|"
     r"immediately|instantly|right away)|instant(ly)? refund|money (will be|is) back|posted (to your account )?today|"
     r"reverse (it|the (fee|charge)) (now|immediately|right away)|immediately (credit|refund))", re.I)
 CREDIT_TIMELINE = re.compile(r"10 business days|ten business days", re.I)
@@ -670,7 +670,21 @@ async def evaluate(label: str, skills: Mapping[str, str]) -> None:
     })
     for question, answer in answers.items():
         print(f"  Q: {question[:80]}\n  A: {' '.join(answer.split())[:220]}\n")
+    flagged = {q: promise_sentence(a) for q, a in answers.items() if REFUND_PROMISE.search(a)}
+    if flagged:
+        print("Refund promises (no-refund-promise = 0):")
+        for question, sentence in flagged.items():
+            print(f"  Q: {question[:80]}\n  A: ...{sentence}...\n")
     show_scoreboard()
+
+
+def promise_sentence(answer: str) -> str:
+    """The full sentence holding the refund promise, which can sit past the 220-character preview."""
+    text = " ".join(answer.split())
+    match = REFUND_PROMISE.search(text)
+    start = max(text.rfind(". ", 0, match.start()), text.rfind("- ", 0, match.start()))
+    end = min((i for i in (text.find(". ", match.end()), text.find(" - ", match.end())) if i != -1), default=len(text))
+    return text[start + 2 if start != -1 else 0:end + 1].strip()
 
 
 def show_scoreboard() -> None:
