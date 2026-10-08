@@ -33,7 +33,8 @@
 # 3. A guarded rollout moves traffic from Baseline to Confident v2 in steps, and compares the judge score between
 #    the two variations. When the score is significantly worse on Confident v2, LaunchDarkly rolls the rollout back.
 #
-# A full run takes about 15 minutes and roughly 1,000 Bedrock calls. Use the **`RUN`** switches to skip sections.
+# A run takes about 10 minutes and a few hundred Bedrock calls: on staging, the rollback came about 3 minutes into
+# the first step. Use the **`RUN`** switches to skip sections.
 
 # %% [markdown]
 # ## Before you run it
@@ -95,7 +96,6 @@ import json
 import logging
 import os
 import random
-import re
 import time
 import urllib.error
 import urllib.request
@@ -375,10 +375,12 @@ replies: list[Reply] = []
 
 async def send_traffic(stop: asyncio.Event, limit: int | None = None) -> None:
     """Run CONCURRENCY workers that each ask random questions as new users until `stop` is set or `limit` is hit."""
-    started = len(replies)
+    remaining = [limit]
 
     async def worker() -> None:
-        while not stop.is_set() and (limit is None or len(replies) - started < limit):
+        while not stop.is_set() and (remaining[0] is None or remaining[0] > 0):
+            if remaining[0] is not None:
+                remaining[0] -= 1  # claim a request before awaiting, so workers don't overshoot the limit
             replies.append(await ask(random.choice(QUESTIONS), f"demo-user-{uuid.uuid4().hex[:12]}"))
 
     await asyncio.gather(*(worker() for _ in range(CONCURRENCY)))
@@ -507,18 +509,12 @@ if RUN["rollout"]:
 # %% [markdown]
 # ## Step 6: What LaunchDarkly did
 #
-# The audit log records each change to the AI Config, including the rollback and its reason.
+# When the default rule serves Baseline again after `running`, LaunchDarkly has rolled the rollout back. The reason,
+# and the metric chart behind it, are on the AI Config's **Monitoring** tab. The public API doesn't return them, and
+# the audit log has no entry for an automatic rollback.
 
 # %%
-def plain(markdown: str) -> str:
-    """Audit log descriptions are Markdown: keep link text, drop link targets and escapes."""
-    return re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", markdown).replace("\\", "").replace("**", "").strip()
-
-
-since_ms = int((replies[0].at if replies else time.time() - 3600) * 1000)
-status, log = ld_api("GET", f"/auditlog?spec=proj/{PROJECT_KEY}:env/{ENVIRONMENT}:flag/{CONFIG_KEY}&after={since_ms}&limit=10")
-for entry in reversed(log.get("items", []) if status == 200 else []):
-    print(f"{datetime.fromtimestamp(entry['date'] / 1000):%H:%M:%S}  {plain(entry.get('description') or '')}")
+print(f"targeting page: {TARGETING_PAGE}")
 
 # %% [markdown]
 # The chart shows each answer's judge score over the run, by variation, with a rolling mean. The baseline traffic
@@ -569,7 +565,8 @@ print(f"default rule: {rollout_status()}")
 #   rejects `regressionThreshold`. While a rollout runs, the rule can't be changed with
 #   `updateFallthroughVariationOrRollout`; stop it with `stopAutomatedRelease` first.
 # - **There's no public endpoint for rollout status.** This notebook reads it from the default rule: a
-#   `measuredRollout` allocation while it runs, and a single variation once it's rolled back or complete.
+#   `measuredRollout` allocation while it runs, and a single variation once it's rolled back or complete. The reason
+#   for a rollback is shown only in the UI.
 # - **Each step must last at least 1 minute**, and can serve the new variation to at most 50% of traffic.
 # - **Only the analysed traffic counts.** At a 20% step, 20% of requests get Confident v2 and 20% get Baseline as the
 #   control. The other 60% aren't in the comparison.
