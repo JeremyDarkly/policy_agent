@@ -19,6 +19,10 @@ Run it after `terraform apply`. It is idempotent.
 Usage:
     python scripts/set_ai_config_targeting.py            # reads .env
     python scripts/set_ai_config_targeting.py --dry-run
+    python scripts/set_ai_config_targeting.py --env-file .env.staging
+
+LAUNCHDARKLY_API_HOST selects a non-production instance (default
+https://app.launchdarkly.com).
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-API_BASE = "https://app.launchdarkly.com/api/v2"
+DEFAULT_API_HOST = "https://app.launchdarkly.com"
 
 # The AI Configs provisioned by infrastructure/launchdarkly/ai_configs_resources.tf.
 CONFIG_KEYS = [
@@ -47,10 +51,9 @@ CONFIG_KEYS = [
 DEFAULT_VARIATION_NAME = "Default"
 
 
-def load_env(repo_root: Path) -> dict[str, str]:
-    """Read .env without needing python-dotenv. Values may contain spaces."""
+def load_env(env_path: Path) -> dict[str, str]:
+    """Read an env file without needing python-dotenv. Values may contain spaces."""
     env: dict[str, str] = {}
-    env_path = repo_root / ".env"
     if env_path.is_file():
         for line in env_path.read_text().splitlines():
             line = line.strip()
@@ -82,14 +85,16 @@ def request(method: str, url: str, token: str, body: dict | None = None) -> dict
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="report what would change")
+    parser.add_argument("--env-file", default=".env", help="env file, relative to the repo root")
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
-    env = load_env(repo_root)
+    env = load_env(repo_root / args.env_file)
 
     token = env.get("LAUNCHDARKLY_ACCESS_TOKEN")
     project = env.get("LAUNCHDARKLY_PROJECT_KEY")
     environment = env.get("LAUNCHDARKLY_ENVIRONMENT", "test")
+    api_base = (env.get("LAUNCHDARKLY_API_HOST") or DEFAULT_API_HOST).rstrip("/") + "/api/v2"
 
     missing = [
         name
@@ -100,14 +105,14 @@ def main() -> int:
         if not value
     ]
     if missing:
-        print(f"error: {', '.join(missing)} must be set in .env", file=sys.stderr)
+        print(f"error: {', '.join(missing)} must be set in {args.env_file}", file=sys.stderr)
         return 1
 
-    print(f"project={project} environment={environment}\n")
+    print(f"api={api_base} project={project} environment={environment}\n")
 
     changed = failed = 0
     for key in CONFIG_KEYS:
-        url = f"{API_BASE}/projects/{project}/ai-configs/{key}/targeting"
+        url = f"{api_base}/projects/{project}/ai-configs/{key}/targeting"
         targeting = request("GET", url, token)
 
         variations = targeting.get("variations", [])

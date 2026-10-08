@@ -96,11 +96,24 @@ def initialize_observability(
                 environment=environment,  # CRITICAL: Must match LaunchDarkly environment
             )
             
+            # Optional endpoint overrides for non-production instances (e.g. staging);
+            # unset or empty values keep the SDK's production defaults.
+            endpoint_overrides = {
+                arg: value
+                for arg, var in (
+                    ("base_uri", "LAUNCHDARKLY_BASE_URI"),
+                    ("stream_uri", "LAUNCHDARKLY_STREAM_URI"),
+                    ("events_uri", "LAUNCHDARKLY_EVENTS_URI"),
+                )
+                if (value := os.getenv(var, "").strip())
+            }
+
             config = Config(
                 sdk_key,
                 plugins=[
                     ObservabilityPlugin(obs_config)
-                ]
+                ],
+                **endpoint_overrides,
             )
             
             # Initialize LaunchDarkly client
