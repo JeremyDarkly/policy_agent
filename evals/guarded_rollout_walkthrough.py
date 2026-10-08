@@ -40,13 +40,13 @@
 # ## Before you run it
 #
 # 1. **Set up ToggleBank on staging** from this repo, as described in the "Before you run it" section of
-#    `offline_evals_walkthrough.py`. This notebook needs only steps 1 and 2 of that list: the staging project and a
-#    `.env.staging` with the SDK key, a Writer API token, the staging endpoints and `AWS_PROFILE`. It doesn't use the
+#    `offline_evals_walkthrough.py`. This notebook needs only steps 1 and 2 of that list: the staging project and an
+#    env file with the SDK key, a Writer API token, the staging endpoints and `AWS_PROFILE`. It doesn't use the
 #    app or Terraform.
-# 2. **Log in to AWS** with the profile from `.env.staging`. Bedrock needs a current session:
+# 2. **Log in to AWS** with the profile from the env file. Bedrock needs a current session:
 #
 #    ```sh
-#    aws sso login --profile <AWS_PROFILE from .env.staging>
+#    aws sso login --profile <AWS_PROFILE from the env file>
 #    ```
 #
 # 3. **Guarded rollouts must be available** in the project: an Enterprise plan with the Guardian add-on, or the trial
@@ -67,7 +67,7 @@
 #   streaming service has served stale AI Config variations, so polling is the default here.
 
 # %%
-ENV_FILE_NAME = ".env.staging"
+ENV_FILE_NAME = ".env.staging-org"  # the org account on staging; ".env.staging" is a separate personal account
 CONFIG_KEY = "support-reply-guarded"
 JUDGE_KEY = "guarded-rollout-accuracy"
 METRIC_KEY = "guarded-rollout-answer-accuracy"
@@ -87,7 +87,7 @@ RUN = {
 # %% [markdown]
 # ## Setup
 #
-# The app's `.env.staging` uses `LAUNCHDARKLY_*` names, and the SDK reads `LD_*` names, so the next cell maps one to
+# The app's env files use `LAUNCHDARKLY_*` names, and the SDK reads `LD_*` names, so the next cell maps one to
 # the other. Only secrets and endpoints come from the env file. The keys and prompts live in this notebook.
 
 # %%

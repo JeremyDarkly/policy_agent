@@ -39,7 +39,7 @@ mode to keep practice runs small.
 `guarded_rollout_walkthrough.py` releases a new prompt for a support assistant with a guarded rollout on staging.
 The new prompt makes the model invent account data, a judge scores every answer, and LaunchDarkly rolls the rollout
 back when the score regresses. It creates its AI Config, judge and metric the first time it runs, and needs only
-`.env.staging` and an AWS session, not the app or Terraform. A run takes about 10 minutes and a few hundred Bedrock
+an env file (`.env.staging-org` by default) and an AWS session, not the app or Terraform. A run takes about 10 minutes and a few hundred Bedrock
 calls.
 
 ```sh
