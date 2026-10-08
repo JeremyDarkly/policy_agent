@@ -9,6 +9,8 @@ Evaluations run from code with the LaunchDarkly Python AI SDK against the stagin
 | `run_policy_agent_eval.py` | Script: evaluates the running agent via `/api/chat` with a judge and a routing scorer |
 | `policy_agent_dataset.jsonl` | 6-row dataset; upload in the staging UI with key `policy_agent_dataset` |
 | `policy_agent_dataset_quick.jsonl` | 2-row dataset for cheap practice runs; key `policy_agent_dataset_quick` |
+| `guarded_rollout_walkthrough.py` | Notebook: a guarded rollout of a new AI Config variation on staging, rolled back automatically when a judge score regresses |
+| `guarded_rollout_questions.jsonl` | Customer questions the guarded rollout notebook sends as traffic |
 
 ```sh
 cd evals
@@ -31,6 +33,19 @@ because it carries run outputs; edit the `.py`.
 
 Every run counts against the project's daily LaunchDarkly token limit. Use the notebook's `RUN` switches and `QUICK`
 mode to keep practice runs small.
+
+## Guarded rollout notebook
+
+`guarded_rollout_walkthrough.py` releases a new prompt for a support assistant with a guarded rollout on staging.
+The new prompt makes the model invent account data, a judge scores every answer, and LaunchDarkly rolls the rollout
+back when the score regresses. It creates its AI Config, judge and metric the first time it runs, and needs only
+`.env.staging` and an AWS session, not the app or Terraform. A run takes about 15 minutes and roughly 1,000 Bedrock
+calls.
+
+```sh
+uv run jupytext --sync guarded_rollout_walkthrough.py
+uv run jupyter lab guarded_rollout_walkthrough.ipynb
+```
 
 ## Customer notebook
 
