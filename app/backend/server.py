@@ -446,6 +446,7 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
             )
         elif "scheduler_specialist" in agent_data:
             scheduler_data = agent_data.get("scheduler_specialist", {})
+            tokens = scheduler_data.get("tokens", {"input": 0, "output": 0})
             ttft_ms = scheduler_data.get("ttft_ms")
             duration_ms = scheduler_data.get("duration_ms")
             agent_flow.append(
@@ -456,7 +457,7 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
                     "icon": "📅",
                     "duration": duration_ms,  # Total time to generate
                     "ttft_ms": ttft_ms,  # Time to first token
-                    "tokens": {"input": 0, "output": 0},
+                    "tokens": tokens,
                 }
             )
 
@@ -677,7 +678,7 @@ async def chat_stream(request: ChatRequest):
                         "status": "complete",
                         "icon": "📅",
                         "ttft_ms": scheduler_data.get("ttft_ms"),
-                        "tokens": {"input": 0, "output": 0},
+                        "tokens": scheduler_data.get("tokens", {"input": 0, "output": 0}),
                     }
                 )
 
