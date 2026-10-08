@@ -19,6 +19,7 @@ notebook = [
   "ipykernel>=6",
   "nbclient>=0.10",
   "jupyterlab>=4",
+  "matplotlib>=3.11.2",
 ]
 
 [tool.uv]
