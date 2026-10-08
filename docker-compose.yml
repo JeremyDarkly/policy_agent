@@ -13,6 +13,10 @@ services:
       LAUNCHDARKLY_PROJECT_KEY: ${LAUNCHDARKLY_PROJECT_KEY:-}
       LAUNCHDARKLY_ACCESS_TOKEN: ${LAUNCHDARKLY_ACCESS_TOKEN:-}
       LAUNCHDARKLY_ENVIRONMENT: ${LAUNCHDARKLY_ENVIRONMENT:-test}
+      # SDK endpoints; leave unset for production
+      LAUNCHDARKLY_BASE_URI: ${LAUNCHDARKLY_BASE_URI:-}
+      LAUNCHDARKLY_STREAM_URI: ${LAUNCHDARKLY_STREAM_URI:-}
+      LAUNCHDARKLY_EVENTS_URI: ${LAUNCHDARKLY_EVENTS_URI:-}
 
       # Demo user display name
       DEMO_USER_NAME: ${DEMO_USER_NAME:-Demo User}
@@ -33,7 +37,8 @@ services:
     volumes:
       # Mount backend code for live reloading
       - ./app/backend:/app/app/backend
-      - ./.env:/app/.env:ro
+      # ENV_FILE lets a non-default env file (e.g. .env.staging) be mounted instead
+      - ${ENV_FILE:-./.env}:/app/.env:ro
       # Mount AWS credentials for SSO login (config/credentials stay read-only)
       - ~/.aws:/root/.aws:ro
       # ...but botocore must write refreshed SSO tokens back to the cache, so this
@@ -83,6 +88,11 @@ services:
       TF_VAR_project_key: ${LAUNCHDARKLY_PROJECT_KEY:?LAUNCHDARKLY_PROJECT_KEY must be set in .env}
       # Same LAUNCHDARKLY_ENVIRONMENT the backend uses; drives target_environment
       TF_VAR_target_environment: ${LAUNCHDARKLY_ENVIRONMENT:-test}
+      # Empty falls back to the variable's production default
+      TF_VAR_launchdarkly_api_host: ${LAUNCHDARKLY_API_HOST:-https://app.launchdarkly.com}
+      # State workspace per LaunchDarkly instance (e.g. staging), so a production
+      # run can never pick up another instance's state. "default" is production.
+      TF_WORKSPACE: ${TF_WORKSPACE:-default}
     volumes:
       # Terraform configs + state persist on the host (state is gitignored)
       - ./infrastructure/launchdarkly:/infra

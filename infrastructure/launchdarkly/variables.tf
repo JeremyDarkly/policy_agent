@@ -4,6 +4,12 @@ variable "launchdarkly_access_token" {
   sensitive   = true
 }
 
+variable "launchdarkly_api_host" {
+  description = "LaunchDarkly API host. Set via TF_VAR_launchdarkly_api_host (the docker-compose 'terraform' service maps LAUNCHDARKLY_API_HOST to it). Override only for a non-production instance such as staging."
+  type        = string
+  default     = "https://app.launchdarkly.com"
+}
+
 variable "project_key" {
   description = "LaunchDarkly project key the AI tools and configs belong to. Required: set via TF_VAR_project_key (the docker-compose 'terraform' service maps LAUNCHDARKLY_PROJECT_KEY from .env to it). No default, so a missing value fails instead of silently targeting the wrong project."
   type        = string
