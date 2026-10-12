@@ -1395,8 +1395,8 @@ wheels = [
 
 [[package]]
 name = "launchdarkly-ai-langchain-messages"
-version = "0.2.3"
-source = { git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Flangchain-messages&rev=main#656d922a334e84ebea7aee4b871d176a96a21f96" }
+version = "0.2.4"
+source = { git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Flangchain-messages&rev=main#920cdfe8171515ad89a8d82486c763a964e9789a" }
 dependencies = [
     { name = "langchain-core" },
     { name = "launchdarkly-ai-server" },
@@ -1405,8 +1405,8 @@ dependencies = [
 
 [[package]]
 name = "launchdarkly-ai-openai-messages"
-version = "0.2.3"
-source = { git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Fopenai-messages&rev=main#656d922a334e84ebea7aee4b871d176a96a21f96" }
+version = "0.2.4"
+source = { git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Fopenai-messages&rev=main#920cdfe8171515ad89a8d82486c763a964e9789a" }
 dependencies = [
     { name = "launchdarkly-ai-server" },
     { name = "openai" },
@@ -1415,20 +1415,20 @@ dependencies = [
 
 [[package]]
 name = "launchdarkly-ai-python"
-version = "0.1.8"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "launchdarkly-ai-server" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/29/ca/ab7fa7457597d93541d2233d821988a4d9a234f38aeed116af91c717ec19/launchdarkly_ai_python-0.1.8.tar.gz", hash = "sha256:f1619aa9276438a13df3cb1d4bbd026922ff6083053f77348837fcf791d17120", size = 6289, upload-time = "2026-09-30T23:30:21.165Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/42/d9/c9bf6f6c09f7fc20979a499327aa11185fece0b26d4068004d049b8490cf/launchdarkly_ai_python-0.2.0.tar.gz", hash = "sha256:be0ae3d28fcd8ba04c996065fef1e30a1ddf7269a256070b2c5e201ec09ce592", size = 7082, upload-time = "2026-10-09T20:30:05.04Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/df/bd/eacc47d5bc7e0b3785fee4bd48b7ad94456ef7317d88840c2f7b4787e595/launchdarkly_ai_python-0.1.8-py3-none-any.whl", hash = "sha256:a6ef502099a34fc9db29e6bbaa726468b78e50e693ac96bec1147018deaa2f40", size = 3431, upload-time = "2026-09-30T23:30:20.147Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/52/d6f13786260ca618e26e9af497528fe0f56599bcdbc5147839192d3699d7/launchdarkly_ai_python-0.2.0-py3-none-any.whl", hash = "sha256:a9acaffe173d136d3920ac9ab904c94cbdc76e59f1ece9d236570037272db5fe", size = 3721, upload-time = "2026-10-09T20:30:03.785Z" },
 ]
 
 [[package]]
 name = "launchdarkly-ai-server"
-version = "0.2.3"
-source = { git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Fclient&rev=main#656d922a334e84ebea7aee4b871d176a96a21f96" }
+version = "0.3.0"
+source = { git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Fclient&rev=main#920cdfe8171515ad89a8d82486c763a964e9789a" }
 dependencies = [
     { name = "opentelemetry-api" },
 ]
@@ -2017,7 +2017,7 @@ requires-dist = [
     { name = "langchain-aws", specifier = ">=1.0" },
     { name = "launchdarkly-ai-langchain-messages", git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Flangchain-messages&rev=main" },
     { name = "launchdarkly-ai-openai-messages", git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Fopenai-messages&rev=main" },
-    { name = "launchdarkly-ai-python", specifier = ">=0.1.8" },
+    { name = "launchdarkly-ai-python", specifier = ">=0.2.0" },
     { name = "launchdarkly-ai-server", git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Fclient&rev=main" },
     { name = "launchdarkly-server-sdk", specifier = ">=9.0" },
     { name = "python-dotenv", specifier = ">=1.0" },

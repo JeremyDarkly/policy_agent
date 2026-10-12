@@ -67,7 +67,7 @@
 #   streaming service has served stale AI Config variations, so polling is the default here.
 
 # %%
-ENV_FILE_NAME = ".env.staging-org"  # the org account on staging; ".env.staging" is a separate personal account
+ENV_FILE_NAME = ".env.staging-org"  # the org account on staging
 CONFIG_KEY = "support-reply-guarded"
 JUDGE_KEY = "guarded-rollout-accuracy"
 METRIC_KEY = "guarded-rollout-answer-accuracy"

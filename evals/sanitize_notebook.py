@@ -21,7 +21,7 @@ from dotenv import dotenv_values
 
 SOURCE = Path("offline_evals_walkthrough.ipynb")
 TARGET = Path("offline_evals_walkthrough_public.ipynb")
-ENV_FILE = Path(__file__).resolve().parent.parent / ".env.staging"
+ENV_FILE = Path(__file__).resolve().parent.parent / ".env.staging-org"
 
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 
