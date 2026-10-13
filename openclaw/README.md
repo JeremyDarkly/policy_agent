@@ -166,7 +166,7 @@ showed the new rule, but the next `helper` run was still served `standard`.
 **How we found it.**
 - A fresh SDK client using the stream evaluated `helper` against the old rule.
 - A fresh client with `stream: false` evaluated it against the new rule.
-- The stream stayed stale on a recheck several minutes later, so it wasn't ordinary propagation delay.
+- The stream was still stale on a recheck about two minutes after the edit, while polling had it at once.
 - Every client was new, so nothing was cached in the plugin.
 
 **Earlier symptom, probably the same cause.** Just after `openclaw_agent` was created, the first run logged
