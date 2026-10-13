@@ -61,6 +61,47 @@ because the API can't flip an AI Config's targeting toggle. `on` restores the ta
 
 ## How the plugin maps AgentControl onto OpenClaw
 
+The plugin runs inside the OpenClaw process. The first hook in a run evaluates the config, and later hooks in that
+run reuse the result. The SDK evaluates from its local copy of the flags, so a hook doesn't wait on a network call.
+Only events go back to LaunchDarkly.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User or channel
+    participant OC as OpenClaw runtime
+    participant P as ld-agentcontrol plugin
+    participant LD as LaunchDarkly
+    participant M as Model provider
+
+    LD-->>P: Flag data, by stream or poll (SDK keeps a local copy)
+    U->>OC: Message
+    OC->>P: before_model_resolve
+    Note over P: Build context (sender, agentId, channel)<br/>Evaluate openclaw_agent once for this run
+    P-->>OC: providerOverride, modelOverride
+    OC->>P: before_prompt_build
+    P-->>OC: appendSystemContext (instructions), toolsAllow
+    OC->>P: before_agent_run
+    alt Config disabled
+        P-->>OC: block
+        OC-->>U: "This agent is turned off in LaunchDarkly AgentControl."
+    else Config served
+        P-->>OC: pass
+        loop Each model call
+            OC->>M: Prompt with allowed tools
+            M-->>OC: Reply or tool call
+            OC--)P: llm_output, model_call_ended (tokens, time to first token)
+            opt Tool call
+                OC->>P: before_tool_call
+                P-->>OC: Allow, or block if the variation doesn't list the tool
+            end
+        end
+        OC-->>U: Reply
+        OC->>P: agent_end
+        P->>LD: Tracker events (duration, tokens, tool calls, success), flushed
+    end
+```
+
 | AgentControl | OpenClaw hook | Effect |
 |---|---|---|
 | Config off, or the `disabled` variation | `before_agent_run` | The run is blocked with a message |
