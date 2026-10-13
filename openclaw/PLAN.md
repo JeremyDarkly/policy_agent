@@ -30,11 +30,12 @@ config is evaluated once per run and reused by every hook in that run.
 
 | Variation | Model | Instructions | Tools |
 |---|---|---|---|
-| `standard` | OpenAI model A | Answers normally and states it is the standard variation | `read`, `exec` |
-| `locked-down` | OpenAI model B | Says it is in restricted mode | none |
+| `standard` | `gpt-5.4-mini` | Start each reply with `[standard]` | `read`, `exec` |
+| `locked-down` | `gpt-5.4-nano` | Start each reply with `[locked-down]` | none |
 
-Targeting serves `locked-down` to contexts whose `agentId` is `restricted`, and `standard` to everyone else. The
-command line has no sender, so two OpenClaw agents (`main` and `restricted`) are enough to show targeting.
+Targeting serves `locked-down` to contexts whose `agentId` is `helper`, and `standard` to everyone else. The command
+line has no sender, so two OpenClaw agents (`main` and `helper`) are enough to show targeting. OpenClaw's own default
+model is `gpt-5.4`, so a run that wasn't overridden is easy to spot.
 
 ### Files
 
@@ -43,6 +44,7 @@ command line has no sender, so two OpenClaw agents (`main` and `restricted`) are
 | `plugin/` | The OpenClaw plugin: `package.json`, `openclaw.plugin.json`, `index.ts` |
 | `setup_config.py` | Creates the config, its variations and its targeting through the REST API. It is idempotent |
 | `run_checks.sh` | Runs the checks below against a throwaway OpenClaw state directory |
+| `env.sh` | Exports the variables the checks need and points OpenClaw at that directory |
 | `README.md` | How to run it |
 
 Credentials come from the repo's env file and stay in the environment. They are never written into OpenClaw's
@@ -50,13 +52,13 @@ config.
 
 ### Checks
 
-1. **Baseline:** the `main` agent's run uses model A, and its answer follows the `standard` instructions.
-2. **Targeting:** the `restricted` agent gets model B and the `locked-down` instructions.
-3. **Tool gating:** both agents are asked to run `ls`. Only `main` may run it; the plugin logs the block for
-   `restricted`.
+1. **Baseline:** the `main` agent's run uses `gpt-5.4-mini`, and its answer follows the `standard` instructions.
+2. **Targeting:** the `helper` agent gets `gpt-5.4-nano` and the `locked-down` instructions.
+3. **Tool gating:** both agents are asked to run `ls`. Only `main` may run it. `helper` isn't offered `exec`, and
+   with hiding turned off, its call to `exec` is blocked by `before_tool_call`.
 4. **Live change:** edit the `standard` instructions in LaunchDarkly and rerun. The new instructions apply without
    reinstalling the plugin.
-5. **Kill switch:** turn the config off. The run is blocked with a clear message.
+5. **Kill switch:** serve the `disabled` variation. The run is blocked with a clear message.
 
 Then confirm that tokens, duration and success appear on the config's Monitoring tab.
 
@@ -68,12 +70,42 @@ Then confirm that tokens, duration and success appear on the config's Monitoring
 - LaunchDarkly's newer `@launchdarkly/ai-node` SDK is in beta and makes the model call itself. OpenClaw makes its own
   model calls here, so the plugin uses `@launchdarkly/server-sdk-ai` for the config and tracker only.
 
-## To confirm during the build
+## Results
 
-- How LaunchDarkly model names map to OpenClaw's `provider/model` references.
-- Whether a variation's tools arrive in the config's `tools` map or in `model.parameters.tools`.
-- That `agent_end` fires before a one-shot run exits, so tracker events are flushed.
-- How to point OpenClaw at a separate state directory, so the test doesn't touch an existing install.
+All five checks pass with OpenClaw 2026.10.3 and `@launchdarkly/server-sdk-ai` 2.0.13. The config's metrics show
+every run, split by variation, with tokens, duration, time to first token and success.
+
+What the build settled:
+
+- **Model names.** LaunchDarkly's provider name in lower case plus its model name gives OpenClaw's reference, such as
+  `openai/gpt-5.4-mini`. OpenClaw only accepts models in its own catalog, so variations need current model ids.
+- **Tools.** The SDK reads a variation's Library tools from the root `tools` map or from `model.parameters.tools`,
+  so the plugin doesn't need to care which.
+- **Metrics.** `agent_end` fires before a one-shot `openclaw agent --local` run exits, and flushing there gets the
+  events out.
+- **Separate state.** `OPENCLAW_STATE_DIR` and `OPENCLAW_CONFIG_PATH` keep the test away from an existing install.
+  `agent exec` has no `--agent` flag, so the checks use `openclaw agent --local --agent <id>`.
+
+Surprises:
+
+- **Agent names leak into behavior.** OpenClaw puts the agent id in the system prompt. An agent called `restricted`
+  refused to use tools by itself, even when they were offered, so the tool block was never tested. The checks use
+  neutral names and a new session for each run, because session history carries earlier refusals forward too.
+- **The API can't turn an AI Config off.** The targeting API has no on/off instruction, so the kill switch serves the
+  built-in `disabled` variation instead. The UI toggle works as well.
+- **The AI Configs targeting view leaves out rule IDs and variations.** `setup_config.py` reads rules from the
+  config's flag, which allows reads.
+- **Streaming lagged on one instance.** A fresh streaming client kept serving targeting from before an edit, while a
+  polling client saw the edit at once. The plugin polls when `LAUNCHDARKLY_BASE_URI` is set, as the rest of this repo
+  does.
+- **A missing config looks disabled.** The SDK returns its default for an unknown key, and the default is disabled.
+  The plugin checks the evaluation reason so a wrong key falls back instead of turning every agent off.
+
+## Next steps
+
+- A chat channel such as Slack, so targeting can use the real sender instead of the agent id.
+- Judges attached to the variations, run from `agent_end`, so guarded rollouts can watch answer quality.
+- Running under the Gateway, where the plugin's client stays connected and picks up changes without a new process.
 
 ## Related work
 
