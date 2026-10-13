@@ -118,3 +118,72 @@ When LaunchDarkly can't be reached, or the config doesn't exist, runs keep OpenC
 
 Plugin settings go under `plugins.entries.ld-agentcontrol.config` in the OpenClaw config. They are `configKey`,
 `toolPrefix`, `failClosed`, `hideTools`, `initTimeoutSeconds` and `decisionLog`; the manifest describes each one.
+
+## Gaps and unexpected behavior
+
+Found on 2026-10-13 while building and testing this, with:
+
+- OpenClaw 2026.10.3 on Node 26.9.0
+- `@launchdarkly/server-sdk-ai` 2.0.13 and `@launchdarkly/node-server-sdk` 9.14.4
+- the LaunchDarkly REST API with `LD-API-Version: beta`
+
+Recheck these after upgrading any of them.
+
+### LaunchDarkly AI SDK
+
+- **A missing config looks the same as a disabled one.** For an unknown config key, `agentConfig()` returns the
+  default, which is `enabled: false`, and doesn't say why. So a wrong key or environment would turn every agent off.
+  - Workaround: when a config comes back disabled, the plugin calls the base SDK's `variationDetail()` and treats
+    an `ERROR` reason as "LaunchDarkly unavailable".
+  - This is the only place the plugin goes outside the AI SDK. It sends one extra evaluation event when it runs.
+- **Metrics have to be recorded by hand when the app doesn't make the model call.** `trackMetricsOf` wraps a call
+  the app makes itself. OpenClaw makes the calls here.
+  - Workaround: the plugin adds up the usage from OpenClaw's `llm_output` hook and calls `trackTokens`,
+    `trackDuration` and the other track methods itself.
+  - OpenClaw reports cached prompt tokens separately, and the plugin counts them as input. Before that fix, a run
+    showed 358 input tokens against a total of 27,888.
+
+### LaunchDarkly REST API
+
+- **There's no API instruction to turn an AI Config's targeting on or off.** `turnFlagOn` and `turnFlagOff` return
+  HTTP 400, `invalid instruction`. The targeting API's documented instructions don't include a toggle; only the UI
+  has one.
+  - Workaround: `setup_config.py off` serves the built-in `disabled` variation from the default rule and every
+    targeting rule. `on` puts them back.
+- **The AI Configs targeting view leaves out each rule's ID and variation.** `GET /ai-configs/{key}/targeting`
+  returns a rule's clauses only. So a script can't tell what a rule serves, or remove or update it.
+  - Workaround: read the rules from the config's flag (`GET /api/v2/flags/{project}/{key}`). Reads work there;
+    writes to an AI Config's flag are refused.
+
+### LaunchDarkly flag delivery
+
+- **A streaming client served stale targeting.** On the non-production instance used for testing, a new SDK client
+  using the stream kept serving targeting from before an edit. A polling client saw the edit at once.
+  - Workaround: the plugin polls when `LAUNCHDARKLY_BASE_URI` is set, as the rest of this repo does.
+- **A new config was briefly unknown.** The first run after creating `openclaw_agent` logged
+  `Unknown feature flag "openclaw_agent"`. A run a minute later found it.
+
+### OpenClaw
+
+- **Only models in OpenClaw's catalog are accepted.** `openai/gpt-4o-mini` was rejected as a "retired or
+  noncanonical model ref". A variation's model has to be one both the LaunchDarkly project and OpenClaw's catalog
+  know, such as `gpt-5.4-mini`.
+- **The agent id changes how the agent behaves.** OpenClaw puts the agent id in the system prompt. An agent called
+  `restricted` refused to use tools that were offered, so a check couldn't tell whether the plugin had blocked them.
+  - Workaround: the agents have neutral names (`main`, `helper`).
+- **Session history carries over between runs.** `openclaw agent --local --agent <id>` reuses that agent's main
+  session, so earlier refusals affected later runs.
+  - Workaround: each check passes a new `--session-key`.
+- **Hooks can't set sampling settings for a run.** Temperature, max tokens and similar settings live in OpenClaw's
+  config, per agent or per model, not per user. A variation's `model.parameters` are not applied.
+- **Hook support differs between runners.** This is from OpenClaw's docs and wasn't tested; only the embedded
+  runner was.
+  - The Codex app-server runner rejects a restrictive `toolsAllow`.
+  - The cloud Agents API runner ignores `toolsAllow`.
+  - `before_agent_run` isn't a reliable gate on the Codex or Copilot runners.
+  - Where tools can't be hidden, `before_tool_call` is the check that blocks them.
+- **Setup details:**
+  - `agent exec` has no `--agent` flag, so the checks use `openclaw agent --local`.
+  - A config with more than one agent needs `agents.ownership: "explicit"`.
+  - Installing a local plugin needs `--accept-capabilities`.
+  - A project-local `npm install` refuses `--allow-scripts`, so `package.json` uses an `allowScripts` field instead.

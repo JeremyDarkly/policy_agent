@@ -86,20 +86,7 @@ What the build settled:
 - **Separate state.** `OPENCLAW_STATE_DIR` and `OPENCLAW_CONFIG_PATH` keep the test away from an existing install.
   `agent exec` has no `--agent` flag, so the checks use `openclaw agent --local --agent <id>`.
 
-Surprises:
-
-- **Agent names leak into behavior.** OpenClaw puts the agent id in the system prompt. An agent called `restricted`
-  refused to use tools by itself, even when they were offered, so the tool block was never tested. The checks use
-  neutral names and a new session for each run, because session history carries earlier refusals forward too.
-- **The API can't turn an AI Config off.** The targeting API has no on/off instruction, so the kill switch serves the
-  built-in `disabled` variation instead. The UI toggle works as well.
-- **The AI Configs targeting view leaves out rule IDs and variations.** `setup_config.py` reads rules from the
-  config's flag, which allows reads.
-- **Streaming lagged on one instance.** A fresh streaming client kept serving targeting from before an edit, while a
-  polling client saw the edit at once. The plugin polls when `LAUNCHDARKLY_BASE_URI` is set, as the rest of this repo
-  does.
-- **A missing config looks disabled.** The SDK returns its default for an unknown key, and the default is disabled.
-  The plugin checks the evaluation reason so a wrong key falls back instead of turning every agent off.
+The [README](README.md#gaps-and-unexpected-behavior) lists the gaps and surprises, with versions and dates.
 
 ## Next steps
 
