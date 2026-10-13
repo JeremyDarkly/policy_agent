@@ -155,13 +155,36 @@ Recheck these after upgrading any of them.
   - Workaround: read the rules from the config's flag (`GET /api/v2/flags/{project}/{key}`). Reads work there;
     writes to an AI Config's flag are refused.
 
-### LaunchDarkly flag delivery
+### LaunchDarkly flag delivery: streaming and polling
 
-- **A streaming client served stale targeting.** On the non-production instance used for testing, a new SDK client
-  using the stream kept serving targeting from before an edit. A polling client saw the edit at once.
-  - Workaround: the plugin polls when `LAUNCHDARKLY_BASE_URI` is set, as the rest of this repo does.
-- **A new config was briefly unknown.** The first run after creating `openclaw_agent` logged
-  `Unknown feature flag "openclaw_agent"`. A run a minute later found it.
+This cost the most debugging time. Streaming is the SDK's default, and it served stale data on the non-production
+LaunchDarkly instance used for testing.
+
+**What we saw.** `setup_config.py` moved the locked-down rule from `agentId` `restricted` to `helper`. The API
+showed the new rule, but the next `helper` run was still served `standard`.
+
+**How we found it.**
+- A fresh SDK client using the stream evaluated `helper` against the old rule.
+- A fresh client with `stream: false` evaluated it against the new rule.
+- The stream stayed stale on a recheck several minutes later, so it wasn't ordinary propagation delay.
+- Every client was new, so nothing was cached in the plugin.
+
+**Earlier symptom, probably the same cause.** Just after `openclaw_agent` was created, the first run logged
+`Unknown feature flag "openclaw_agent"` and was treated as turned off. A run about a minute later found the config.
+
+**What we changed.** When `LAUNCHDARKLY_BASE_URI`, the SDK polling host, is set, the plugin polls instead of
+streaming. This matches this repo's skills demo, which hit the same thing; see `skills/README.md`.
+
+**What polling costs.**
+- A one-shot `openclaw agent --local` run starts a new client, which fetches current flags at start. It sees an edit
+  on its next run, and the checks pass either way.
+- A long-running Gateway keeps one client. It polls every 30 seconds by default, so an edit can take up to 30
+  seconds to arrive. With a working stream it would take seconds.
+- Polling makes a request every interval, where streaming holds one connection.
+
+**What to check.** Leave `LAUNCHDARKLY_BASE_URI` unset on an instance whose stream picks up edits; the plugin then
+streams. To find out, edit a variation and evaluate it from a new streaming client and a new polling client. The
+`check_live` check in `run_checks.sh` retries for about a minute in case changes are slow to arrive.
 
 ### OpenClaw
 
