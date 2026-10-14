@@ -1,15 +1,16 @@
 # AgentControl runtime control for OpenClaw agents
 
-An [OpenClaw](https://docs.openclaw.ai) plugin that takes each agent run's model, instructions and tools from a
-LaunchDarkly AgentControl config, and records the run's tokens, duration and outcome on that config. Changes made in
+An [OpenClaw](https://docs.openclaw.ai) plugin that takes each agent run's model, instructions, tools and skills
+from a LaunchDarkly AgentControl config, and records the run's tokens, duration and outcome on that config. Changes made in
 LaunchDarkly apply to the next run, with no redeploy and no OpenClaw restart. [PLAN.md](PLAN.md) explains the design
 and what was tested.
 
 | File | What it is |
 |---|---|
 | `plugin/` | The OpenClaw plugin (`index.ts`) and its manifest |
-| `setup_config.py` | Creates the `openclaw_agent` config, its tools, variations and targeting. Also the kill switch and instruction edits the checks use |
-| `run_checks.sh` | Five checks against real OpenClaw agents and the live config |
+| `skills/` | The library skills, one folder per version: `skills/<key>/<version>/SKILL.md` |
+| `setup_config.py` | Creates the `openclaw_agent` config, its tools, skills, variations and targeting. Also the kill switch, instruction edits and skill versions the checks use |
+| `run_checks.sh` | Seven checks against real OpenClaw agents and the live config |
 | `env.sh` | Exports the variables the checks need from the repo's env file, and points OpenClaw at `.state/` |
 
 ## Before you run it
@@ -31,12 +32,12 @@ cd openclaw
 npm install
 (cd plugin && npm install)
 python3 setup_config.py setup   # safe to rerun
-./run_checks.sh                 # or one check: baseline, targeting, tools, live, killswitch
+./run_checks.sh                 # or one check: baseline, targeting, tools, live, skills, skillchange, killswitch
 ```
 
 The first run creates `.state/`, writes an OpenClaw config with two agents (`main` and `helper`), and links the
-plugin. OpenClaw never reads or writes `~/.openclaw` here. Every check makes real model calls; a full run is about 10
-calls on the two small models.
+plugin. OpenClaw never reads or writes `~/.openclaw` here. Every check makes real model calls; a full run takes
+about five minutes and makes about 15 runs on the two small models.
 
 To talk to an agent yourself:
 
@@ -53,6 +54,13 @@ cat .state/decisions.jsonl     # what each run was served, offered and blocked
 - An agent-mode config, `openclaw_agent`, with two variations:
   - `standard`: `gpt-5.4-mini` with both tools.
   - `locked-down`: `gpt-5.4-nano` with no tools.
+- Three library skills, tagged `openclaw`. `setup_config.py skill <key> <folder>` publishes another version and
+  pins it wherever that skill is used:
+  - `openclaw-house-style`: short replies ending in a `Style: house v1` line. Pinned on both variations; v2 ends in
+    `Style: house v2`, for the skill-change check.
+  - `openclaw-workspace-report`: lists and summarizes the workspace under a `## Workspace report` heading. Pinned on
+    `standard`.
+  - `openclaw-explain-limits`: what to say when a tool is blocked, starting with `Limit:`. Pinned on `locked-down`.
 - Targeting in your environment: `locked-down` for contexts whose `agentId` is `helper`, and `standard` for everyone
   else.
 
@@ -80,7 +88,7 @@ sequenceDiagram
     Note over P: Build context (sender, agentId, channel)<br/>Evaluate openclaw_agent once for this run
     P-->>OC: providerOverride, modelOverride
     OC->>P: before_prompt_build
-    P-->>OC: appendSystemContext (instructions), toolsAllow
+    P-->>OC: appendSystemContext (instructions, skill index), toolsAllow
     OC->>P: before_agent_run
     alt Config disabled
         P-->>OC: block
@@ -95,6 +103,12 @@ sequenceDiagram
                 OC->>P: before_tool_call
                 P-->>OC: Allow, or block if the variation doesn't list the tool
             end
+            opt load_skill call
+                OC->>P: before_tool_call
+                P-->>OC: Block unless the variation pins the skill, else set its pinned version
+                OC->>P: load_skill(name, version)
+                P-->>OC: That version's SKILL.md, from the SDK's skill store
+            end
         end
         OC-->>U: Reply
         OC->>P: agent_end
@@ -108,6 +122,7 @@ sequenceDiagram
 | Model and provider | `before_model_resolve` | That run's model. `model.custom.openclawModel` (`provider/model`) overrides the mapping |
 | Instructions | `before_prompt_build` | Appended to OpenClaw's system prompt |
 | Tools | `before_prompt_build`, `before_tool_call` | Other tools are hidden from the model, and any call to one is blocked |
+| Skills | `before_prompt_build`, `before_tool_call`, the `load_skill` tool | Pinned skills are listed in the prompt and loaded on demand; see [Skills](#skills) |
 | Tracker | `llm_output`, `model_call_ended`, `agent_end` | Tokens, time to first token, duration, tool calls and success |
 
 The LaunchDarkly context is a `user` keyed by the sender, or `openclaw-local-operator` for command-line runs. It has
@@ -116,15 +131,34 @@ the attributes `agentId`, `channel` and `trigger`.
 When LaunchDarkly can't be reached, or the config doesn't exist, runs keep OpenClaw's own settings. Set
 `failClosed: true` in the plugin's config to block them instead.
 
+## Skills
+
+A variation pins library skills by key and version. For each run the plugin:
+
+1. Reads the served variation's pins, and fetches each pinned version from the SDK's skill store. The store checks
+   each skill's content hash.
+2. Adds a short index to the system prompt: each skill's name and description, not its content.
+3. Offers its `load_skill` tool. When the model calls it, `before_tool_call` checks the name against the run's pins,
+   blocks anything else, and replaces the arguments with the pinned key and version. The tool returns that exact
+   version's `SKILL.md`.
+
+Nothing is written to disk. Skill content stays in the SDK's in-memory store, and LaunchDarkly stays the only copy
+that matters. Re-pinning, rolling back or unpinning a skill applies on the next run, the same way targeting does.
+
+`load_skill` is allowed for any pinned skill, whatever the variation's tool list says, so `locked-down` can load
+skills while it has no other tools. Each load is recorded in the decision log as `skill_loaded`, and a refused one as
+`blocked_skill`.
+
 Plugin settings go under `plugins.entries.ld-agentcontrol.config` in the OpenClaw config. They are `configKey`,
 `toolPrefix`, `failClosed`, `hideTools`, `initTimeoutSeconds` and `decisionLog`; the manifest describes each one.
 
 ## Gaps and unexpected behavior
 
-Found on 2026-10-13 while building and testing this, with:
+Found on 2026-10-13 while building and testing this, and on 2026-10-14 while adding skills, with:
 
 - OpenClaw 2026.10.3 on Node 26.9.0
 - `@launchdarkly/server-sdk-ai` 2.0.13 and `@launchdarkly/node-server-sdk` 9.14.4
+- `@launchdarkly/ai-server` 0.4.0, for its experimental skills module only
 - the LaunchDarkly REST API with `LD-API-Version: beta`
 
 Recheck these after upgrading any of them.
@@ -142,6 +176,22 @@ Recheck these after upgrading any of them.
     `trackDuration` and the other track methods itself.
   - OpenClaw reports cached prompt tokens separately, and the plugin counts them as input. Before that fix, a run
     showed 358 input tokens against a total of 27,888.
+
+### LaunchDarkly skills
+
+- **The AI SDK's config object leaves out skill pins.** The flag payload carries each variation's `skills`
+  (`[{key, version}]`), but `agentConfig()` in `@launchdarkly/server-sdk-ai` 2.0.13 doesn't return them.
+  - Workaround: the plugin evaluates the raw variation with the base SDK's `variation()` and reads the pins with
+    `skillRefs()`.
+  - This is a second step outside the AI SDK, after the missing-config check. It sends one more evaluation event
+    per run.
+- **Skill content needs a second, experimental SDK.** Only `@launchdarkly/ai-server/experimental` can fetch skills
+  (`FDv2SkillStore`, `getSkillResult`). Its docs call it experimental, so the plugin pins it to exactly 0.4.0.
+  - It opens its own connection to LaunchDarkly, alongside the main SDK's.
+  - Its `mode` takes `"stream"` or `"poll"`. It throws on `"streaming"` or `"polling"`.
+  - Delivery worked in both modes on the non-production instance, unlike flag streaming (see below).
+- **Skill use isn't recorded on the tracker.** The 2.0.13 tracker has no skill events, so skill loads appear only in
+  the plugin's decision log, not in LaunchDarkly's metrics.
 
 ### LaunchDarkly REST API
 
@@ -205,6 +255,31 @@ streams. To find out, edit a variation and evaluate it from a new streaming clie
   - The cloud Agents API runner ignores `toolsAllow`.
   - `before_agent_run` isn't a reliable gate on the Codex or Copilot runners.
   - Where tools can't be hidden, `before_tool_call` is the check that blocks them.
+- **Tool Search hides plugin tools.** Embedded runs turn on OpenClaw's Tool Search by default. It keeps plugin
+  tools behind `tool_search`, `tool_describe` and `tool_call`, while core tools such as `exec` stay visible.
+  - The model looked for `load_skill` through those controls, and the plugin blocked them, because they weren't on
+    the variation's tool list. So no skill loaded, with no error.
+  - Workaround: `load_skill` is registered with `catalogMode: "direct-only"`, and the plugin always allows the three
+    controls.
+  - That's safe because a call made through `tool_call` reaches `before_tool_call` again under the real tool's name.
+    This was tested: `locked-down` calling `exec` through `tool_call` was blocked.
+- **A plugin tool doesn't know which run it's serving.** Its context has the session, not the run ID. So the run's
+  skill check and the pinned version are set in `before_tool_call`, which does have the run ID, by rewriting the
+  call's arguments.
+  - A `load_skill` call that arrives without that version is refused. So on a runner that skips the hook, skills fail
+    closed rather than open.
+  - OpenClaw's docs say Codex native tools can't have arguments rewritten. Skills weren't tested there.
+- **Skills from AgentControl aren't OpenClaw skills.**
+  - They don't appear in OpenClaw's skill list, `skills_search` or the Control UI, and `$skill` references in a
+    prompt don't find them.
+  - OpenClaw's own `skills_read` tool is still offered for its native skills.
+  - No hook can choose a run's skills, and OpenClaw's skill allowlists are per agent in config, so its native skill
+    loading can't follow per-context targeting.
+- **The model decides whether to load a skill.** The index tells it when each one applies, but a model can skip one.
+  In one run, `helper` answered without loading `openclaw-house-style`, which its description says to load before
+  every reply. The checks only require each variation's task skill.
+- **A loaded skill stays in the conversation.** Its full content enters the context as a tool result. Only skills
+  the model loads cost context, not every pinned skill.
 - **Setup details:**
   - `agent exec` has no `--agent` flag, so the checks use `openclaw agent --local`.
   - A config with more than one agent needs `agents.ownership: "explicit"`.

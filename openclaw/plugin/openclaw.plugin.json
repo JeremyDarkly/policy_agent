@@ -3,6 +3,7 @@
   "name": "LaunchDarkly AgentControl",
   "description": "Takes each run's model, instructions and tools from a LaunchDarkly AgentControl config, and records run metrics",
   "activation": { "onStartup": true },
+  "contracts": { "tools": ["load_skill"] },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

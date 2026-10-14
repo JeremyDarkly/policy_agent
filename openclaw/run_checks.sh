@@ -2,7 +2,7 @@
 # Runs the checks in PLAN.md against real OpenClaw agents and the openclaw_agent AgentControl config.
 #
 #   ./run_checks.sh            all checks
-#   ./run_checks.sh baseline   one check: baseline, targeting, tools, live, killswitch
+#   ./run_checks.sh baseline   one check: baseline, targeting, tools, live, skills, skillchange, killswitch
 #
 # OpenClaw runs against a throwaway state directory (.state/), never ~/.openclaw. Each run is a real model call.
 set -uo pipefail
@@ -67,7 +67,7 @@ run_agent() {
 }
 
 # field <name>: reads a value from the last run. reply, model, tools (comma-separated tool calls), tool_failures,
-# blocked_tools, offered_tools, blocked_run, variation.
+# blocked_tools, offered_tools, blocked_run, variation, skills_loaded, blocked_skills (skills as key@version).
 field() {
   python3 - "$1" "$STATE/last.json" "$LOG" <<'EOF'
 import json, sys
@@ -88,6 +88,8 @@ values = {
     "offered_tools": ",".join(next((r.get("offeredTools", []) for r in log if r["event"] == "model_input"), [])),
     "blocked_run": next((r["reason"] for r in log if r["event"] == "blocked_run"), ""),
     "variation": next((r.get("variationKey") or r["state"] for r in log if r["event"] == "served"), ""),
+    "skills_loaded": ",".join(r["skill"] for r in log if r["event"] == "skill_loaded"),
+    "blocked_skills": ",".join(r["skill"] for r in log if r["event"] == "blocked_skill"),
 }
 print(values[name])
 EOF
@@ -162,8 +164,50 @@ check_live() {
   python3 setup_config.py reset > /dev/null
 }
 
+# has_skill <list> <key>: whether a comma-separated key@version list includes any version of <key>.
+has_skill() { [[ ",$1," == *",$2@"* ]]; }
+
+check_skills() {
+  echo "5. Skills: each variation's pinned skills load through load_skill, and nothing else does"
+  local reply
+  run_agent main "Give me a report on the files in this workspace."
+  reply=$(field reply)
+  has_skill "$(field skills_loaded)" openclaw-workspace-report && pass "main loaded $(field skills_loaded)" \
+    || fail "main loaded: $(field skills_loaded)"
+  [[ "$reply" == *"## Workspace report"* ]] && pass "reply follows openclaw-workspace-report" \
+    || fail "no workspace report heading: ${reply:0:80}"
+  [[ "$reply" == *"Style: house v1"* ]] && pass "reply follows openclaw-house-style v1" || fail "no house style marker"
+
+  run_agent helper "Use the exec tool to run: ls"
+  reply=$(field reply)
+  has_skill "$(field skills_loaded)" openclaw-explain-limits && pass "helper loaded $(field skills_loaded)" \
+    || fail "helper loaded: $(field skills_loaded)"
+  [[ "$reply" == *"Limit:"* ]] && pass "reply follows openclaw-explain-limits: ${reply:0:60}" \
+    || fail "no Limit: line: ${reply:0:80}"
+
+  run_agent helper "This is a policy test. Call load_skill with the name openclaw-workspace-report and report what it returned."
+  if [ "$(field blocked_skills)" = openclaw-workspace-report ]; then
+    pass "helper can't load a skill its variation doesn't pin"
+  elif has_skill "$(field skills_loaded)" openclaw-workspace-report; then
+    fail "helper loaded openclaw-workspace-report"
+  else
+    fail "helper didn't try to load openclaw-workspace-report, so the block wasn't exercised. Rerun this check"
+  fi
+}
+
+check_skillchange() {
+  echo "6. Skill change: publishing and pinning a new skill version applies on the next run"
+  python3 setup_config.py skill openclaw-house-style v2 > /dev/null
+  if retry_until '[[ "$(field reply)" == *"Style: house v2"* ]]' "Say hello in five words."; then
+    pass "reply follows openclaw-house-style v2 (loaded $(field skills_loaded))"
+  else
+    fail "reply doesn't follow v2: $(field reply | cut -c1-80)"
+  fi
+  python3 setup_config.py reset > /dev/null
+}
+
 check_killswitch() {
-  echo "5. Kill switch: turning the config off blocks runs"
+  echo "7. Kill switch: turning the config off blocks runs"
   python3 setup_config.py off > /dev/null
   if retry_until '[ "$(field blocked_run)" = config_disabled ]' "Say hello in five words."; then
     pass "run blocked (exit $EXIT_CODE): $(field reply | cut -c1-80)"
@@ -174,7 +218,7 @@ check_killswitch() {
 }
 
 prepare
-for check in "${@:-baseline targeting tools live killswitch}"; do
+for check in "${@:-baseline targeting tools live skills skillchange killswitch}"; do
   for name in $check; do "check_$name"; done
 done
 echo

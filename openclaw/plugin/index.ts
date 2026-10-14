@@ -3,11 +3,22 @@
 //
 // The config is evaluated once per run, in whichever hook fires first, and every later hook in the run reuses it.
 // Turning the config off in LaunchDarkly blocks new runs. Credentials come from the environment only.
+//
+// Skills pinned on the served variation are listed in the system prompt by name and description. The agent loads
+// one with the plugin's load_skill tool, which returns the exact pinned version from the SDK's skill store. Nothing
+// is written to disk.
 import { appendFileSync } from "node:fs";
 
+import {
+  FDv2SkillStore,
+  getSkillResult,
+  setSkillStore,
+  skillRefs,
+} from "@launchdarkly/ai-server/experimental";
 import { init, type LDClient, type LDContext } from "@launchdarkly/node-server-sdk";
 import { initAi, type LDAIAgentConfig, type LDAIClient, type LDAIConfigTracker } from "@launchdarkly/server-sdk-ai";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { Type } from "typebox";
 
 type Settings = {
   configKey: string;
@@ -17,6 +28,14 @@ type Settings = {
   initTimeoutSeconds: number;
   decisionLog?: string;
 };
+
+const LOAD_SKILL = "load_skill";
+// OpenClaw's Tool Search controls. They only find and describe tools, and a call made through tool_call reaches
+// before_tool_call again under the real tool's name, so the tool list is still enforced there.
+const TOOL_SEARCH_CONTROLS = new Set(["tool_search", "tool_describe", "tool_call"]);
+
+// A skill pinned on the served variation. Its content stays in the SDK's skill store until load_skill asks for it.
+type PinnedSkill = { key: string; version: number; name: string; description: string };
 
 // What a run was served. `unavailable` means LaunchDarkly couldn't be reached, so the run keeps OpenClaw's own
 // settings unless failClosed is set.
@@ -29,7 +48,9 @@ type RunState =
       tracker: LDAIConfigTracker;
       variationKey: string;
       allowedTools: Set<string>;
+      skills: PinnedSkill[];
       toolCalls: string[];
+      skillsLoaded: string[];
       tokens: { input: number; output: number; total: number };
       firstTokenMs?: number;
     };
@@ -93,6 +114,17 @@ function allowedTools(config: LDAIAgentConfig, prefix: string): Set<string> {
   );
 }
 
+// The skills section of the system prompt: each pinned skill's name and description, not its content.
+function skillIndex(skills: PinnedSkill[]): string | undefined {
+  if (skills.length === 0) return undefined;
+  const lines = skills.map((skill) => `- ${skill.name}: ${skill.description}`);
+  return [
+    "Skills from LaunchDarkly AgentControl. Before a task a skill covers, call the load_skill tool with the " +
+      "skill's name and follow what it returns. Don't load a skill the task doesn't need.",
+    ...lines,
+  ].join("\n");
+}
+
 export default definePluginEntry({
   id: "ld-agentcontrol",
   name: "LaunchDarkly AgentControl",
@@ -100,7 +132,7 @@ export default definePluginEntry({
   register(api) {
     const settings = readSettings(api.pluginConfig);
     const runs = new Map<string, Promise<RunState>>();
-    let client: Promise<{ ld: LDClient; ai: LDAIClient } | undefined> | undefined;
+    let client: Promise<{ ld: LDClient; ai: LDAIClient; skills?: FDv2SkillStore } | undefined> | undefined;
 
     const log = (record: Record<string, unknown>) => {
       if (!settings.decisionLog) return;
@@ -134,9 +166,50 @@ export default definePluginEntry({
           api.logger.warn(`ld-agentcontrol: LaunchDarkly did not initialize: ${String(error)}`);
           return undefined;
         }
-        return { ld, ai: initAi(ld) };
+        // Skill content comes from a separate store in the newer AI SDK's experimental module. A store that doesn't
+        // answer leaves runs without skills; the config itself still applies.
+        let skills: FDv2SkillStore | undefined = new FDv2SkillStore(sdkKey, {
+          mode: baseUri === undefined ? "stream" : "poll",
+          baseUri,
+          streamUri: process.env.LAUNCHDARKLY_STREAM_URI || undefined,
+        }).start();
+        if (await skills.waitForSkills({ timeoutSeconds: settings.initTimeoutSeconds })) {
+          setSkillStore(skills);
+        } else {
+          api.logger.warn(`ld-agentcontrol: skills unavailable: ${skills.failed ?? "timed out"}`);
+          await skills.close();
+          skills = undefined;
+        }
+        return { ld, ai: initAi(ld), skills };
       })();
       return client;
+    };
+
+    // The AI SDK's config object leaves out a variation's skill pins, so they're read from the raw variation.
+    const pinnedSkills = async (
+      sdk: { ld: LDClient; skills?: FDv2SkillStore },
+      context: LDContext,
+      ctx: HookContext,
+    ): Promise<PinnedSkill[]> => {
+      if (!sdk.skills) return [];
+      const raw = await sdk.ld.variation(settings.configKey, context, null);
+      let refs: { key: string; version: number }[] = [];
+      try {
+        refs = raw && typeof raw === "object" ? skillRefs(raw) : [];
+      } catch (error) {
+        api.logger.warn(`ld-agentcontrol: ignoring malformed skill pins: ${String(error)}`);
+      }
+      const pinned: PinnedSkill[] = [];
+      for (const ref of refs) {
+        const outcome = await getSkillResult(ref.key, { version: ref.version });
+        if (outcome.skill) {
+          const { key, version, name, description } = outcome.skill;
+          pinned.push({ key, version, name: name ?? key, description: description ?? "" });
+        } else {
+          log({ event: "skill_unavailable", runId: ctx.runId, skill: `${ref.key}@${ref.version}`, reason: outcome.reason });
+        }
+      }
+      return pinned;
     };
 
     const evaluate = async (ctx: HookContext): Promise<RunState> => {
@@ -162,6 +235,7 @@ export default definePluginEntry({
       const tracker = config.createTracker();
       const { variationKey } = tracker.getTrackData();
       const tools = allowedTools(config, settings.toolPrefix);
+      const skills = await pinnedSkills(sdk, context, ctx);
       log({
         event: "served",
         runId: ctx.runId,
@@ -170,6 +244,7 @@ export default definePluginEntry({
         variationKey,
         model: modelOverride(config),
         tools: [...tools],
+        skills: skills.map((skill) => `${skill.key}@${skill.version}`),
       });
       return {
         kind: "served",
@@ -177,7 +252,9 @@ export default definePluginEntry({
         tracker,
         variationKey,
         allowedTools: tools,
+        skills,
         toolCalls: [],
+        skillsLoaded: [],
         tokens: { input: 0, output: 0, total: 0 },
       };
     };
@@ -224,15 +301,19 @@ export default definePluginEntry({
     api.on("before_prompt_build", async (_event, ctx) => {
       const state = await runState(ctx);
       if (state.kind !== "served") return undefined;
+      const sections = [state.config.instructions, skillIndex(state.skills)].filter(Boolean);
+      const allowed = [...state.allowedTools, ...(state.skills.length > 0 ? [LOAD_SKILL] : [])];
       return {
-        appendSystemContext: state.config.instructions || undefined,
-        toolsAllow: settings.hideTools ? [...state.allowedTools] : undefined,
+        appendSystemContext: sections.join("\n\n") || undefined,
+        toolsAllow: settings.hideTools ? allowed : undefined,
       };
     });
 
     // The enforcing check. It also covers runners that ignore toolsAllow.
     api.on("before_tool_call", async (event, ctx) => {
       const state = await runState(ctx);
+      if (event.toolName === LOAD_SKILL) return gateSkill(event.params, state, ctx);
+      if (TOOL_SEARCH_CONTROLS.has(event.toolName)) return undefined;
       if (state.kind !== "served") {
         return state.kind === "disabled" || settings.failClosed
           ? { block: true, blockReason: "Tools are turned off for this agent in LaunchDarkly AgentControl." }
@@ -247,6 +328,45 @@ export default definePluginEntry({
       }
       state.toolCalls.push(`${settings.toolPrefix}${event.toolName}`);
       return undefined;
+    });
+
+    // load_skill is allowed for any skill the run's variation pins, whatever its tool list says. The hook replaces
+    // the call's arguments with the pinned key and version, so the tool can't be asked for anything else.
+    const gateSkill = (params: Record<string, unknown>, state: RunState, ctx: HookContext) => {
+      const requested = typeof params.name === "string" ? params.name.trim() : "";
+      const skill = state.kind === "served"
+        ? state.skills.find((pinned) => pinned.key === requested || pinned.name === requested)
+        : undefined;
+      if (!skill || state.kind !== "served") {
+        log({ event: "blocked_skill", runId: ctx.runId, agentId: ctx.agentId, skill: requested });
+        return { block: true, blockReason: `No skill named "${requested}" is available to this agent.` };
+      }
+      state.skillsLoaded.push(`${skill.key}@${skill.version}`);
+      log({ event: "skill_loaded", runId: ctx.runId, agentId: ctx.agentId, skill: `${skill.key}@${skill.version}` });
+      return { params: { name: skill.key, version: skill.version } };
+    };
+
+    api.registerTool({
+      name: LOAD_SKILL,
+      label: "Load skill",
+      // Tool Search would otherwise keep a plugin tool behind tool_search and tool_call.
+      catalogMode: "direct-only",
+      description:
+        "Returns the full instructions of one of the skills listed in your system prompt. Call it with the skill's " +
+        "name before a task the skill covers, then follow the instructions it returns.",
+      parameters: Type.Object({
+        name: Type.String({ description: "The skill's name, as listed in the system prompt" }),
+        version: Type.Optional(Type.Integer({ description: "Set by the system. Leave it out." })),
+      }),
+      async execute(_id, params) {
+        // Only before_tool_call sets a version. A call without one didn't pass the run's skill check.
+        const { name, version } = params as { name: string; version?: number };
+        const outcome = version === undefined ? undefined : await getSkillResult(name, { version });
+        const text = outcome?.skill
+          ? new TextDecoder().decode(outcome.skill.content)
+          : `Skill "${name}" isn't available${outcome ? ` (${outcome.reason})` : ""}.`;
+        return { content: [{ type: "text", text }], details: { name, version, available: Boolean(outcome?.skill) } };
+      },
     });
 
     // Records which tools the model was actually offered, so a check can tell hidden tools from blocked ones.
@@ -299,6 +419,7 @@ export default definePluginEntry({
         durationMs: event.durationMs,
         tokens: state.tokens,
         toolCalls: state.toolCalls,
+        skillsLoaded: state.skillsLoaded,
       });
       const sdk = await client;
       await sdk?.ld.flush();
@@ -307,6 +428,7 @@ export default definePluginEntry({
     api.on("gateway_stop", async () => {
       const sdk = await client;
       sdk?.ld.close();
+      await sdk?.skills?.close();
     });
   },
 });
