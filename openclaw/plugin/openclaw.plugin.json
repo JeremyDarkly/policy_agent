@@ -1,0 +1,31 @@
+{
+  "id": "ld-agentcontrol",
+  "name": "LaunchDarkly AgentControl",
+  "description": "Takes each run's model, instructions and tools from a LaunchDarkly AgentControl config, and records run metrics",
+  "activation": { "onStartup": true },
+  "contracts": { "tools": ["load_skill"] },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "configKey": { "type": "string", "description": "AgentControl config key. Default: openclaw_agent" },
+      "toolPrefix": {
+        "type": "string",
+        "description": "Prefix removed from Library tool keys to get OpenClaw tool ids. Default: openclaw_"
+      },
+      "failClosed": {
+        "type": "boolean",
+        "description": "Block runs when LaunchDarkly can't be reached. Default: false (runs keep OpenClaw's own settings)"
+      },
+      "hideTools": {
+        "type": "boolean",
+        "description": "Hide tools the variation doesn't allow from the model. Default: true. Calls are blocked either way"
+      },
+      "initTimeoutSeconds": { "type": "number", "description": "How long to wait for the SDK to connect. Default: 10" },
+      "decisionLog": {
+        "type": "string",
+        "description": "Optional path of a JSONL file that records what each run was served and what was blocked"
+      }
+    }
+  }
+}

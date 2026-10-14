@@ -1,0 +1,14 @@
+{
+  "name": "policy-agent-openclaw",
+  "private": true,
+  "type": "module",
+  "description": "Test harness: OpenClaw agents controlled at runtime by LaunchDarkly AgentControl",
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "openclaw": "2026.10.3",
+    "typescript": "^5.9.3"
+  },
+  "allowScripts": {
+    "openclaw": true
+  }
+}

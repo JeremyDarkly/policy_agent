@@ -1,0 +1,3 @@
+# Throwaway OpenClaw state: config, sessions, run output and the decision log
+.state/
+node_modules/
