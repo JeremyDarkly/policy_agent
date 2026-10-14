@@ -97,8 +97,9 @@ pins a model."
 - "`diagram-maker` is one of OpenClaw's built-in skills. No variation pins it, and LaunchDarkly has never heard of
   it."
 - "Our gate held: `load_skill` refused it. So did the tool list, when the agent tried OpenClaw's skill tool."
-- "But an OpenClaw skill is just a file on disk. This variation allows `read`, so the agent read the file directly,
-  and is now following a skill nobody approved."
+- "But an OpenClaw skill is just a file on disk. OpenClaw's own part of the system prompt lists every one of its
+  skills, with the path to its file. This variation allows `read`, so the agent read the file directly, and is now
+  following a skill nobody approved."
 - "AgentControl controls the skills it serves. It doesn't yet control the skills the runtime already has."
 
 ## Scene 5: The same request on locked-down
@@ -108,8 +109,10 @@ pins a model."
 **Expect:** ✗ `load_skill diagram-maker`, then a `Limit:` reply.
 
 **Say:**
-- "Locked-down can't reach it, but not because of a skills policy. It just has no file tools."
-- "Give this variation `read`, and it would get in the same way. The protection is a side effect of its tool list."
+- "Locked-down can't reach it, but not because of a skills policy. It has no file tools, so OpenClaw doesn't even
+  tell it that its own skills exist."
+- "Give this variation `read`, and OpenClaw would list them and it would get in the same way. The protection is a
+  side effect of its tool list."
 
 ## Scene 6: Closing the gap
 

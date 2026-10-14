@@ -242,9 +242,10 @@ streams. To find out, edit a variation and evaluate it from a new streaming clie
 - **Only models in OpenClaw's catalog are accepted.** `openai/gpt-4o-mini` was rejected as a "retired or
   noncanonical model ref". A variation's model has to be one both the LaunchDarkly project and OpenClaw's catalog
   know, such as `gpt-5.4-mini`.
-- **The agent id changes how the agent behaves.** OpenClaw puts the agent id in the system prompt. An agent called
-  `restricted` refused to use tools that were offered, so a check couldn't tell whether the plugin had blocked them.
-  - Workaround: the agents have neutral names (`main`, `helper`).
+- **The agent's name changes how it behaves.** OpenClaw names each agent's workspace after it, and the system prompt
+  repeats the workspace path, such as `.state/workspace-helper`, more than ten times. An agent called `restricted`
+  refused to use tools that were offered, so a check couldn't tell whether the plugin had blocked them.
+  - Workaround: the agents and their workspaces have neutral names (`main`, `helper`).
 - **Session history carries over between runs.** `openclaw agent --local --agent <id>` reuses that agent's main
   session, so earlier refusals affected later runs.
   - Workaround: each check passes a new `--session-key`.
@@ -273,15 +274,21 @@ streams. To find out, edit a variation and evaluate it from a new streaming clie
 - **AgentControl doesn't gate OpenClaw's own skills.** OpenClaw comes with its own skills; 22 were eligible for each
   agent here, such as `diagram-maker`. No variation pins them, but a variation that allows `read` can open their
   `SKILL.md` files directly.
+  - OpenClaw tells the model where they are. For an agent with file tools, its system prompt has a `## Skills`
+    section listing each skill's name, description and `SKILL.md` path, and tells the model to read the matching
+    one.
+  - For an agent with no file tools, OpenClaw leaves that section and its `skills_read` tool out entirely. That's
+    why `locked-down` agents never see OpenClaw's skills.
   - Tested on 2026-10-14: `main` (`standard`) was refused by `load_skill` and by `skills_read`, then read the file
-    and followed it. `helper` (`locked-down`) was stopped only because it has no file tools.
+    and followed it. `helper` (`locked-down`) wasn't told about OpenClaw's skills, because it has no file tools.
   - Workaround: `agents.defaults.skills: []` in OpenClaw's config hides its own skills from every agent, so
     LaunchDarkly pinning is the only source. That's static and per agent, and the files stay on disk, so the tool
     list is the real boundary. `DEMO.md` scene 6 shows it.
 - **Skills from AgentControl aren't OpenClaw skills.**
   - They don't appear in OpenClaw's skill list, `skills_search` or the Control UI, and `$skill` references in a
     prompt don't find them.
-  - OpenClaw's own `skills_read` tool is still offered for its native skills.
+  - OpenClaw's own `skills_read` tool is offered alongside `load_skill`, for its own skills, whenever the agent has
+    file tools.
   - No hook can choose a run's skills, and OpenClaw's skill allowlists are per agent in config, so its native skill
     loading can't follow per-context targeting.
 - **The model decides whether to load a skill.** The index tells it when each one applies, but a model can skip one.

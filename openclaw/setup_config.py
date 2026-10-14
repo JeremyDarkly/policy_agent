@@ -59,8 +59,8 @@ VARIATIONS = {
     },
 }
 # Contexts whose agentId is in this list get the locked-down variation. Everyone else gets standard. Keep the agent
-# names neutral: OpenClaw puts the agent id in the system prompt, and an agent called "restricted" refuses tools on
-# its own, which hides whether the plugin blocked them.
+# names neutral: the system prompt repeats the agent's workspace path, which is named after it, and an agent called
+# "restricted" refuses tools on its own, which hides whether the plugin blocked them.
 LOCKED_DOWN_AGENTS = ["helper"]
 RULE_DESCRIPTION = "Locked-down OpenClaw agents"
 
