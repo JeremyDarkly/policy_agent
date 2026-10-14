@@ -11,7 +11,7 @@ The AI SDK creates the evaluation and run through the LaunchDarkly REST API and
 reports every score as an SDK event; LaunchDarkly stores the pass/fail verdict.
 
 Usage (from the repo root, with the backend running):
-    cd evals && uv run python run_policy_agent_eval.py --env-file ../.env.staging
+    cd evals && uv run python run_policy_agent_eval.py --env-file ../.env.staging-org
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ def score_routing(row: DatasetRow, output: str | None) -> float:
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--env-file", default="../.env.staging")
+    parser.add_argument("--env-file", default="../.env.staging-org")
     parser.add_argument("--dataset", default=os.getenv("LD_DATASET_KEY", "policy_agent_dataset"))
     parser.add_argument("--judge", default="offline-answer-quality")
     args = parser.parse_args()
@@ -100,10 +100,9 @@ async def main() -> int:
     unique = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     print(f"project={project_key} dataset={args.dataset} agent={chat_url()}")
 
-    evals = init_evaluations()
+    evals = init_evaluations(project_key=project_key)
     try:
         result = await evals.run(
-            project_key=project_key,
             key=f"policy-agent-offline-{unique}",
             dataset=args.dataset,
             handler=policy_agent_handler,

@@ -19,7 +19,7 @@ Run it after `terraform apply`. It is idempotent.
 Usage:
     python scripts/set_ai_config_targeting.py            # reads .env
     python scripts/set_ai_config_targeting.py --dry-run
-    python scripts/set_ai_config_targeting.py --env-file .env.staging
+    python scripts/set_ai_config_targeting.py --env-file .env.staging-org
 
 LAUNCHDARKLY_API_HOST selects a non-production instance (default
 https://app.launchdarkly.com).

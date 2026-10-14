@@ -7,7 +7,7 @@ Evaluations run from code with the LaunchDarkly Python AI SDK against the stagin
 | `offline_evals_walkthrough.py` | Notebook (jupytext percent format) that walks through the *Offline Evals from Code* guide |
 | `offline_evals_customer.py` | Customer version of the notebook: runs against your own production project, with no staging setup or asset checks |
 | `run_policy_agent_eval.py` | Script: evaluates the running agent via `/api/chat` with a judge and a routing scorer |
-| `policy_agent_dataset.jsonl` | 6-row dataset; upload in the staging UI with key `policy_agent_dataset` |
+| `policy_agent_dataset.jsonl` | The notebooks' 6 rows, for uploading as a stored dataset with key `policy_agent_dataset`. The notebooks pass the same rows in code, so they don't need it |
 | `policy_agent_dataset_quick.jsonl` | 2-row dataset for cheap practice runs; key `policy_agent_dataset_quick` |
 | `guarded_rollout_walkthrough.py` | Notebook: a guarded rollout of a new AI Config variation on staging, rolled back automatically when a judge score regresses |
 | `guarded_rollout_questions.jsonl` | Customer questions the guarded rollout notebook sends as traffic |
@@ -26,8 +26,8 @@ VS Code, pick **Select Kernel → Jupyter Kernel → Policy agent evals (uv)**, 
 `evals/.venv/bin/python`. Rerun the `ipykernel install` line if you recreate `.venv`.
 
 Set the app up on staging from **this repo** first. The notebook's "Before you run it" section walks through it:
-`.env.staging`, Terraform in the `staging` workspace, the targeting script, `docker compose --env-file .env.staging up`,
-and uploading the dataset. Staging support (Terraform `api_host`, SDK endpoint variables, `TF_WORKSPACE`, `ENV_FILE`)
+`.env.staging-org`, Terraform in the `staging` workspace, the targeting script, and `docker compose --env-file .env.staging-org up`.
+The dataset and the `find_branch` tool are defined in the notebook, so there's nothing to upload. Staging support (Terraform `api_host`, SDK endpoint variables, `TF_WORKSPACE`, `ENV_FILE`)
 exists only in this repo, so other copies of the app target production. The `.ipynb` is gitignored
 because it carries run outputs; edit the `.py`.
 
@@ -52,9 +52,10 @@ uv run jupyter lab guarded_rollout_walkthrough.ipynb
 
 ## Customer notebook
 
-`offline_evals_customer.py` is the version to give customers. It uses production LaunchDarkly. The project, dataset,
-judge and tool keys are settings at the top. It doesn't create or check anything in LaunchDarkly: its "Before you
-start" section lists what to create in the UI, with the rubrics and tool schema to copy. It reads `LD_API_TOKEN`,
+`offline_evals_customer.py` is the version to give customers. It uses production LaunchDarkly. The project, judge and
+tool keys are settings at the top, and the dataset rows and the `find_branch` tool are defined in code. It doesn't
+create or check anything in LaunchDarkly: its "Before you start" section lists the judges to create in the UI, with
+the rubrics to copy. It reads `LD_API_TOKEN`,
 `LD_SDK_KEY` and `OPENAI_API_KEY` from the environment, and asks for any that are missing with hidden input.
 
 It imports from [`launchdarkly-ai-python`](https://pypi.org/project/launchdarkly-ai-python/). This folder's
@@ -87,7 +88,7 @@ Removing the `jupytext` metadata unpairs the copy, so opening it won't sync chan
 ## Post a notebook with results
 
 `offline_evals_walkthrough_public.ipynb` is a committed copy of an executed run, with internal details removed:
-non-production hostnames (read from `../.env.staging`), evaluation and run IDs, partial credentials, local paths and
+non-production hostnames (read from `../.env.staging-org`), evaluation and run IDs, partial credentials, local paths and
 SDK log noise. Rebuild it after a run, and review it before committing. The script refuses to write the copy if
 anything that looks sensitive remains:
 

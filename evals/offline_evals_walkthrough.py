@@ -21,14 +21,15 @@
 #
 # One call to `evals.run()` does two phases:
 #
-# 1. **Generation.** The SDK fetches the dataset rows from LaunchDarkly and calls your handler once per row.
+# 1. **Generation.** The SDK takes the dataset rows, here from a list in the notebook, and calls your handler once
+#    per row.
 # 2. **Evaluation.** The SDK scores each output with the criteria you pass: LaunchDarkly `Judge`s and local `Scorer`s.
 #
 # Every result goes to LaunchDarkly as an SDK event. LaunchDarkly compares each score with its threshold and
 # rules on the row and run verdicts. The SDK never computes a verdict itself.
 #
 # Every run counts against the project's **daily LaunchDarkly token limit**. Use the switches in **Settings** to run
-# only what you need, and the 2-row quick dataset for practice runs.
+# only what you need, and `QUICK` for 2-row practice runs.
 
 # %% [markdown]
 # ## Before you run it: set up ToggleBank on staging
@@ -50,9 +51,9 @@
 # 1. **Create the project on staging.** Use key `policy-agent` (or your own), then copy the **Test** environment's
 #    server-side SDK key (`sdk-…`) from the project's environment settings.
 #
-# 2. **Create `.env.staging`** from the example, then fill it in:
+# 2. **Create `.env.staging-org`** from the example, then fill it in:
 #    ```sh
-#    cp .env.example .env.staging
+#    cp .env.example .env.staging-org
 #    ```
 #    ```dotenv
 #    LAUNCHDARKLY_SDK_KEY=sdk-...            # Test environment of the staging project
@@ -62,7 +63,7 @@
 #    LAUNCHDARKLY_API_HOST=https://<launchdarkly-host>
 #    LAUNCHDARKLY_STREAM_URI=https://<stream-host>
 #    LAUNCHDARKLY_EVENTS_URI=https://<events-host>
-#    ENV_FILE=./.env.staging                 # the file Compose mounts into the backend
+#    ENV_FILE=./.env.staging-org                 # the file Compose mounts into the backend
 #    TF_WORKSPACE=staging                    # keeps staging's Terraform state apart from production's
 #    AWS_PROFILE=<your SSO profile>
 #    OPENAI_API_KEY=sk-...                   # used by this notebook's OpenAI sections and judges
@@ -72,39 +73,36 @@
 # 3. **Provision the agents, model configs, tools and agent graph** (41 resources) with Terraform. The first
 #    `init` creates the `staging` workspace from `TF_WORKSPACE`. The plan should show only additions.
 #    ```sh
-#    docker compose --env-file .env.staging run --rm terraform init
-#    docker compose --env-file .env.staging run --rm terraform plan
-#    docker compose --env-file .env.staging run --rm terraform apply
+#    docker compose --env-file .env.staging-org run --rm terraform init
+#    docker compose --env-file .env.staging-org run --rm terraform plan
+#    docker compose --env-file .env.staging-org run --rm terraform apply
 #    ```
 #
 # 4. **Point each AI Config at its `Default` variation.** On staging this is usually already the case, and the
 #    script then just reports `ok`:
 #    ```sh
-#    python3 scripts/set_ai_config_targeting.py --env-file .env.staging
+#    python3 scripts/set_ai_config_targeting.py --env-file .env.staging-org
 #    ```
 #
 # 5. **Start the app against staging.** It needs a current AWS session for Bedrock:
 #    ```sh
 #    aws sso login --profile <your SSO profile>
-#    docker compose --env-file .env.staging up -d --build
+#    docker compose --env-file .env.staging-org up -d --build
 #    curl http://localhost:8000/health
 #    ```
 #    The UI is at http://localhost:5173. Switch back to production any time with plain `docker compose up -d`.
 #
-# 6. **Upload the dataset** in the staging UI (Agents → Library → Datasets → New dataset → Upload dataset):
-#    `evals/policy_agent_dataset.jsonl` with the key `policy_agent_dataset`, and optionally
-#    `evals/policy_agent_dataset_quick.jsonl` with the key `policy_agent_dataset_quick`. The API can't create
-#    datasets, so this is the one manual step.
-#
-# 7. **Install the notebook's dependencies** and open it:
+# 6. **Install the notebook's dependencies** and open it:
 #    ```sh
 #    cd evals && uv sync --all-groups
 #    uv run jupytext --sync offline_evals_walkthrough.py
 #    uv run jupyter lab offline_evals_walkthrough.ipynb
 #    ```
 #
-# 8. **First run only:** set `CREATE_MISSING_ASSETS = True` in **Settings**. Step 1 then creates what Terraform
-#    doesn't: the `find_branch` tool and the `offline-answer-quality` and `tool-trajectory-relevance` judges.
+# 7. **First run only:** set `CREATE_MISSING_ASSETS = True` in **Settings**. Step 1 then creates the judges Terraform
+#    doesn't: `offline-answer-quality` and `tool-trajectory-relevance`.
+#
+# There's no dataset to upload and no tool to create: the notebook defines both in code.
 #
 # The Bedrock section and the live-agent bonus also need a valid AWS session, and the bonus needs the app running.
 # Both skip themselves when those are missing.
@@ -116,12 +114,12 @@
 #   `POLICY_AGENT_ENV_FILE` overrides it. **Restart the kernel after changing it:** the SDK client keeps the account
 #   it started with.
 # - **`RUN`** turns each section on or off.
-# - **`QUICK`** switches to the 2-row dataset `evals/policy_agent_dataset_quick.jsonl`, uploaded with the key `policy_agent_dataset_quick`.
-# - **`CREATE_MISSING_ASSETS`** lets Step 1 create the `find_branch` tool and the two OpenAI judges in the project
-#   when they're missing. Off by default, because these live outside Terraform.
+# - **`QUICK`** runs only 2 of the dataset's 6 rows.
+# - **`CREATE_MISSING_ASSETS`** lets Step 1 create the two OpenAI judges in the project when they're missing. Off by
+#   default, because they live outside Terraform.
 
 # %%
-ENV_FILE_NAME = ".env.staging"  # e.g. ".env.staging-org" for another LaunchDarkly account
+ENV_FILE_NAME = ".env.staging-org"  # the org account on staging
 RUN = {
     "first_eval": True,
     "smoke": True,
@@ -136,7 +134,7 @@ CREATE_MISSING_ASSETS = False
 # %% [markdown]
 # ## Setup
 #
-# The app's `.env.staging` uses `LAUNCHDARKLY_*` names, and the SDK reads `LD_*` names, so the next cell maps one to
+# The app's `.env.staging-org` uses `LAUNCHDARKLY_*` names, and the SDK reads `LD_*` names, so the next cell maps one to
 # the other. Model names, keys and thresholds live in the notebook, and only secrets come from the env file.
 
 # %%
@@ -181,7 +179,6 @@ for target, source in {
         os.environ.pop(target, None)  # don't keep a value from a previously chosen file
 
 PROJECT_KEY = os.environ["LAUNCHDARKLY_PROJECT_KEY"]  # policy-agent
-DATASET_KEY = "policy_agent_dataset_quick" if QUICK else "policy_agent_dataset"
 OPENAI_MODEL = "gpt-4o"
 BEDROCK_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 ANSWER_JUDGE = "offline-answer-quality"  # OpenAI judge
@@ -208,13 +205,58 @@ def report(result) -> None:
     print(f"run page: {result.url}")
 
 
-print(f"env file={ENV_FILE.name}  project={PROJECT_KEY}  dataset={DATASET_KEY}")
+print(f"env file={ENV_FILE.name}  project={PROJECT_KEY}")
 
 # %% [markdown]
-# ## Step 1: Check the assets in LaunchDarkly
+# ## Step 1: Define the dataset, and check the judges in LaunchDarkly
 #
-# The guide creates these in the UI. Here they're checked through the REST API. The **dataset** has no create
-# endpoint at all, and `GET /datasets/{key}` works even though it isn't in the public spec.
+# `run()` takes the dataset as a list of rows in code, instead of the key of a dataset uploaded in the UI. Each row is
+# a dict in the dataset upload format: `input`, and optionally `expectedOutput`, `variables` and `metadata`. The SDK
+# uploads the rows to the run before generating, and fills `{{...}}` placeholders from `variables` just as it does
+# for a stored dataset. These are the rows of `evals/policy_agent_dataset.jsonl`.
+
+# %%
+FULL_DATASET = [
+    {"input": "What is the balance on my checking account?",
+     "expectedOutput": "States it cannot see a real-time balance or gives only what the profile shows, without "
+                       "inventing a figure.",
+     "metadata": {"expected_specialist": "account_specialist", "expects_tool_call": False}},
+    {"input": "What monthly fees apply to my Gold Checking account?",
+     "expectedOutput": "Answers from the account profile or says the fee schedule isn't available, without "
+                       "inventing fees.",
+     "metadata": {"expected_specialist": "account_specialist", "expects_tool_call": False}},
+    {"input": "Where is the nearest ToggleBank branch to {{zip_code}}, and what are its hours?",
+     "expectedOutput": "Names the Financial District branch at 101 Market St and gives its hours.",
+     "variables": {"zip_code": "94105"},
+     "metadata": {"expected_specialist": "branch_specialist", "expects_tool_call": True}},
+    {"input": "Is there an ATM near {{neighborhood}} that I can use on the weekend?",
+     "expectedOutput": "Names the Broadway ATM in Oakland and says it is available 24/7, including weekends.",
+     "variables": {"neighborhood": "Downtown Oakland"},
+     "metadata": {"expected_specialist": "branch_specialist", "expects_tool_call": True}},
+    {"input": "I think there's a fraudulent charge on my card. Can I talk to someone?",
+     "expectedOutput": "Treats it as urgent and offers to connect the customer with a person or schedule a call.",
+     "metadata": {"expected_specialist": "scheduler_specialist", "expects_tool_call": False}},
+    {"input": "I'd like to book an appointment to open a new savings account.",
+     "expectedOutput": "Offers appointment slots or asks for contact details to schedule.",
+     "metadata": {"expected_specialist": "scheduler_specialist", "expects_tool_call": False}},
+]
+DATASET = [FULL_DATASET[0], FULL_DATASET[2]] if QUICK else FULL_DATASET  # one account row, one branch row
+
+
+def render(template: str, variables: Mapping[str, Any]) -> str:
+    return re.sub(r"\{\{\s*([\w.]+)\s*\}\}", lambda m: str(variables.get(m.group(1), m.group(0))), template)
+
+
+# Rendered inputs, used to tell dataset rows apart from judge calls when recording outputs below.
+QUESTIONS = [render(row["input"], row.get("variables") or {}) for row in DATASET]
+print(f"dataset: {len(DATASET)} rows")
+for index, question in enumerate(QUESTIONS):
+    print(f"  [{index}] {question}")
+
+# %% [markdown]
+# Terraform provisions the agents and the Bedrock judges. The notebook also needs two OpenAI judges, checked here
+# through the REST API. With `CREATE_MISSING_ASSETS = True`, missing ones are created, with the trajectory judge
+# using the guide's rubric.
 
 # %%
 API = os.environ["LD_API_BASE_URI"].rstrip("/") + f"/api/v2/projects/{PROJECT_KEY}"
@@ -238,37 +280,6 @@ def ld_api(method: str, path: str, body: Any = None, version: str = "beta") -> t
         return error.code, None
 
 
-status, _ = ld_api("GET", f"/datasets/{DATASET_KEY}", version="20240415")
-if status != 200:
-    source = "policy_agent_dataset_quick.jsonl" if QUICK else "policy_agent_dataset.jsonl"
-    raise SystemExit(
-        f"Dataset {DATASET_KEY!r} not found (HTTP {status}). Upload evals/{source} in the staging UI "
-        f"(Agents > Library > Datasets) with that key, then rerun."
-    )
-_, rows = ld_api("GET", f"/datasets/{DATASET_KEY}/rows?mode=all&limit=100&offset=0", version="20240415")
-
-
-def render(template: str, variables: Mapping[str, Any]) -> str:
-    return re.sub(r"\{\{\s*([\w.]+)\s*\}\}", lambda m: str(variables.get(m.group(1), m.group(0))), template)
-
-
-# Rendered inputs, used to tell dataset rows apart from judge calls when recording outputs below.
-QUESTIONS = [render(row["input"], row.get("variables") or {}) for row in rows["items"]]
-print(f"dataset {DATASET_KEY}: {rows['totalCount']} rows")
-for index, question in enumerate(QUESTIONS):
-    print(f"  [{index}] {question}")
-
-# %% [markdown]
-# Terraform provisions the agents and the Bedrock judges. The notebook also needs a `find_branch` tool and two
-# OpenAI judges. With `CREATE_MISSING_ASSETS = True`, missing ones are created through the REST API, with the trajectory
-# judge using the guide's rubric.
-
-# %%
-TOOL_SCHEMA = {
-    "type": "object",
-    "properties": {"location": {"type": "string", "description": "ZIP code or neighborhood"}},
-    "required": ["location"],
-}
 TRAJECTORY_RUBRIC = """You are grading an assistant's TOOL USE, not its prose.
 
 The message history shows the user's request, the tools the assistant
@@ -285,20 +296,6 @@ the wrong tool, passed arguments the request does not support, ignored
 what a tool returned, or repeated a failing call without adapting.
 
 Score in between for partial credit."""
-
-
-def ensure_tool() -> bool:
-    if ld_api("GET", f"/ai-tools/{TOOL_KEY}")[0] == 200:
-        return True
-    if not CREATE_MISSING_ASSETS:
-        print(f"tool {TOOL_KEY} missing: set CREATE_MISSING_ASSETS = True or create it in the Library")
-        return False
-    status, _ = ld_api("POST", "/ai-tools", {
-        "key": TOOL_KEY, "schema": TOOL_SCHEMA,
-        "description": "Finds ToggleBank branches and ATMs near a ZIP code or neighborhood, with hours.",
-    })
-    print(f"created tool {TOOL_KEY}: HTTP {status}")
-    return status == 201
 
 
 ANSWER_RUBRIC = (
@@ -336,7 +333,7 @@ def ensure_judge(key: str, name: str, rubric: str) -> bool:
 
 
 answer_judge_ready = ensure_judge(ANSWER_JUDGE, "Offline answer quality", ANSWER_RUBRIC)
-trajectory_assets_ready = ensure_tool() & ensure_judge(TRAJECTORY_JUDGE, "Tool trajectory relevance", TRAJECTORY_RUBRIC)
+trajectory_judge_ready = ensure_judge(TRAJECTORY_JUDGE, "Tool trajectory relevance", TRAJECTORY_RUBRIC)
 for key in (ANSWER_JUDGE, TRAJECTORY_JUDGE, BEDROCK_JUDGE):
     status, config = ld_api("GET", f"/ai-configs/{key}")
     variation = (config or {}).get("variations", [{}])[-1]
@@ -349,7 +346,7 @@ for key in (ANSWER_JUDGE, TRAJECTORY_JUDGE, BEDROCK_JUDGE):
 #
 # | Credential | Variable | What it does |
 # |---|---|---|
-# | API access token | `LD_API_TOKEN` | Reads the dataset, tools and judges. Creates the evaluation and run. Polls the summary. |
+# | API access token | `LD_API_TOKEN` | Reads the judges. Creates the evaluation and run, and uploads the dataset rows to it. Polls the summary. |
 # | SDK key | `LD_SDK_KEY` | Sends every generation and score to LaunchDarkly as an event. Results reach LaunchDarkly only this way. |
 #
 # Without the SDK key nothing is recorded and every run times out, so `init_evaluations()` refuses to start without it.
@@ -362,7 +359,8 @@ for name in ("LD_API_TOKEN", "LD_SDK_KEY", "OPENAI_API_KEY", "AWS_PROFILE"):
 # %% [markdown]
 # ## Step 3: Install
 #
-# This folder pins the SDK to `python-ai-sdk` `main`, because the tool-trajectory capture isn't on PyPI yet:
+# This folder pins the SDK to `python-ai-sdk` `main`. Inline datasets and `EvalTool` need `launchdarkly-ai-server`
+# 0.3.0 or later.
 #
 # ```sh
 # cd evals && uv sync --all-groups
@@ -372,9 +370,10 @@ for name in ("LD_API_TOKEN", "LD_SDK_KEY", "OPENAI_API_KEY", "AWS_PROFILE"):
 
 # %%
 from launchdarkly_ai_openai_messages import create_openai_messages_handler
-from launchdarkly_ai_server import DatasetRow, Judge, ProviderHandler, Scorer, init_evaluations, shutdown
+from launchdarkly_ai_server import DatasetRow, EvalTool, Judge, ProviderHandler, Scorer, init_evaluations, shutdown
 
-evals = init_evaluations()  # reads LD_API_TOKEN, LD_SDK_KEY and the staging endpoints
+# The project holds the evaluations and judges. Credentials and staging endpoints come from the environment.
+evals = init_evaluations(project_key=PROJECT_KEY)
 
 # %% [markdown]
 # ### Seeing results in the notebook
@@ -435,9 +434,8 @@ class RunLog:
 if RUN["first_eval"]:
     log = RunLog()
     result = await evals.run(
-        project_key=PROJECT_KEY,
         key=unique("first-eval"),
-        dataset=DATASET_KEY,
+        dataset=DATASET,
         handler=log.handler(create_openai_messages_handler()),
         generation={
             "provider": "OpenAI",
@@ -468,9 +466,8 @@ async def deterministic_handler(
 
 if RUN["smoke"]:
     result = await evals.run(
-        project_key=PROJECT_KEY,
         key=unique("smoke"),
-        dataset=DATASET_KEY,
+        dataset=DATASET,
         handler=deterministic_handler,
         generation={"provider": "custom", "model": "deterministic-smoke-handler",
                     "instructions": "Return a deterministic smoke-test response."},
@@ -481,7 +478,9 @@ if RUN["smoke"]:
 # %% [markdown]
 # ## Step 5: Score rows with deterministic scorers and LaunchDarkly judges
 #
-# - **`Scorer`**: a local function `(row, output) -> float` from 0 to 1. Its `threshold` defaults to `1.0`.
+# - **`Scorer`**: a local function `(row, output) -> float` from 0 to 1. `row` is the dataset row, so a scorer can read
+#   its `expected_output` and `metadata`. Its `threshold` defaults to `1.0`. Set `success_direction="lower_is_better"`
+#   for a score that counts something unwanted.
 # - **`Judge`**: a judge config in LaunchDarkly, referenced by key. Its `threshold` defaults to `0.5`. Its success
 #   direction (`isInverted`) is set on the config, not in code.
 # - **`pass_rate_threshold`**: the share of rows that must pass for the run to pass. LaunchDarkly stores and shows it,
@@ -507,9 +506,8 @@ if RUN["judges_and_scorers"] and not answer_judge_ready:
 elif RUN["judges_and_scorers"]:
     log = RunLog()
     result = await evals.run(
-        project_key=PROJECT_KEY,
         key=unique("judges-and-scorers"),
-        dataset=DATASET_KEY,
+        dataset=DATASET,
         handler=log.handler(create_openai_messages_handler()),
         generation={"provider": "OpenAI", "model": OPENAI_MODEL, "parameters": {"temperature": 0},
                     "instructions": INSTRUCTIONS},
@@ -539,6 +537,10 @@ elif RUN["judges_and_scorers"]:
 # The SDK records every tool call a row makes and renders it into the judge's `{{message_history}}`. That lets the
 # rubric grade *how* the agent answered. The branch rows need `find_branch`, and the others should call nothing,
 # which is why the rubric's "an unused tool is not a mistake" clause matters.
+#
+# `tools` takes a list of `EvalTool`. This one is defined in code, so the project needs no `find_branch` tool. To use
+# a tool from the project's Library instead, which pins its current version, use
+# `await evals.tools.get(TOOL_KEY, implementation=...)`.
 
 # %%
 BRANCHES = {
@@ -550,7 +552,7 @@ BRANCHES = {
 
 
 def make_find_branch(calls: list[str]) -> Callable[[Mapping[str, Any]], dict[str, Any]]:
-    """Local implementation of the find_branch Library tool, recording each call."""
+    """Local implementation of the find_branch tool, recording each call."""
     def find_branch(arguments: Mapping[str, Any]) -> dict[str, Any]:
         location = str(arguments.get("location") or "").strip()
         if not location:
@@ -562,16 +564,28 @@ def make_find_branch(calls: list[str]) -> Callable[[Mapping[str, Any]], dict[str
     return find_branch
 
 
-if RUN["tool_trajectory"] and not trajectory_assets_ready:
-    print("Skipping: the tool or trajectory judge is missing (see Step 1).")
+def find_branch_tool(calls: list[str]) -> EvalTool:
+    return EvalTool(
+        key=TOOL_KEY,
+        implementation=make_find_branch(calls),
+        schema={
+            "type": "object",
+            "properties": {"location": {"type": "string", "description": "ZIP code or neighborhood"}},
+            "required": ["location"],
+        },
+        description="Finds ToggleBank branches and ATMs near a ZIP code or neighborhood, with hours.",
+    )
+
+
+if RUN["tool_trajectory"] and not trajectory_judge_ready:
+    print(f"Skipping: the {TRAJECTORY_JUDGE} judge is missing (see Step 1).")
 elif RUN["tool_trajectory"]:
     log, tool_calls = RunLog(), []
     result = await evals.run(
-        project_key=PROJECT_KEY,
         key=unique("tool-trajectory"),
-        dataset=DATASET_KEY,
+        dataset=DATASET,
         handler=log.handler(create_openai_messages_handler()),
-        tools={TOOL_KEY: make_find_branch(tool_calls)},
+        tools=[find_branch_tool(tool_calls)],
         generation={
             "provider": "OpenAI", "model": OPENAI_MODEL, "parameters": {"temperature": 0},
             "instructions": INSTRUCTIONS + f" Use the {TOOL_KEY} tool for branch or ATM questions.",
@@ -611,9 +625,8 @@ except (BotoCoreError, ClientError) as error:
 if RUN["bedrock"] and aws_ready:
     log = RunLog()
     result = await evals.run(
-        project_key=PROJECT_KEY,
         key=unique("bedrock-judges"),
-        dataset=DATASET_KEY,
+        dataset=DATASET,
         handler=log.handler(create_langchain_messages_handler()),
         generation={"provider": "Bedrock", "model": BEDROCK_MODEL, "parameters": {"temperature": 0},
                     "instructions": INSTRUCTIONS},
@@ -672,9 +685,8 @@ elif RUN["live_agent"] and aws_ready and agent_reachable():
         return 1.0 if expected in routes.get(row.input or "", []) else 0.0
 
     result = await evals.run(
-        project_key=PROJECT_KEY,
         key=unique("policy-agent-live"),
-        dataset=DATASET_KEY,
+        dataset=DATASET,
         handler=log.handler(make_policy_agent_handler(routes)),
         judge_handlers=[create_openai_messages_handler()],  # the main handler can't serve the OpenAI judge
         generation={"provider": "custom", "model": "policy-agent-api",
@@ -691,13 +703,14 @@ elif RUN["live_agent"] and aws_ready and agent_reachable():
 # %% [markdown]
 # ## What to know
 #
-# - **Datasets** can only be created in the UI. The API can read one by key, but can't create, list or change one.
+# - **Datasets:** a dataset stored in LaunchDarkly can only be created in the UI. Rows passed in code belong to their
+#   run, and aren't saved as a dataset you can reuse.
 # - **Evaluations and runs** can be created from code, but not listed, updated or deleted over the API. Every `run()`
 #   adds a new evaluation.
 # - **Scores and judge reasoning** are visible only on the run page. `run()` returns the verdict and totals.
 # - **Daily token limit:** runs count against a per-project LaunchDarkly limit. When it's reached, `run()` fails with
 #   HTTP 429 `token_limit_exceeded`, after the evaluation has already been created.
-# - **Coming soon** (per the guide): inline datasets and tools, skills, mixed providers, and running Playgrounds from the SDK.
+# - **Coming soon** (per the guide): skills, mixed providers, and running Playgrounds from the SDK.
 
 # %%
 await shutdown()

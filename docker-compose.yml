@@ -37,7 +37,7 @@ services:
     volumes:
       # Mount backend code for live reloading
       - ./app/backend:/app/app/backend
-      # ENV_FILE lets a non-default env file (e.g. .env.staging) be mounted instead
+      # ENV_FILE lets a non-default env file (e.g. .env.staging-org) be mounted instead
       - ${ENV_FILE:-./.env}:/app/.env:ro
       # Mount AWS credentials for SSO login (config/credentials stay read-only)
       - ~/.aws:/root/.aws:ro
