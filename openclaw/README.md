@@ -12,6 +12,7 @@ and what was tested.
 | `setup_config.py` | Creates the `openclaw_agent` config, its tools, skills, variations and targeting. Also the kill switch, instruction edits and skill versions the checks use |
 | `run_checks.sh` | Seven checks against real OpenClaw agents and the live config |
 | `env.sh` | Exports the variables the checks need from the repo's env file, and points OpenClaw at `.state/` |
+| `demo.sh`, `demo_view.py`, `DEMO.md` | A scripted demo for a recording, with its talk track: the expected behavior, then OpenClaw's own skills getting past the variations |
 
 ## Before you run it
 
@@ -269,6 +270,14 @@ streams. To find out, edit a variation and evaluate it from a new streaming clie
   - A `load_skill` call that arrives without that version is refused. So on a runner that skips the hook, skills fail
     closed rather than open.
   - OpenClaw's docs say Codex native tools can't have arguments rewritten. Skills weren't tested there.
+- **AgentControl doesn't gate OpenClaw's own skills.** OpenClaw comes with its own skills; 22 were eligible for each
+  agent here, such as `diagram-maker`. No variation pins them, but a variation that allows `read` can open their
+  `SKILL.md` files directly.
+  - Tested on 2026-10-14: `main` (`standard`) was refused by `load_skill` and by `skills_read`, then read the file
+    and followed it. `helper` (`locked-down`) was stopped only because it has no file tools.
+  - Workaround: `agents.defaults.skills: []` in OpenClaw's config hides its own skills from every agent, so
+    LaunchDarkly pinning is the only source. That's static and per agent, and the files stay on disk, so the tool
+    list is the real boundary. `DEMO.md` scene 6 shows it.
 - **Skills from AgentControl aren't OpenClaw skills.**
   - They don't appear in OpenClaw's skill list, `skills_search` or the Control UI, and `$skill` references in a
     prompt don't find them.

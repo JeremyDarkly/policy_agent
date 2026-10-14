@@ -114,6 +114,15 @@ function allowedTools(config: LDAIAgentConfig, prefix: string): Set<string> {
   );
 }
 
+// What a tool call acts on, for the decision log: a path, a command or a name, cut short.
+function target(params: Record<string, unknown>): string | undefined {
+  for (const key of ["path", "file_path", "filePath", "command", "cmd", "name", "id"]) {
+    const value = params[key];
+    if (typeof value === "string" && value) return value.length > 160 ? `${value.slice(0, 157)}...` : value;
+  }
+  return undefined;
+}
+
 // The skills section of the system prompt: each pinned skill's name and description, not its content.
 function skillIndex(skills: PinnedSkill[]): string | undefined {
   if (skills.length === 0) return undefined;
@@ -320,13 +329,14 @@ export default definePluginEntry({
           : undefined;
       }
       if (!state.allowedTools.has(event.toolName)) {
-        log({ event: "blocked_tool", runId: ctx.runId, agentId: ctx.agentId, tool: event.toolName });
+        log({ event: "blocked_tool", runId: ctx.runId, agentId: ctx.agentId, tool: event.toolName, target: target(event.params) });
         return {
           block: true,
           blockReason: `The ${event.toolName} tool isn't allowed for this agent (variation ${state.variationKey}).`,
         };
       }
       state.toolCalls.push(`${settings.toolPrefix}${event.toolName}`);
+      log({ event: "allowed_tool", runId: ctx.runId, agentId: ctx.agentId, tool: event.toolName, target: target(event.params) });
       return undefined;
     });
 
