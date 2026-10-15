@@ -603,8 +603,9 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
         except RuntimeError:
             # No running loop - we're in a sync context
             # Run evaluation in a background thread to avoid blocking
+            import contextvars
             import threading
-            
+
             def run_eval_in_thread():
                 asyncio.run(
                     evaluate_brand_voice_async(
@@ -618,7 +619,10 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
                     )
                 )
 
-            thread = threading.Thread(target=run_eval_in_thread, daemon=True)
+            # Run in a copy of this context so the judges' spans join the request's
+            # trace (and keep its conversation ID) instead of starting new traces
+            eval_context = contextvars.copy_context()
+            thread = threading.Thread(target=eval_context.run, args=(run_eval_in_thread,), daemon=True)
             thread.start()
 
         print(f"  Background evaluation started (evaluating against account context) - request_id: {request_id[:8] if request_id else 'N/A'}...")

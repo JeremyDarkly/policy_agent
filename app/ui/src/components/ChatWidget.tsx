@@ -71,6 +71,8 @@ const ChatWidget = ({ isOpen, onClose, initialQuery }: ChatWidgetProps) => {
   const [lastAgentFlow, setLastAgentFlow] = useState<AgentStep[]>([]);
   const [lastRequestId, setLastRequestId] = useState<string | null>(null);
   const [feedbackGiven, setFeedbackGiven] = useState<"positive" | "negative" | null>(null);
+  // Sent with every request so LaunchDarkly groups this chat's traces as one conversation
+  const [conversationId] = useState(() => crypto.randomUUID());
   const [showMetrics, setShowMetrics] = useState(false);
   const [showEvalReasoning, setShowEvalReasoning] = useState(false);
   const [guardrailEnabled, setGuardrailEnabled] = useState(true);
@@ -214,6 +216,7 @@ const ChatWidget = ({ isOpen, onClose, initialQuery }: ChatWidgetProps) => {
           role: demoUser.role,
           plan: demoUser.plan,
           guardrailEnabled,
+          conversationId,
         }),
       });
 

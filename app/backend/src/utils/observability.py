@@ -16,7 +16,11 @@ Usage:
 
 import os
 import logging
+from contextvars import ContextVar
 from typing import Optional
+
+from opentelemetry import trace
+from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +40,49 @@ class EndedSpanFilter(logging.Filter):
         if "ended span" in message.lower() or "calling _add_event on an ended span" in message.lower():
             return False
         return True
+
+
+def _env_overrides(*pairs: tuple[str, str]) -> dict[str, str]:
+    """Map (keyword argument, env var) pairs to the env vars that are set and non-empty."""
+    return {arg: value for arg, var in pairs if (value := os.getenv(var, "").strip())}
+
+
+# LaunchDarkly groups LLM spans into conversations on this attribute alone, and
+# it must be on every span of the conversation.
+CONVERSATION_ID_ATTRIBUTE = "gen_ai.conversation.id"
+
+_conversation_id: ContextVar[Optional[str]] = ContextVar("conversation_id", default=None)
+
+
+class ConversationIdSpanProcessor(SpanProcessor):
+    """Copy the current conversation ID onto every span as it starts."""
+
+    def on_start(self, span, parent_context=None):
+        conversation_id = _conversation_id.get()
+        if conversation_id:
+            span.set_attribute(CONVERSATION_ID_ATTRIBUTE, conversation_id)
+
+
+def _register_conversation_id_processor() -> None:
+    provider = trace.get_tracer_provider()
+    if not isinstance(provider, TracerProvider):
+        logger.warning("⚠️  No SDK TracerProvider yet; spans will not carry a conversation ID")
+        return
+    provider.add_span_processor(ConversationIdSpanProcessor())
+
+
+def bind_conversation_id(conversation_id: str) -> None:
+    """Set the conversation ID for the current request.
+
+    Spans started afterwards in this context (including threads started with
+    asyncio.to_thread, which copy the context) get the ID from
+    ConversationIdSpanProcessor. The span that is already current, normally the
+    FastAPI server span, gets it here.
+    """
+    _conversation_id.set(conversation_id)
+    span = trace.get_current_span()
+    if span.is_recording():
+        span.set_attribute(CONVERSATION_ID_ATTRIBUTE, conversation_id)
 
 
 def initialize_observability(
@@ -90,23 +137,26 @@ def initialize_observability(
         
         # Configure LaunchDarkly with observability plugin
         try:
+            # Optional endpoint overrides for non-production instances (e.g. staging);
+            # unset or empty values keep the SDK's production defaults.
             obs_config = ObservabilityConfig(
                 service_name=service_name,
                 service_version=service_version,
                 environment=environment,  # CRITICAL: Must match LaunchDarkly environment
+                # The plugin auto-instruments every installed instrumentor. botocore
+                # would add a second span to each Bedrock call, next to the
+                # OpenLLMetry Bedrock span, so leave it off.
+                disabled_instrumentations=["botocore"],
+                **_env_overrides(
+                    ("otlp_endpoint", "LAUNCHDARKLY_OTLP_ENDPOINT"),
+                    ("backend_url", "LAUNCHDARKLY_OBSERVABILITY_BACKEND_URL"),
+                ),
             )
-            
-            # Optional endpoint overrides for non-production instances (e.g. staging);
-            # unset or empty values keep the SDK's production defaults.
-            endpoint_overrides = {
-                arg: value
-                for arg, var in (
-                    ("base_uri", "LAUNCHDARKLY_BASE_URI"),
-                    ("stream_uri", "LAUNCHDARKLY_STREAM_URI"),
-                    ("events_uri", "LAUNCHDARKLY_EVENTS_URI"),
-                )
-                if (value := os.getenv(var, "").strip())
-            }
+            endpoint_overrides = _env_overrides(
+                ("base_uri", "LAUNCHDARKLY_BASE_URI"),
+                ("stream_uri", "LAUNCHDARKLY_STREAM_URI"),
+                ("events_uri", "LAUNCHDARKLY_EVENTS_URI"),
+            )
 
             config = Config(
                 sdk_key,
@@ -138,41 +188,11 @@ def initialize_observability(
             logger.error(f"❌ Failed to initialize LaunchDarkly with observability: {e}")
             return False
         
-        # Register OpenTelemetry instrumentations
-        # The ldobserve package includes instrumentations for LangChain, Bedrock, etc.
-        try:
-            # LangChain instrumentation
-            from opentelemetry.instrumentation.langchain import LangChainInstrumentor
-            LangChainInstrumentor().instrument()
-            logger.info("✅ LangChain instrumentation registered")
-            
-        except ImportError:
-            logger.info("ℹ️  LangChain instrumentation not available")
-        except Exception as e:
-            logger.warning(f"⚠️  Failed to instrument LangChain: {e}")
-        
-        try:
-            # Bedrock instrumentation
-            from opentelemetry.instrumentation.bedrock import BedrockInstrumentor
-            BedrockInstrumentor().instrument()
-            logger.info("✅ Bedrock instrumentation registered")
-            
-        except ImportError:
-            logger.info("ℹ️  Bedrock instrumentation not available")
-        except Exception as e:
-            logger.warning(f"⚠️  Failed to instrument Bedrock: {e}")
-        
-        try:
-            # Botocore instrumentation (for AWS SDK calls)
-            from opentelemetry.instrumentation.botocore import BotocoreInstrumentor
-            BotocoreInstrumentor().instrument()
-            logger.info("✅ Botocore instrumentation registered")
-            
-        except ImportError:
-            logger.info("ℹ️  Botocore instrumentation not available")
-        except Exception as e:
-            logger.warning(f"⚠️  Failed to instrument Botocore: {e}")
-        
+        # LangChain, Bedrock, OpenAI, Anthropic and FastAPI spans come from the
+        # plugin's auto-instrumentation (ObservabilityPlugin.__init__), so no
+        # instrumentor is registered here.
+        _register_conversation_id_processor()
+
         # Add filter to suppress "ended span" warnings from OpenTelemetry
         # These occur when background threads (judges) reference closed spans from main request
         ended_span_filter = EndedSpanFilter()
