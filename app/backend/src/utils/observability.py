@@ -143,10 +143,13 @@ def initialize_observability(
                 service_name=service_name,
                 service_version=service_version,
                 environment=environment,  # CRITICAL: Must match LaunchDarkly environment
-                # The plugin auto-instruments every installed instrumentor. botocore
-                # would add a second span to each Bedrock call, next to the
-                # OpenLLMetry Bedrock span, so leave it off.
-                disabled_instrumentations=["botocore"],
+                # The plugin auto-instruments every installed instrumentor. Leave off:
+                # - botocore: a second span for each Bedrock call, next to the
+                #   LangChain LLM span
+                # - urllib3: spans for each Bedrock HTTP request and AWS SSO
+                #   credential fetch, and a separate trace for every LaunchDarkly
+                #   SDK event post
+                disabled_instrumentations=["botocore", "urllib3"],
                 **_env_overrides(
                     ("otlp_endpoint", "LAUNCHDARKLY_OTLP_ENDPOINT"),
                     ("backend_url", "LAUNCHDARKLY_OBSERVABILITY_BACKEND_URL"),
