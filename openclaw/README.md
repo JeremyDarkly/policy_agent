@@ -33,7 +33,7 @@ cd openclaw
 npm install
 (cd plugin && npm install)
 python3 setup_config.py setup   # safe to rerun
-./run_checks.sh                 # or one check: baseline, targeting, tools, live, skills, skillchange, killswitch
+./run_checks.sh                 # or one check: baseline, targeting, tools, live, skills, skillchange, servedmodel, killswitch
 ```
 
 The first run creates `.state/`, writes an OpenClaw config with two agents (`main` and `helper`), and links the
@@ -125,6 +125,14 @@ sequenceDiagram
 | Tools | `before_prompt_build`, `before_tool_call` | Other tools are hidden from the model, and any call to one is blocked |
 | Skills | `before_prompt_build`, `before_tool_call`, the `load_skill` tool | Pinned skills are listed in the prompt and loaded on demand; see [Skills](#skills) |
 | Tracker | `llm_output`, `model_call_ended`, `agent_end` | Tokens, time to first token, duration, tool calls and success |
+| Served model | `agent_end` | `ai-model-served` and `ai-model-mismatch` (1 or 0) for each model that answered the run. See below |
+
+OpenClaw's hook events name the model it *requested*. The model the API reported is `responseModel` on each assistant
+message in `agent_end`'s messages, so the plugin reads it from there, one entry per distinct model. Events have the
+same data as the backend's (see [Served model](../README.md#served-model)), with `source` set to `response` when the
+API named the model and `message_model` when it didn't. OpenAI Completions, Mistral and Google only report a model
+that differs from the request; CLI-backed runs never do. OpenClaw itself logs a dated snapshot as a "model route
+change"; the plugin uses the backend's rule and doesn't count it as a mismatch. Tests: `node --test openclaw/plugin/served_model.test.ts`.
 
 The LaunchDarkly context is a `user` keyed by the sender, or `openclaw-local-operator` for command-line runs. It has
 the attributes `agentId`, `channel` and `trigger`.
