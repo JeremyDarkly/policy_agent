@@ -225,6 +225,31 @@ auto-generated metric. They run in background threads on every response.
 | Accuracy | `ai-judge-accuracy` | `$ld:ai:judge:accuracy` | 0.8 |
 | Coherence | `ai-judge-coherence` | `$ld:ai:judge:coherence` | 0.7 |
 
+### Served model
+
+A variation names the model to request, but the API can answer with another one. An alias resolves to a dated
+snapshot, a Bedrock prompt router picks a model, or the configured ID is wrong. After every call, `ModelInvoker`
+sends two custom events with the AI Config's context:
+
+| Event | When | Data |
+|---|---|---|
+| `ai-model-served` | Every call (value `1`) | `configKey`, `variationKey`, `provider`, `requestedModel`, `servedModel`, `source` |
+| `ai-model-mismatch` | Every call: value `1` when the served model isn't the requested one (or the requested one made more specific), `0` when it is | Same as above |
+
+`source` says where `servedModel` came from:
+- **`response`:** the API named the model. OpenAI and Anthropic always do.
+- **`router_trace`:** a Bedrock prompt router reported the model it chose. Router calls never count as a mismatch.
+- **`requested_fallback`:** the API didn't say. Bedrock Converse doesn't name the model unless a router is used.
+
+The comparison rule is in `app/backend/src/utils/served_model.py`. Routing prefixes (Bedrock region profiles, ARN
+paths, `provider/`) are ignored. After that, the served model has to be the requested one or the requested one made
+more specific. An alias may resolve to a snapshot, so `gpt-4o` served by `gpt-4o-2024-08-06` is a match. A pinned
+snapshot or version must be served exactly, so `gpt-4o-2024-08-06` served by `gpt-4o-2024-11-20` is a mismatch, and
+so is a Bedrock `-v1:0` served by `-v2:0`. A numeric metric that averages `ai-model-mismatch` is the
+mismatch rate per call, which can serve as an experiment metric or a guarded-rollout guardrail. Router calls and calls
+whose response doesn't name a model send `0`. The OpenClaw plugin sends the same events (see `openclaw/README.md`). Tests:
+`cd app/backend && python -m pytest tests`.
+
 ### Demo users
 
 The UI ships a "fake login" switcher (`app/ui/src/lib/demoUser.ts`) with two presets

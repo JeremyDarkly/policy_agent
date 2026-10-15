@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from ..graph.state import AgentState
 from ..tools.calendar import get_available_slots
 from ..utils.llm_config import get_model_invoker
+from ..utils.served_model import served_model_id_of
 from ..utils.launchdarkly_config import get_ld_client
 
 
@@ -79,6 +80,7 @@ def scheduler_specialist_node(state: AgentState) -> dict[str, Any]:
     start_time = time.time()
     
     response = model_invoker.invoke(langchain_messages)
+    served_model_id = served_model_id_of(response, model_id)
     
     # Calculate duration
     duration_ms = int((time.time() - start_time) * 1000)
@@ -101,7 +103,7 @@ def scheduler_specialist_node(state: AgentState) -> dict[str, Any]:
     try:
         from .brand_voice_agent import calculate_model_cost
         scheduler_cost_usd = calculate_model_cost(
-            model_id=model_id,
+            model_id=served_model_id,
             input_tokens=tokens["input"],
             output_tokens=tokens["output"],
         )
@@ -135,6 +137,7 @@ def scheduler_specialist_node(state: AgentState) -> dict[str, Any]:
             **state.get("agent_data", {}),
             "scheduler_specialist": {
                 "model": model_id,  # Track which model was used
+                "served_model": served_model_id,  # Model the API reported
                 "available_slots": available_slots[:10],
                 "response": response_text,
                 "escalation_reason": state.get("escalation_needed", False),

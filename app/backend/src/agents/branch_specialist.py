@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from ..graph.state import AgentState
 from ..utils.llm_config import get_model_invoker
+from ..utils.served_model import served_model_id_of
 from ..utils.launchdarkly_config import get_ld_client
 
 
@@ -81,6 +82,7 @@ def branch_specialist_node(state: AgentState) -> dict[str, Any]:
     start_time = time.time()
 
     response = model_invoker.invoke(langchain_messages)
+    served_model_id = served_model_id_of(response, model_id)
 
     # Calculate duration
     duration_ms = int((time.time() - start_time) * 1000)
@@ -107,7 +109,7 @@ def branch_specialist_node(state: AgentState) -> dict[str, Any]:
     from ldclient import Context
 
     branch_cost_usd = calculate_model_cost(
-        model_id=model_id,
+        model_id=served_model_id,
         input_tokens=tokens["input"],
         output_tokens=tokens["output"]
     )
@@ -152,6 +154,7 @@ def branch_specialist_node(state: AgentState) -> dict[str, Any]:
             **state.get("agent_data", {}),
             "branch_specialist": {
                 "model": model_id,  # Track which model was used
+                "served_model": served_model_id,  # Model the API reported
                 "source": "location_profile",
                 "account_context": branch_info_str,  # Source of truth for evaluation
                 "query": query,

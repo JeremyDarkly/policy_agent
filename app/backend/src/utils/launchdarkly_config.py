@@ -478,6 +478,14 @@ class NoOpTracker:
         """No-op track tokens."""
         pass
 
+    def track_duration(self, duration):
+        """No-op track duration."""
+        pass
+
+    def track_time_to_first_token(self, time_to_first_token):
+        """No-op track time to first token."""
+        pass
+
 
 class ModelInvoker:
     """Helper class to invoke models with tracking.
@@ -493,7 +501,9 @@ class ModelInvoker:
         config_key: str = "",
         is_agent_config: bool = False,
         user_context: Optional[Context] = None,
-        skip_span_annotation: bool = False
+        skip_span_annotation: bool = False,
+        variation_key: str = "",
+        provider: str = "",
     ):
         """Initialize model invoker.
 
@@ -504,6 +514,8 @@ class ModelInvoker:
             is_agent_config: Whether this is an agent-based config
             user_context: LaunchDarkly user context (for span annotation)
             skip_span_annotation: If True, skip all span annotation (for background threads)
+            variation_key: The served variation's key (sent with the served-model events)
+            provider: Provider name (bedrock, openai, anthropic)
         """
         self.model = model
         self.tracker = tracker
@@ -511,6 +523,8 @@ class ModelInvoker:
         self._is_agent_config = is_agent_config
         self.user_context = user_context
         self.skip_span_annotation = skip_span_annotation
+        self.variation_key = variation_key
+        self.provider = provider
 
     def invoke(self, messages: list[BaseMessage]) -> Any:
         """Invoke the model with tracking.
@@ -617,6 +631,8 @@ class ModelInvoker:
                     import logging
                     logging.debug(f"Failed to track TTFT: {e}")
             
+            self.report_served_model_of(getattr(result, "response_metadata", None))
+            
             return result
 
         except Exception as e:
@@ -692,8 +708,14 @@ class ModelInvoker:
             # Stream from the model
             accumulated_tokens = {"input": 0, "output": 0, "total": 0}
             ttft_ms = None
+            served_metadata = None
             
             for chunk in self.model.stream(messages):
+                chunk_message = getattr(chunk, "message", chunk)
+                chunk_meta = getattr(chunk_message, "response_metadata", None) or {}
+                if served_metadata is None and chunk_meta.get("model_name"):
+                    served_metadata = chunk_meta
+                
                 # Extract TTFT from first chunk
                 if ttft_ms is None:
                     chunk_metadata = chunk.message.response_metadata if hasattr(chunk, 'message') else {}
@@ -737,6 +759,8 @@ class ModelInvoker:
                 except Exception as e:
                     import logging
                     logging.debug(f"Failed to track TTFT: {e}")
+            
+            self.report_served_model_of(served_metadata)
         
         except Exception as e:
             self.tracker.track_error()
@@ -752,6 +776,31 @@ class ModelInvoker:
                 pass
             
             raise
+
+    def report_served_model_of(self, metadata: Optional[dict]) -> None:
+        """Send which model served this call to LaunchDarkly (see utils/served_model.py)."""
+        if self.user_context is None:
+            return
+        try:
+            from .served_model import report_served_model, requested_model_id, served_model
+
+            requested = requested_model_id(self.model)
+            served, source = served_model(metadata, requested)
+            mismatch = report_served_model(
+                ldclient.get(),
+                self.user_context,
+                config_key=self.config_key,
+                variation_key=self.variation_key,
+                provider=self.provider,
+                requested=requested,
+                served=served,
+                source=source,
+            )
+            if mismatch:
+                print(f"  ⚠️ {self.config_key}: requested {requested}, served by {served}")
+        except Exception as e:
+            import logging
+            logging.debug(f"Failed to report served model: {e}")
 
     def _extract_tokens(self, response: Any) -> dict[str, int]:
         """Extract token counts from response.
