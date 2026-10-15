@@ -114,12 +114,12 @@ def report_served_model(
     served: str,
     source: str,
 ) -> bool:
-    """Send ``ai-model-served`` and ``ai-model-mismatch`` for this call.
+    """Send ``ai-model-served`` for this call, and ``ai-model-mismatch`` when the served model could be checked.
 
-    ``ai-model-mismatch`` is sent on every call, with value 1 when the served model isn't the requested one and 0 when
-    it is, so a numeric metric averaging it is the mismatch rate per call. A prompt router is expected to choose a
-    model other than the router ARN, and without a model in the response there's nothing to compare, so those calls
-    send 0. Returns whether the call counted as a mismatch.
+    ``ai-model-mismatch`` is 1 when the served model isn't the requested one and 0 when it is, so a numeric metric
+    averaging it is the mismatch rate among checked calls. It's sent only when the response named the model: a
+    prompt router is expected to choose a model other than the router ARN, and a response that names no model
+    (Bedrock without a router) can't be checked. Returns whether the call counted as a mismatch.
     """
     data = {
         "configKey": config_key,
@@ -130,6 +130,8 @@ def report_served_model(
         "source": source,
     }
     ld_client.track(SERVED_EVENT, context, data, 1)
-    mismatch = source == SOURCE_RESPONSE and not models_match(requested, served)
+    if source != SOURCE_RESPONSE:
+        return False
+    mismatch = not models_match(requested, served)
     ld_client.track(MISMATCH_EVENT, context, data, 1 if mismatch else 0)
     return mismatch

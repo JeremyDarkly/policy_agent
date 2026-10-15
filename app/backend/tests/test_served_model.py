@@ -138,11 +138,16 @@ def test_different_model_sends_mismatch_one():
     assert ld.mismatch_values() == [1]
 
 
-def test_router_choice_is_not_a_mismatch():
+def test_router_choice_sends_no_mismatch_event():
     ld = FakeLD()
     assert not _report(ld, "arn:aws:bedrock:us-east-1:1:default-prompt-router/anthropic.claude:1", "anthropic.claude-3-haiku-20240307-v1:0", SOURCE_ROUTER_TRACE)
-    assert ld.names() == [SERVED_EVENT, MISMATCH_EVENT]
-    assert ld.mismatch_values() == [0]
+    assert ld.names() == [SERVED_EVENT]
+
+
+def test_unchecked_call_sends_no_mismatch_event():
+    ld = FakeLD()
+    assert not _report(ld, "us.amazon.nova-pro-v1:0", "us.amazon.nova-pro-v1:0", SOURCE_REQUESTED_FALLBACK)
+    assert ld.names() == [SERVED_EVENT]
 
 
 # --- Bedrock --------------------------------------------------------------------------------------------------------
@@ -178,12 +183,11 @@ def test_bedrock_converse_result_with_router():
     assert result.generations[0].message.response_metadata["served_model_source"] == SOURCE_ROUTER_TRACE
 
 
-def test_bedrock_invoke_without_router_is_never_a_mismatch(ld):
+def test_bedrock_invoke_without_router_sends_only_served_event(ld):
     llm = _bedrock("us.amazon.nova-pro-v1:0")
     llm._bedrock_client = type("Client", (), {"converse": lambda self, **kw: CONVERSE_RESPONSE})()
     _invoker(llm, "bedrock").invoke([HumanMessage(content="hi")])
-    assert ld.names() == [SERVED_EVENT, MISMATCH_EVENT]
-    assert ld.mismatch_values() == [0]
+    assert ld.names() == [SERVED_EVENT]
     assert ld.events[0][1]["source"] == SOURCE_REQUESTED_FALLBACK
 
 

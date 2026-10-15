@@ -211,15 +211,24 @@ check_skillchange() {
   python3 setup_config.py reset > /dev/null
 }
 
+# all_served <list> <pattern>: whether a comma-separated served_models list is non-empty and every entry matches.
+all_served() {
+  local entry
+  [ -n "$1" ] || return 1
+  IFS=, read -ra entries <<< "$1"
+  for entry in "${entries[@]}"; do [[ "$entry" == $2 ]] || return 1; done
+}
+
 check_servedmodel() {
-  echo "7. Served model: the model the API reported is recorded, and a dated snapshot isn't a mismatch"
+  echo "7. Served model: each model call records the model the API reported, and a dated snapshot isn't a mismatch"
   run_agent main "Use the exec tool to run: ls"
   local served
   served=$(field served_models)
-  [[ "$served" == gpt-5.4-mini-*:response:match ]] && pass "main served by $served" || fail "main served_models=$served"
+  all_served "$served" "gpt-5.4-mini-*:response:match" && [[ "$served" == *,* ]] \
+    && pass "main's model calls served by $served" || fail "main served_models=$served (expected one entry per call)"
   run_agent helper "Say hello in five words."
   served=$(field served_models)
-  [[ "$served" == gpt-5.4-nano-*:response:match ]] && pass "helper served by $served" || fail "helper served_models=$served"
+  all_served "$served" "gpt-5.4-nano-*:response:match" && pass "helper served by $served" || fail "helper served_models=$served"
 }
 
 check_killswitch() {

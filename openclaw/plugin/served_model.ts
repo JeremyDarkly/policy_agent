@@ -45,25 +45,24 @@ export function modelsMatch(requested: string, served: string): boolean {
 
 type AssistantMessage = { role: "assistant"; provider?: string; model?: string; responseModel?: string; stopReason?: string };
 
-// The distinct models that served this run, from agent_end's messages. Those include earlier turns of the session,
-// so only assistant messages after the last user message count. `requested` is the variation's model; without one,
-// each message's own requested model is used.
-export function servedModels(messages: unknown[], requested?: string): ServedModel[] {
+// The model that served each of this run's model calls (one entry per assistant message), from agent_end's messages.
+// Those include earlier turns of the session, so only assistant messages after the last user message count.
+// `requested` is the variation's model; without one, each message's own requested model is used.
+export function servedCalls(messages: unknown[], requested?: string): ServedModel[] {
   const lastUser = messages.findLastIndex((message) => (message as { role?: string })?.role === "user");
-  const seen = new Map<string, ServedModel>();
+  const calls: ServedModel[] = [];
   for (const message of messages.slice(lastUser + 1)) {
     const assistant = message as AssistantMessage;
     if (assistant?.role !== "assistant" || assistant.stopReason === "error" || assistant.stopReason === "aborted") continue;
     const responseModel = assistant.responseModel?.trim();
     const served = responseModel || assistant.model?.trim();
     if (!served) continue;
-    const entry: ServedModel = {
+    calls.push({
       provider: assistant.provider,
       requested: requested || assistant.model || "",
       served,
       source: responseModel ? "response" : "message_model",
-    };
-    seen.set(`${entry.provider}\0${served}`, entry);
+    });
   }
-  return [...seen.values()];
+  return calls;
 }

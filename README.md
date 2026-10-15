@@ -234,20 +234,21 @@ sends two custom events with the AI Config's context:
 | Event | When | Data |
 |---|---|---|
 | `ai-model-served` | Every call (value `1`) | `configKey`, `variationKey`, `provider`, `requestedModel`, `servedModel`, `source` |
-| `ai-model-mismatch` | Every call: value `1` when the served model isn't the requested one (or the requested one made more specific), `0` when it is | Same as above |
+| `ai-model-mismatch` | Every call whose response named the model: value `1` when the served model isn't the requested one (or the requested one made more specific), `0` when it is | Same as above |
 
 `source` says where `servedModel` came from:
 - **`response`:** the API named the model. OpenAI and Anthropic always do.
-- **`router_trace`:** a Bedrock prompt router reported the model it chose. Router calls never count as a mismatch.
-- **`requested_fallback`:** the API didn't say. Bedrock Converse doesn't name the model unless a router is used.
+- **`router_trace`:** a Bedrock prompt router reported the model it chose. A router is expected to pick a model, so no `ai-model-mismatch` is sent.
+- **`requested_fallback`:** the API didn't say, so there's nothing to check and no `ai-model-mismatch` is sent. Bedrock Converse doesn't name the model unless a router is used.
 
 The comparison rule is in `app/backend/src/utils/served_model.py`. Routing prefixes (Bedrock region profiles, ARN
 paths, `provider/`) are ignored. After that, the served model has to be the requested one or the requested one made
 more specific. An alias may resolve to a snapshot, so `gpt-4o` served by `gpt-4o-2024-08-06` is a match. A pinned
 snapshot or version must be served exactly, so `gpt-4o-2024-08-06` served by `gpt-4o-2024-11-20` is a mismatch, and
 so is a Bedrock `-v1:0` served by `-v2:0`. A numeric metric that averages `ai-model-mismatch` is the
-mismatch rate per call, which can serve as an experiment metric or a guarded-rollout guardrail. Router calls and calls
-whose response doesn't name a model send `0`. The OpenClaw plugin sends the same events (see `openclaw/README.md`). Tests:
+mismatch rate among calls whose served model was checked, which can serve as an experiment metric or a guarded-rollout
+guardrail. A variation whose calls can't be checked (Bedrock without a router) has no mismatch data rather than a rate
+of 0. The OpenClaw plugin sends the same events (see `openclaw/README.md`). Tests:
 `cd app/backend && python -m pytest tests`.
 
 ### Demo users
