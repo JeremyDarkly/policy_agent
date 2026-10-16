@@ -156,7 +156,7 @@ class BedrockConverseLLM(BaseChatModel):
         """Generate a response from Bedrock Converse API (non-streaming).
 
         Uses the synchronous converse() API so that the full request duration is
-        captured by auto-instrumented OTEL spans (e.g. BedrockInstrumentor).
+        captured by the auto-instrumented LangChain OTEL span for this call.
         For streaming with TTFT tracking, callers should use stream() instead.
 
         Args:

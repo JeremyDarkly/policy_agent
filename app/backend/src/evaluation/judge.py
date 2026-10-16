@@ -12,6 +12,7 @@ from typing import Any, Optional, Dict, List
 from dataclasses import dataclass
 
 from langchain_core.messages import SystemMessage, HumanMessage
+from opentelemetry import trace
 
 from ..utils.llm_config import get_model_invoker
 from ..utils.launchdarkly_config import get_ld_client
@@ -451,6 +452,25 @@ class BrandVoiceEvaluator:
 # Global evaluator instance
 _evaluator = None
 
+_tracer = trace.get_tracer("togglebank.evaluation", "1.0.0")
+
+
+def _add_evaluation_events(span: trace.Span, results: Optional[Dict[str, Any]]) -> None:
+    """Record each judge's score as a gen_ai.evaluation.result event."""
+    for name in ("accuracy", "coherence"):
+        result = (results or {}).get(name)
+        if not result:
+            continue
+        span.add_event(
+            "gen_ai.evaluation.result",
+            attributes={
+                "gen_ai.evaluation.name": name,
+                "gen_ai.evaluation.score.value": float(result.get("score", 0.0)),
+                "gen_ai.evaluation.score.label": "pass" if result.get("passed") else "fail",
+                "gen_ai.evaluation.explanation": str(result.get("reason", "")),
+            },
+        )
+
 
 def get_evaluator() -> BrandVoiceEvaluator:
     """Get or create the global evaluator instance."""
@@ -486,10 +506,13 @@ async def evaluate_brand_voice_async(
     evaluator = get_evaluator()
 
     try:
-        # Run evaluation
-        results = await evaluator.evaluate_async(
-            original_query, account_context, brand_voice_output, user_context, brand_tracker
-        )
+        # Run evaluation in its own span; it starts in the request's trace when the
+        # caller passes its context along (see brand_voice_agent)
+        with _tracer.start_as_current_span("evaluate brand_voice") as span:
+            results = await evaluator.evaluate_async(
+                original_query, account_context, brand_voice_output, user_context, brand_tracker
+            )
+            _add_evaluation_events(span, results)
 
         # Store results in global store if request_id provided
         if request_id and results and results_store is not None:

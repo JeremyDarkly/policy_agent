@@ -22,7 +22,7 @@ load_dotenv()
 
 # CRITICAL: Initialize observability BEFORE any LLM imports
 # This must happen before importing workflow, agents, or any LLM-related modules
-from src.utils.observability import initialize_observability
+from src.utils.observability import bind_conversation_id, initialize_observability
 
 # Environment must match LaunchDarkly environment for proper correlation
 initialize_observability(environment=os.getenv("LAUNCHDARKLY_ENVIRONMENT", "test"))
@@ -293,14 +293,8 @@ async def shutdown_event():
     logger.info("👋 Background tasks stopped")
 
 
-# Instrument FastAPI for observability (CRITICAL: Ensures FastAPI/ASGI request spans exist as parents for LLM spans)
-try:
-    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-
-    FastAPIInstrumentor().instrument_app(app)
-    logger.info("✅ FastAPI instrumented for observability (parent spans for LLM correlation)")
-except Exception as e:
-    logger.warning(f"⚠️  Failed to instrument FastAPI: {e}")
+# FastAPI request spans come from the observability plugin's auto-instrumentation
+# (initialize_observability runs before FastAPI is imported).
 
 
 # Pydantic models
@@ -319,6 +313,9 @@ class ChatRequest(BaseModel):
     userType: Optional[str] = None
     role: Optional[str] = None
     plan: Optional[str] = None
+    # Groups this request's spans with the rest of the chat in LaunchDarkly's
+    # Conversations view; when omitted, each request is its own conversation.
+    conversationId: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -370,6 +367,7 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         agent_timings = {}
         current_agent_start = time.time()
         request_id = str(uuid4())
+        bind_conversation_id(request.conversationId or request_id)
 
         # Run workflow with request_id, evaluation store, tracker store, and guardrail setting
         result = await asyncio.to_thread(
@@ -561,6 +559,7 @@ async def chat_stream(request: ChatRequest):
 
             # Generate unique request ID
             request_id = str(uuid4())
+            bind_conversation_id(request.conversationId or request_id)
 
             # Send initial status
             yield f"data: {json.dumps({'type': 'status', 'agent': 'system', 'message': 'Starting analysis...'})}\n\n"
