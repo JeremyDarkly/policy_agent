@@ -179,7 +179,8 @@ def get_model_invoker(
 
     model_config = config.get("model", {})
     model_name = model_config.get("name") or "claude-3-5-sonnet"
-    if not (model_name.startswith("global.") or model_name.startswith("us.")):
+    # Cross-region inference profile prefix; Bedrock only, other providers reject it
+    if provider == "bedrock" and not (model_name.startswith("global.") or model_name.startswith("us.")):
         model_name = f"us.{model_name}"
 
     # Get temperature from config or use default
@@ -201,6 +202,8 @@ def get_model_invoker(
             is_agent_config=is_agent_config,
             user_context=ld_context,
             skip_span_annotation=skip_span_annotation,
+            variation_key=config.get("_variation", ""),
+            provider=provider,
         ),
         config,
     )

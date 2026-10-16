@@ -1,0 +1,28 @@
+{
+  "_comment": "Requested vs served model IDs. A served model matches when it is the requested model, or the requested model made more specific (a snapshot date or version added). Used by app/backend/tests/test_served_model.py and openclaw/plugin/served_model.test.ts.",
+  "match": [
+    ["gpt-4o", "gpt-4o-2024-08-06"],
+    ["gpt-5.4-mini", "gpt-5.4-mini-2026-03-17"],
+    ["openai/gpt-5.4-mini", "gpt-5.4-mini-2026-03-17"],
+    ["claude-sonnet-4-5", "claude-sonnet-4-5-20250929"],
+    ["claude-3-5-sonnet-latest", "claude-3-5-sonnet-20241022"],
+    ["us.anthropic.claude-3-5-sonnet-20241022-v2:0", "anthropic.claude-3-5-sonnet-20241022-v2:0"],
+    ["global.anthropic.claude-haiku-4-5-20251001-v1:0", "anthropic.claude-haiku-4-5-20251001-v1:0"],
+    ["amazon.nova-pro-v1:0", "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-pro-v1:0"],
+    ["GPT-4o", "gpt-4o"],
+    ["gpt-4o-2024-08-06", "gpt-4o-2024-08-06"],
+    ["anthropic.claude-3-5-sonnet-20241022", "anthropic.claude-3-5-sonnet-20241022-v2:0"],
+    ["claude-3-5-sonnet-latest", "claude-3-5-sonnet-latest"]
+  ],
+  "mismatch": [
+    ["gpt-4o", "gpt-4o-mini"],
+    ["gpt-5.4-mini", "gpt-5.4-nano"],
+    ["claude-sonnet-4", "claude-sonnet-4-5-20250929"],
+    ["us.anthropic.claude-3-5-sonnet-20241022-v2:0", "amazon.nova-pro-v1:0"],
+    ["openai/gpt-5.4-mini", "anthropic/claude-haiku-4-5"],
+    ["gpt-4o-2024-08-06", "gpt-4o-2024-11-20"],
+    ["anthropic.claude-3-5-sonnet-20240620-v1:0", "anthropic.claude-3-5-sonnet-20241022-v2:0"],
+    ["claude-sonnet-4-5-20250929", "claude-sonnet-4-5"],
+    ["gpt-4o-mini", "gpt-4o"]
+  ]
+}

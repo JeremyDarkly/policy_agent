@@ -87,6 +87,7 @@ async def evaluate_agent_accuracy(
         messages = [HumanMessage(content=evaluation_prompt)]
         
         response = model_invoker.model.invoke(messages)
+        model_invoker.report_served_model_of(response.response_metadata)
         response_text = response.content
         
         # Debug: Print response to help diagnose JSON parsing issues

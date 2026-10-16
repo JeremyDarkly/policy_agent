@@ -9,6 +9,7 @@ from ldai.client import LDMessage
 
 from ..graph.state import AgentState
 from ..utils.llm_config import get_model_invoker
+from ..utils.served_model import served_model_id_of
 from ..utils.launchdarkly_config import get_ld_client
 from ..evaluation.judge import evaluate_brand_voice_async
 
@@ -296,6 +297,7 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
     start_time = time.time()
     
     response = model_invoker.invoke(langchain_messages)
+    served_model_id = served_model_id_of(response, model_id)
     
     # Calculate duration
     duration_ms = int((time.time() - start_time) * 1000)
@@ -397,6 +399,9 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
             print(f"  Generating response with fallback variation...")
             fallback_start = time.time()
             fallback_response = fallback_model_invoker.invoke(fallback_messages)
+            served_model_id = served_model_id_of(
+                fallback_response, fallback_ld_config.get("model", {}).get("name", model_id)
+            )
             fallback_duration = int((time.time() - fallback_start) * 1000)
             
             # Success! Use fallback response from LaunchDarkly
@@ -476,6 +481,7 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
                 # Invoke with hardcoded default
                 fallback_start = time.time()
                 fallback_response = fallback_llm.invoke(fallback_messages)
+                served_model_id = served_model_id_of(fallback_response, fallback_llm.model_id)
                 fallback_duration = int((time.time() - fallback_start) * 1000)
                 
                 final_response = fallback_response.content
@@ -546,7 +552,7 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
         
         # Calculate and send cost metric for brand agent
         brand_cost_usd = calculate_model_cost(
-            model_id=model_id,
+            model_id=served_model_id,
             input_tokens=tokens["input"],
             output_tokens=tokens["output"]
         )
@@ -623,6 +629,7 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
     # Add debug info to agent_data (store full responses for hallucination debugging)
     brand_data = {
         "model": model_id,  # Track which model was used
+        "served_model": served_model_id,  # Model the API reported
         "response": final_response,  # Full response for evaluation (test suite expects this field)
         "original_specialist_response": specialist_response[:500] + "..." if len(specialist_response) > 500 else specialist_response,
         "final_customer_response": final_response[:500] + "..." if len(final_response) > 500 else final_response,

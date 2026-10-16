@@ -2,7 +2,7 @@
 # Runs the checks in PLAN.md against real OpenClaw agents and the openclaw_agent AgentControl config.
 #
 #   ./run_checks.sh            all checks
-#   ./run_checks.sh baseline   one check: baseline, targeting, tools, live, skills, skillchange, killswitch
+#   ./run_checks.sh baseline   one check: baseline, targeting, tools, live, skills, skillchange, servedmodel, killswitch
 #
 # OpenClaw runs against a throwaway state directory (.state/), never ~/.openclaw. Each run is a real model call.
 set -uo pipefail
@@ -67,7 +67,8 @@ run_agent() {
 }
 
 # field <name>: reads a value from the last run. reply, model, tools (comma-separated tool calls), tool_failures,
-# blocked_tools, offered_tools, blocked_run, variation, skills_loaded, blocked_skills (skills as key@version).
+# blocked_tools, offered_tools, blocked_run, variation, skills_loaded, blocked_skills (skills as key@version),
+# served_models (served model:source:mismatch).
 field() {
   python3 - "$1" "$STATE/last.json" "$LOG" <<'EOF'
 import json, sys
@@ -90,6 +91,10 @@ values = {
     "variation": next((r.get("variationKey") or r["state"] for r in log if r["event"] == "served"), ""),
     "skills_loaded": ",".join(r["skill"] for r in log if r["event"] == "skill_loaded"),
     "blocked_skills": ",".join(r["skill"] for r in log if r["event"] == "blocked_skill"),
+    "served_models": ",".join(
+        f'{m["served"]}:{m["source"]}:{"mismatch" if m["mismatch"] else "match"}'
+        for r in log if r["event"] == "finished" for m in r.get("servedModels", [])
+    ),
 }
 print(values[name])
 EOF
@@ -206,8 +211,28 @@ check_skillchange() {
   python3 setup_config.py reset > /dev/null
 }
 
+# all_served <list> <pattern>: whether a comma-separated served_models list is non-empty and every entry matches.
+all_served() {
+  local entry
+  [ -n "$1" ] || return 1
+  IFS=, read -ra entries <<< "$1"
+  for entry in "${entries[@]}"; do [[ "$entry" == $2 ]] || return 1; done
+}
+
+check_servedmodel() {
+  echo "7. Served model: each model call records the model the API reported, and a dated snapshot isn't a mismatch"
+  run_agent main "Use the exec tool to run: ls"
+  local served
+  served=$(field served_models)
+  all_served "$served" "gpt-5.4-mini-*:response:match" && [[ "$served" == *,* ]] \
+    && pass "main's model calls served by $served" || fail "main served_models=$served (expected one entry per call)"
+  run_agent helper "Say hello in five words."
+  served=$(field served_models)
+  all_served "$served" "gpt-5.4-nano-*:response:match" && pass "helper served by $served" || fail "helper served_models=$served"
+}
+
 check_killswitch() {
-  echo "7. Kill switch: turning the config off blocks runs"
+  echo "8. Kill switch: turning the config off blocks runs"
   python3 setup_config.py off > /dev/null
   if retry_until '[ "$(field blocked_run)" = config_disabled ]' "Say hello in five words."; then
     pass "run blocked (exit $EXIT_CODE): $(field reply | cut -c1-80)"
@@ -218,7 +243,7 @@ check_killswitch() {
 }
 
 prepare
-for check in "${@:-baseline targeting tools live skills skillchange killswitch}"; do
+for check in "${@:-baseline targeting tools live skills skillchange servedmodel killswitch}"; do
   for name in $check; do "check_$name"; done
 done
 echo

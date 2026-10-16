@@ -20,6 +20,8 @@ import { initAi, type LDAIAgentConfig, type LDAIClient, type LDAIConfigTracker }
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "typebox";
 
+import { MISMATCH_EVENT, SERVED_EVENT, modelsMatch, servedCalls } from "./served_model.ts";
+
 type Settings = {
   configKey: string;
   toolPrefix: string;
@@ -45,6 +47,7 @@ type RunState =
   | {
       kind: "served";
       config: LDAIAgentConfig;
+      context: LDContext;
       tracker: LDAIConfigTracker;
       variationKey: string;
       allowedTools: Set<string>;
@@ -258,6 +261,7 @@ export default definePluginEntry({
       return {
         kind: "served",
         config,
+        context,
         tracker,
         variationKey,
         allowedTools: tools,
@@ -420,6 +424,8 @@ export default definePluginEntry({
       if (state.toolCalls.length > 0) tracker.trackToolCalls(state.toolCalls);
       if (event.success) tracker.trackSuccess();
       else tracker.trackError();
+      const sdk = await client;
+      const served = reportServedModels(sdk?.ld, state, event.messages);
       log({
         event: "finished",
         runId: id,
@@ -430,10 +436,32 @@ export default definePluginEntry({
         tokens: state.tokens,
         toolCalls: state.toolCalls,
         skillsLoaded: state.skillsLoaded,
+        servedModels: served,
       });
-      const sdk = await client;
       await sdk?.ld.flush();
     });
+
+    // Sends ai-model-served and ai-model-mismatch for each model call in this run, like the backend does per call.
+    // The mismatch value is 1 when the model isn't the variation's model (or that model made more specific) and 0
+    // when it is, so its average is the mismatch rate per call.
+    const reportServedModels = (ld: LDClient | undefined, state: Extract<RunState, { kind: "served" }>, messages: unknown[]) => {
+      const { providerOverride, modelOverride: model } = modelOverride(state.config);
+      const requested = model ? (providerOverride ? `${providerOverride}/${model}` : model) : undefined;
+      const calls = servedCalls(messages ?? [], requested).map((call) => ({ ...call, mismatch: !modelsMatch(call.requested, call.served) }));
+      for (const { mismatch, ...call } of calls) {
+        const data = {
+          configKey: settings.configKey,
+          variationKey: state.variationKey,
+          provider: call.provider,
+          requestedModel: call.requested,
+          servedModel: call.served,
+          source: call.source,
+        };
+        ld?.track(SERVED_EVENT, state.context, data, 1);
+        ld?.track(MISMATCH_EVENT, state.context, data, mismatch ? 1 : 0);
+      }
+      return calls;
+    };
 
     api.on("gateway_stop", async () => {
       const sdk = await client;

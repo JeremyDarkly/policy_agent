@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from .aws_sso import get_sso_manager
+from .served_model import SOURCE_REQUESTED_FALLBACK, bedrock_served_model
 
 
 class BedrockConverseLLM(BaseChatModel):
@@ -101,6 +102,50 @@ class BedrockConverseLLM(BaseChatModel):
 
         return converse_messages, system_messages if system_messages else None
 
+    def _converse_result(self, response: Dict[str, Any]) -> ChatResult:
+        """Build a ChatResult from a Converse response.
+
+        ``model_name`` is the model that served the call (what OpenLLMetry records as ``gen_ai.response.model``).
+        ``model_id`` stays the requested ID.
+        """
+        output_message = response.get("output", {}).get("message", {})
+        content_blocks = output_message.get("content", [])
+        response_text = "".join(
+            block.get("text", "") for block in content_blocks if "text" in block
+        )
+
+        usage = response.get("usage", {})
+        token_usage = {
+            "input_tokens": usage.get("inputTokens", 0),
+            "output_tokens": usage.get("outputTokens", 0),
+            "total_tokens": usage.get("totalTokens", 0),
+        }
+        stop_reason = response.get("stopReason")
+        served, source = bedrock_served_model(response, self.model_id)
+
+        message = AIMessage(
+            content=response_text,
+            response_metadata={
+                "model_id": self.model_id,
+                "model_name": served,
+                "served_model_source": source,
+                "stop_reason": stop_reason,
+                "token_usage": token_usage,
+            },
+        )
+        message.usage_metadata = token_usage
+
+        return ChatResult(
+            generations=[ChatGeneration(message=message)],
+            llm_output={
+                "token_usage": token_usage,
+                "model_id": self.model_id,
+                "model_name": served,
+                "served_model_source": source,
+                "stop_reason": stop_reason,
+            },
+        )
+
     def _generate(
         self,
         messages: List[BaseMessage],
@@ -153,39 +198,7 @@ class BedrockConverseLLM(BaseChatModel):
 
         try:
             response = bedrock_client.converse(**api_params)
-
-            output_message = response.get("output", {}).get("message", {})
-            content_blocks = output_message.get("content", [])
-            response_text = "".join(
-                block.get("text", "") for block in content_blocks if "text" in block
-            )
-
-            usage = response.get("usage", {})
-            token_usage = {
-                "input_tokens": usage.get("inputTokens", 0),
-                "output_tokens": usage.get("outputTokens", 0),
-                "total_tokens": usage.get("totalTokens", 0),
-            }
-            stop_reason = response.get("stopReason")
-
-            message = AIMessage(
-                content=response_text,
-                response_metadata={
-                    "model_id": self.model_id,
-                    "stop_reason": stop_reason,
-                    "token_usage": token_usage,
-                },
-            )
-            message.usage_metadata = token_usage
-
-            return ChatResult(
-                generations=[ChatGeneration(message=message)],
-                llm_output={
-                    "token_usage": token_usage,
-                    "model_id": self.model_id,
-                    "stop_reason": stop_reason,
-                },
-            )
+            return self._converse_result(response)
 
         except Exception as e:
             if "credentials" in str(e).lower() or "expired" in str(e).lower():
@@ -196,40 +209,7 @@ class BedrockConverseLLM(BaseChatModel):
                     )
 
                     response = self._bedrock_client.converse(**api_params)
-
-                    output_message = response.get("output", {}).get("message", {})
-                    content_blocks = output_message.get("content", [])
-                    response_text = "".join(
-                        block.get("text", "") for block in content_blocks
-                        if "text" in block
-                    )
-
-                    usage = response.get("usage", {})
-                    token_usage = {
-                        "input_tokens": usage.get("inputTokens", 0),
-                        "output_tokens": usage.get("outputTokens", 0),
-                        "total_tokens": usage.get("totalTokens", 0),
-                    }
-                    stop_reason = response.get("stopReason")
-
-                    message = AIMessage(
-                        content=response_text,
-                        response_metadata={
-                            "model_id": self.model_id,
-                            "stop_reason": stop_reason,
-                            "token_usage": token_usage,
-                        },
-                    )
-                    message.usage_metadata = token_usage
-
-                    return ChatResult(
-                        generations=[ChatGeneration(message=message)],
-                        llm_output={
-                            "token_usage": token_usage,
-                            "model_id": self.model_id,
-                            "stop_reason": stop_reason,
-                        },
-                    )
+                    return self._converse_result(response)
 
             raise
 
@@ -275,6 +255,7 @@ class BedrockConverseLLM(BaseChatModel):
             accumulated_text = ""
             token_usage = {}
             stop_reason = None
+            served, source = self.model_id, SOURCE_REQUESTED_FALLBACK
             
             for event in response_stream["stream"]:
                 # Capture TTFT on first content delta
@@ -309,6 +290,7 @@ class BedrockConverseLLM(BaseChatModel):
                         "total_tokens": usage.get("totalTokens", 0),
                     }
                     stop_reason = metadata.get("stopReason")
+                    served, source = bedrock_served_model(metadata, self.model_id)
             
             # Yield final metadata chunk
             if ttft_ms is None:
@@ -318,6 +300,8 @@ class BedrockConverseLLM(BaseChatModel):
                 content="",  # Empty content for metadata-only message
                 response_metadata={
                     "model_id": self.model_id,
+                    "model_name": served,
+                    "served_model_source": source,
                     "stop_reason": stop_reason,
                     "token_usage": token_usage,
                     "ttft_ms": ttft_ms,
@@ -344,6 +328,7 @@ class BedrockConverseLLM(BaseChatModel):
                     accumulated_text = ""
                     token_usage = {}
                     stop_reason = None
+                    served, source = self.model_id, SOURCE_REQUESTED_FALLBACK
                     
                     for event in response_stream["stream"]:
                         if ttft_ms is None and "contentBlockDelta" in event:
@@ -374,6 +359,7 @@ class BedrockConverseLLM(BaseChatModel):
                                 "total_tokens": usage.get("totalTokens", 0),
                             }
                             stop_reason = metadata.get("stopReason")
+                            served, source = bedrock_served_model(metadata, self.model_id)
                     
                     if ttft_ms is None:
                         ttft_ms = int((time.time() - start_time) * 1000)
@@ -382,6 +368,8 @@ class BedrockConverseLLM(BaseChatModel):
                         content="",
                         response_metadata={
                             "model_id": self.model_id,
+                            "model_name": served,
+                            "served_model_source": source,
                             "stop_reason": stop_reason,
                             "token_usage": token_usage,
                             "ttft_ms": ttft_ms,
