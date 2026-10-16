@@ -5,6 +5,7 @@ from typing import Any, Optional
 import ldclient
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from opentelemetry import trace
 from ldai.client import LDMessage
 
 from ..graph.state import AgentState
@@ -518,10 +519,15 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
     
     # Mirror the traversal onto the LaunchDarkly agent graph so its usage view
     # populates (the app orchestrates in code, not via the SDK graph runner).
-    track_agent_graph_traversal(
-        state, user_context, model_invoker,
-        brand_tokens=tokens, brand_duration_ms=duration_ms, brand_ttft_ms=ttft_ms,
-    )
+    # This re-evaluates the graph and every node's config only to send metrics,
+    # so run it outside this node's span: otherwise the flag hook adds a
+    # feature_flag event for every config, and every config's Monitoring tab
+    # lists this span.
+    with trace.use_span(trace.INVALID_SPAN):
+        track_agent_graph_traversal(
+            state, user_context, model_invoker,
+            brand_tokens=tokens, brand_duration_ms=duration_ms, brand_ttft_ms=ttft_ms,
+        )
 
     # Start async evaluation without blocking (fire-and-forget)
     # This evaluates GLOBAL SYSTEM ACCURACY against the account/profile context
