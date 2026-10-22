@@ -162,6 +162,20 @@ skills while it has no other tools. Each load is recorded in the decision log as
 Plugin settings go under `plugins.entries.ld-agentcontrol.config` in the OpenClaw config. They are `configKey`,
 `toolPrefix`, `failClosed`, `hideTools`, `initTimeoutSeconds` and `decisionLog`; the manifest describes each one.
 
+## Traces
+
+Each run's trace goes to LaunchDarkly observability through OpenClaw's own `diagnostics-otel` plugin, not through
+this plugin. `run_checks.sh` installs it into `.state/` and turns on trace export. Each run then exports
+`openclaw.harness.run` > `openclaw.run` > `openclaw.model.call` (plus `openclaw.tool.execution` for tool calls). The
+model-call span carries `gen_ai.operation.name`, `gen_ai.request.model` and `gen_ai.usage.*`, so LaunchDarkly's LLM
+views can read it.
+
+`env.sh` points the exporter at LaunchDarkly's OTLP/HTTP endpoint and sets `launchdarkly.project_id` to the SDK key.
+For a non-production instance, set `LAUNCHDARKLY_OTLP_HTTP_ENDPOINT` in the env file. Without it, `env.sh` turns
+export off (`OTEL_SDK_DISABLED=true`), so the instance's SDK key never goes to the production collector.
+
+These traces are not linked to the `openclaw_agent` config; see the first item under [OpenClaw](#openclaw).
+
 ## Gaps and unexpected behavior
 
 Found on 2026-10-13 while building and testing this, and on 2026-10-14 while adding skills, with:
@@ -248,6 +262,10 @@ streams. To find out, edit a variation and evaluate it from a new streaming clie
 
 ### OpenClaw
 
+- **Traces can't be linked to the AgentControl config.** LaunchDarkly links a trace to a config through a
+  `feature_flag` event on a span that is active when the config is evaluated. OpenClaw's spans are never active in
+  plugin hooks: a probe in `before_agent_run`, `before_model_resolve`, `llm_input` and `agent_end` found no active
+  span. So the SDK's tracing hook has nothing to attach the event to. The tracker's metrics still reach the config.
 - **Only models in OpenClaw's catalog are accepted.** `openai/gpt-4o-mini` was rejected as a "retired or
   noncanonical model ref". A variation's model has to be one both the LaunchDarkly project and OpenClaw's catalog
   know, such as `gpt-5.4-mini`.

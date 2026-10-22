@@ -264,11 +264,27 @@ different variations depending on who is signed in:
 
 ### Observability
 
-The backend initializes OpenTelemetry **before** any LLM imports and exports traces to
-**LaunchDarkly Monitor** via `ObservabilityPlugin` from `ldobserve`. Bedrock, FastAPI,
-botocore, and LangChain are auto-instrumented; workflow nodes add explicit parent spans,
-and the model invoker annotates spans with `ld.ai_config.key` so traces correlate to AI
-Configs. See `app/backend/src/utils/observability.py`.
+The backend sends traces to LaunchDarkly observability (**Monitor > Traces**, and the LLM
+and Conversations views) through `ObservabilityPlugin` from `ldobserve`. It is set up in
+`app/backend/src/utils/observability.py`, which `server.py` calls before any LLM imports.
+
+- **Auto-instrumentation.** Constructing the plugin turns on every installed
+  OpenTelemetry instrumentor: FastAPI, LangChain (one LLM span per model call, including
+  Bedrock through `BedrockConverseLLM`), OpenAI, Anthropic, and HTTP clients. botocore is
+  turned off so Bedrock calls don't get a second span.
+- **Spans added by the app.** `run_workflow` wraps the graph in a `multi-agent-workflow`
+  span, each node runs in an `agent.<name>` span, and the judges run in an
+  `evaluate brand_voice` span in the same trace, with each score as a
+  `gen_ai.evaluation.result` event.
+- **AI Config links.** Each agent evaluates its AI Config inside its node span, so the
+  plugin's flag hook adds a `feature_flag` event that links the trace to the config's
+  Monitoring tab. `ModelInvoker` also sets `ld.ai_config.key` on that span.
+- **Conversations.** Every span gets `gen_ai.conversation.id`, taken from the
+  `conversationId` the chat widget sends (one per widget session), or the request ID
+  when it is missing.
+- **Other instances.** For a non-production LaunchDarkly instance, set
+  `LAUNCHDARKLY_OTLP_ENDPOINT` (OTLP gRPC) and `LAUNCHDARKLY_OBSERVABILITY_BACKEND_URL`
+  (sampling config) next to the `*_URI` variables. Leave them unset for production.
 
 ## API
 

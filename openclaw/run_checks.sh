@@ -47,6 +47,14 @@ EOF
     "$OPENCLAW" plugins install --link ./plugin --force --accept-capabilities > /dev/null 2>&1 \
       || { echo "plugin install failed"; exit 1; }
   fi
+  # Traces go to LaunchDarkly through OpenClaw's own exporter; env.sh sets the endpoint and project.
+  if [ ! -d "$STATE/extensions/diagnostics-otel" ]; then
+    "$OPENCLAW" plugins install clawhub:@openclaw/diagnostics-otel > /dev/null 2>&1 \
+      || { echo "diagnostics-otel install failed"; exit 1; }
+  fi
+  "$OPENCLAW" config set diagnostics '{"enabled": true, "otel": {"enabled": true, "protocol": "http/protobuf",
+    "serviceName": "openclaw-agentcontrol", "traces": true, "metrics": false, "logs": false}}' --strict-json \
+    > /dev/null 2>&1 || { echo "diagnostics config failed"; exit 1; }
 }
 
 # Puts LaunchDarkly and OpenClaw back the way the checks expect, including after a failed or interrupted run.
