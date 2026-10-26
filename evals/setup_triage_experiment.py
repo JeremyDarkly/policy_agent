@@ -297,7 +297,7 @@ def main() -> None:
     ensure_experiment(api)
     if args.start:
         start_experiment(api)
-    print(f"Experiment: {api.host}/projects/{api.project}/experiments/{EXPERIMENT_KEY}?env={api.env}")
+    print(f"Experiment: {api.host}/{api.project}/{api.env}/experiments/{EXPERIMENT_KEY}/results")
 
 
 if __name__ == "__main__":
