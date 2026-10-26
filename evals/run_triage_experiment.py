@@ -116,8 +116,7 @@ def run_one(triage_router, row: dict, user_key: str) -> dict:
     state = {"messages": [HumanMessage(content=row["input"])], "user_context": profile, "agent_data": {}}
     for attempt in range(4):
         try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                result = triage_router.triage_node(state)
+            result = triage_router.triage_node(state)
             break
         except Exception as e:  # Bedrock throttling, mostly
             if attempt == 3:
@@ -190,6 +189,10 @@ def main() -> None:
     from src.agents import triage_router
 
     results: list[dict] = []
+    # The backend prints a lot per call. Redirect once for the whole run: a
+    # redirect per worker thread races on sys.stdout and can swallow the summary.
+    quiet = contextlib.redirect_stdout(io.StringIO())
+    quiet.__enter__()
     if args.pilot:
         api = Api()
         config = api.must("GET", f"/api/v2/projects/{api.project}/ai-configs/{CONFIG_KEY}")
@@ -225,6 +228,7 @@ def main() -> None:
                 r = future.result()
                 if "error" not in r:
                     if r["variation"] in ("", "unknown", "default-fallback"):
+                        quiet.__exit__(None, None, None)
                         sys.exit(f"Triage was served '{r['variation']}', not a real variation; stopping.")
                     client.track(
                         "triage-routed-correctly",
@@ -238,6 +242,7 @@ def main() -> None:
         client.flush()
         time.sleep(2)
 
+    quiet.__exit__(None, None, None)
     for r in results:
         r.pop("invoker", None)
     summarize(results)

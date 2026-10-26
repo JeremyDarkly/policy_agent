@@ -11,6 +11,10 @@ Evaluations run from code with the LaunchDarkly Python AI SDK against the stagin
 | `policy_agent_dataset_quick.jsonl` | 2-row dataset for cheap practice runs; key `policy_agent_dataset_quick` |
 | `guarded_rollout_walkthrough.py` | Notebook: a guarded rollout of a new AI Config variation on staging, rolled back automatically when a judge score regresses |
 | `guarded_rollout_questions.jsonl` | Customer questions the guarded rollout notebook sends as traffic |
+| `setup_triage_experiment.py` | Script: creates the triage routing experiment (3 challenger variations, 4 metrics, a 4-arm experiment) |
+| `run_triage_experiment.py` | Script: sends labeled routing traffic through the real triage node, or pilots every variation offline |
+| `triage_routing_dataset.jsonl` | 48 routing questions labeled with the expected specialist; 29 are hard cases |
+| `triage_prompts/tuned.md` | The tuned triage prompt the challenger variations use |
 
 ```sh
 cd evals
@@ -95,3 +99,31 @@ anything that looks sensitive remains:
 ```sh
 uv run python sanitize_notebook.py
 ```
+
+## Triage routing experiment
+
+A four-arm experiment on `triage_agent`: can a smaller model route queries as accurately as Claude Sonnet 5 for
+less cost and latency?
+
+| Arm | Model | Prompt |
+|---|---|---|
+| `default` (control) | Claude Sonnet 5 | current |
+| `haiku-current-prompt` | Claude Haiku 4.5 | current |
+| `haiku-tuned-prompt` | Claude Haiku 4.5 | `triage_prompts/tuned.md` |
+| `nova-pro-tuned-prompt` | Amazon Nova Pro | `triage_prompts/tuned.md` |
+
+The primary metric is routing accuracy (`triage-routed-correctly`, 1 or 0, sent by the replay script from the
+row's label). The secondary metrics are triage cost, triage latency and escalation rate, sent by the triage node itself
+so the specialists' events don't mix in.
+
+From the repo root, with AWS credentials for Bedrock:
+
+```sh
+python3 evals/setup_triage_experiment.py --env-file .env.staging-org          # create, idempotent
+RUN="uv run --no-project --with-requirements app/backend/requirements.txt python evals/run_triage_experiment.py --env-file .env.staging-org"
+$RUN --pilot --show-misses                                                    # every variation x every row, no events
+python3 evals/setup_triage_experiment.py --env-file .env.staging-org --start  # start the experiment
+$RUN --users 800                                                              # simulated users, ~200 per arm
+```
+
+While the experiment runs, every `triage_agent` evaluation is randomized, including chats in the UI.
