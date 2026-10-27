@@ -5,8 +5,9 @@ import { useSyncExternalStore } from "react";
  *
  * Each preset drives LaunchDarkly user-key targeting so the same AI Configs
  * can resolve to different variations depending on who is "logged in":
- *   - commercial  -> user_key "eric-commercial-plan" (a regular banking customer)
- *   - internal    -> user_key "eric-internal-dev"    (an internal/employee user)
+ *   - commercial  -> user_key "<name>-commercial-plan" (a regular banking customer)
+ *   - internal    -> user_key "<name>-internal-dev"    (an internal/employee user)
+ * where <name> is the demo user's name as a slug, e.g. "jeremy-mcgee".
  *
  * The fields below are forwarded to POST /api/chat and become the LaunchDarkly
  * context attributes (see backend create_user_profile). `domain: "togglebank"`
@@ -15,6 +16,8 @@ import { useSyncExternalStore } from "react";
 // Demo user's display name, sourced from the environment (VITE_DEMO_USER_NAME)
 // so no personal name is hardcoded. Falls back to a neutral placeholder.
 const DEMO_USER_NAME = import.meta.env.VITE_DEMO_USER_NAME || "Demo User";
+// User keys derive from the same name, so each presenter targets their own keys
+const KEY_PREFIX = DEMO_USER_NAME.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
 export const DEMO_USERS = {
   commercial: {
@@ -22,7 +25,7 @@ export const DEMO_USERS = {
     name: DEMO_USER_NAME,
     badge: "Customer",
     userName: DEMO_USER_NAME,
-    userKey: "eric-commercial-plan",
+    userKey: `${KEY_PREFIX}-commercial-plan`,
     userType: "customer",
     role: "customer",
     plan: "commercial",
@@ -35,7 +38,7 @@ export const DEMO_USERS = {
     name: "Dev Mode",
     badge: "Internal",
     userName: DEMO_USER_NAME,
-    userKey: "eric-internal-dev",
+    userKey: `${KEY_PREFIX}-internal-dev`,
     userType: "internal",
     role: "employee",
     plan: "internal",

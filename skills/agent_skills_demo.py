@@ -122,8 +122,10 @@ STYLE_SKILL = "plain-english"
 TOOL_KEY = "load_skill"
 DISPUTE_JUDGE = "dispute-answer-quality"  # OpenAI judge, created below
 TRAJECTORY_JUDGE = "tool-trajectory-relevance"  # OpenAI judge from the offline evals notebook
-SKILLED_USER = "eric-internal-dev"  # demo login presets from app/ui/src/lib/demoUser.ts
-OTHER_USER = "eric-commercial-plan"
+# Demo login presets from app/ui/src/lib/demoUser.ts, which derives the keys from DEMO_USER_NAME the same way
+DEMO_KEY_PREFIX = re.sub(r"[^a-z0-9]+", "-", os.getenv("DEMO_USER_NAME", "Demo User").lower().strip()).strip("-")
+SKILLED_USER = f"{DEMO_KEY_PREFIX}-internal-dev"
+OTHER_USER = f"{DEMO_KEY_PREFIX}-commercial-plan"
 
 LIBRARY = ROOT / "skills" / "library"
 MATERIALIZED = ROOT / "skills" / ".materialized"  # never .claude/skills: those are this repo's own Claude skills
@@ -293,7 +295,7 @@ for ref in references.get("items", []):
 # ## Act 3: Serve
 #
 # Skills have no targeting of their own. The variation a context is served decides which skills it gets. Here
-# `eric-internal-dev` is targeted at `skills-demo`, and everyone else keeps `Default`.
+# the Internal demo login (`<name>-internal-dev`) is targeted at `skills-demo`, and everyone else keeps `Default`.
 #
 # The agent then resolves its config the way production code does, through the SDK. It reads the pinned skill references
 # from the served variation and fetches each pinned version. It writes the skills as `<root>/<key>/SKILL.md` plus a

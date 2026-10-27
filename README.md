@@ -259,8 +259,11 @@ different variations depending on who is signed in:
 
 | Preset | LD user key | Context |
 |---|---|---|
-| Customer | `eric-commercial-plan` | Everyday Current Account holder |
-| Internal | `eric-internal-dev` | Internal/employee user, Premier Current Account |
+| Customer | `<name>-commercial-plan` | Everyday Current Account holder |
+| Internal | `<name>-internal-dev` | Internal/employee user, Premier Current Account |
+
+`<name>` is `DEMO_USER_NAME` as a slug: `Jane Doe` gives `jane-doe-commercial-plan`. With no name set, the keys
+start with `demo-user`.
 
 ### Observability
 
