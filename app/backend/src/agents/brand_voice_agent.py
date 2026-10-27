@@ -177,15 +177,18 @@ def calculate_model_cost(model_id: str, input_tokens: int, output_tokens: int) -
     # Pricing per 1000 tokens
     pricing = {
         "haiku": {"input": 0.001, "output": 0.005},
+        "sonnet-5": {"input": 0.002, "output": 0.010},
         "sonnet-4": {"input": 0.003, "output": 0.015},
         "llama4-maverick": {"input": 0.00024, "output": 0.00097},
-        "nova-pro": {"input": 0.0008, "output": 0.0002},
+        "nova-pro": {"input": 0.0008, "output": 0.0032},
     }
-    
+
     # Determine model type from model_id
     model_lower = model_id.lower()
     if "haiku" in model_lower:
         rates = pricing["haiku"]
+    elif "sonnet-5" in model_lower or "sonnet5" in model_lower:
+        rates = pricing["sonnet-5"]
     elif "sonnet-4" in model_lower or "sonnet4" in model_lower:
         rates = pricing["sonnet-4"]
     elif "llama4" in model_lower or "maverick" in model_lower:

@@ -111,7 +111,7 @@ const BarclaysHeader = () => {
 
           {/* Demo "fake login" — clicking the user pill opens a dropdown
               with the two presets. Each option drives LaunchDarkly user-key
-              targeting (eric-internal-dev / eric-commercial-plan). */}
+              targeting (<name>-internal-dev / <name>-commercial-plan). */}
           <div className="hidden sm:block relative" ref={userMenuRef}>
             <button
               type="button"

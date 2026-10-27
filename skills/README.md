@@ -49,7 +49,8 @@ and the `RUN` switches for rehearsals.
 - Two library skills: `togglebank-dispute-handling` (v1–v3) and `plain-english`.
 - A `skills-demo` variation on `account_agent` and on `branch_agent`, copied from `Default` without its Library tools.
   Terraform doesn't manage these variations.
-- A user target: `eric-internal-dev` is served `skills-demo`, so the app's **Internal** demo login gets it too.
+- A user target: `<name>-internal-dev` is served `skills-demo`, so the app's **Internal** demo login gets it too.
+  `<name>` is `DEMO_USER_NAME` as a slug, for example `jeremy-mcgee`.
 - A `load_skill` Library tool and a `dispute-answer-quality` judge.
 
 The notebook's **Reset** cell removes the target and the `skills-demo` variations. Add `RESET_SKILLS = True` to delete

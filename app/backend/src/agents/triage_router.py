@@ -33,6 +33,25 @@ def _parse_triage_json(content: str) -> dict:
         raise
 
 
+def _track_triage_metrics(model_invoker, cost_usd, duration_ms: int, escalated: bool) -> None:
+    """Send triage-only cost, latency and escalation events for experiments.
+
+    The specialists also send $ld:ai:duration:total on the same context, so
+    triage gets its own event keys to keep routing metrics separate.
+    """
+    try:
+        import ldclient
+
+        ld_context = model_invoker.user_context
+        client = ldclient.get()
+        if cost_usd is not None:
+            client.track("triage-cost-cents", ld_context, metric_value=cost_usd * 100.0)
+        client.track("triage-duration-ms", ld_context, metric_value=float(duration_ms))
+        client.track("triage-escalated", ld_context, metric_value=1.0 if escalated else 0.0)
+    except Exception as e:
+        print(f"  Failed to send triage metrics: {e}")
+
+
 def triage_node(state: AgentState) -> dict[str, Any]:
     """Triage router agent node.
 
@@ -103,6 +122,7 @@ def triage_node(state: AgentState) -> dict[str, Any]:
         ttft_ms = response.response_metadata.get("ttft_ms")
 
     # Emit cost/duration so the UI terminal can mark this node complete
+    triage_cost_usd = None
     try:
         from .brand_voice_agent import calculate_model_cost
         triage_cost_usd = calculate_model_cost(
@@ -161,6 +181,8 @@ def triage_node(state: AgentState) -> dict[str, Any]:
     if confidence_score < 0.7 and query_type != QueryType.GENERAL_QUESTION:
         escalation_needed = True
         next_agent = "scheduler_specialist"
+
+    _track_triage_metrics(model_invoker, triage_cost_usd, duration_ms, escalation_needed)
 
     # For general questions routed directly to brand_voice, pass the original
     # query through so the brand voice agent can answer it directly.
