@@ -717,7 +717,9 @@ resource "launchdarkly_ai_config_variation" "ci_judge_coherence" {
   config_key       = launchdarkly_ai_config.ci_judge_coherence.key
   key              = "default"
   name             = "Default"
-  model_config_key = launchdarkly_model_config.claude_sonnet_4.key
+  # Not claude_sonnet_4 like ai_judge_coherence: Bedrock has retired that model
+  # version ("This model version has reached the end of its life").
+  model_config_key = launchdarkly_model_config.claude_sonnet_5.key
   state            = "published"
 
   messages = [{

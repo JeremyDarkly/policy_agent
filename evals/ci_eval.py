@@ -32,6 +32,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from launchdarkly_ai_langchain_messages import create_langchain_messages_handler
+from launchdarkly_ai_server.judge_scoring import numeric_score, parse_judge_response
 from launchdarkly_ai_server import (
     AIConfig,
     DatasetRow,
@@ -156,17 +157,67 @@ SCORERS = {
 MAX_ROW_ERRORS = 3
 
 
-def recording_handler(inner: ProviderHandler, result: TargetResult) -> ProviderHandler:
-    """Wrap the handler to keep the errors it raises, keeping the metadata judges need."""
+def row_label(row_input: str) -> str:
+    """The customer's question, from a row input in the backend's "User query" format."""
+    first, _, rest = (row_input or "").partition("\n")
+    query = first.removeprefix("User query:").strip()
+    if not query and "User context:" in rest:
+        # Brand voice rows: the question is in the context as original_query.
+        try:
+            query = json.loads(rest.split("User context:", 1)[1]).get("original_query", "")
+        except (json.JSONDecodeError, AttributeError):
+            query = ""
+    return query or first[:100]
+
+
+@dataclass
+class JudgeInfo:
+    key: str
+    threshold: float
+
+
+def judge_lookup(evals: Any, target: dict[str, Any]) -> dict[str, JudgeInfo]:
+    """evaluationMetricKey -> judge, since a judge call's config carries only the metric key."""
+    lookup = {}
+    for entry in target.get("judges", []):
+        judge = judge_for(entry)
+        config = evals.api.get(f"projects/{evals.project_key}/ai-configs/{judge.key}")
+        lookup[config["evaluationMetricKey"]] = JudgeInfo(judge.key, judge.threshold)
+    return lookup
+
+
+def recording_handler(
+    inner: ProviderHandler, result: TargetResult, judges: dict[str, JudgeInfo]
+) -> ProviderHandler:
+    """Wrap the handler to keep its errors and low judge scores, keeping the metadata judges need.
+
+    The SDK reports only row counts, so this is where per-row judge results come from.
+    """
 
     async def recorded(config, user_input=None, tool_handlers=None, variables=None, history=None):
         try:
-            return await inner(config, user_input, tool_handlers, variables, history)
+            output = await inner(config, user_input, tool_handlers, variables, history)
         except Exception as error:
             message = f"{type(error).__name__}: {error}"[:300]
             if message not in result.row_errors and len(result.row_errors) < MAX_ROW_ERRORS:
                 result.row_errors.append(message)
             raise
+        judge = judges.get(config.get("evaluationMetricKey", ""))
+        if judge is not None and variables and "formatting_instructions" in variables:
+            try:
+                raw, reason = parse_judge_response(output.get("output", output.get("response")))
+            except ValueError:
+                return output  # the SDK reports it as an invalid judge output
+            score = numeric_score(raw)
+            if score is not None and judge.threshold is not None and score < judge.threshold:
+                result.misses.append(
+                    ScoredRow(
+                        input=row_label(variables.get("input", "")),
+                        expected=f"{judge.key} ≥ {judge.threshold}",
+                        actual=f"{score:.2f}: {' '.join(str(reason).split())[:200]}",
+                    )
+                )
+        return output
 
     return ProviderHandler(recorded, provides_for=inner.provides_for, capture_content=inner.capture_content)
 
@@ -330,7 +381,7 @@ async def run_target(
             dataset=dataset,
             ai_config=AIConfig(key=config, variation=variation),
             generation=generation_for(target),
-            handler=recording_handler(create_langchain_messages_handler(), result),
+            handler=recording_handler(create_langchain_messages_handler(), result, judge_lookup(evals, target)),
             tools=[],
             criteria=criteria_for(target),
             concurrency=args.concurrency,
@@ -371,16 +422,21 @@ def compare_with_baseline(results: list[TargetResult], path: Path) -> bool:
         if r.error or b is None:
             continue
         r.baseline_passed = b["summary"]["passed"]
-        before = {m["input"]: ScoredRow(**m) for m in b["misses"]}
-        after = {m.input: m for m in r.misses}
+        # Keyed by input and criterion: one row can fail several judges.
+        before = {(m["input"], m["expected"]): ScoredRow(**m) for m in b["misses"]}
+        after = {(m.input, m.expected): m for m in r.misses}
         r.newly_failing = [m for key, m in after.items() if key not in before]
         r.now_passing = [m for key, m in before.items() if key not in after]
     return True
 
 
+def cell(text: str) -> str:
+    return " ".join(text.split()).replace("|", "\\|")
+
+
 def rows_table(rows: list[ScoredRow], got: str) -> list[str]:
     lines = [f"| Input | Expected | {got} |", "|---|---|---|"]
-    return lines + [f"| {m.input.replace('|', '\\|')} | {m.expected} | {m.actual} |" for m in rows]
+    return lines + [f"| {cell(m.input)} | {cell(m.expected)} | {cell(m.actual)} |" for m in rows]
 
 
 def details(summary: str, rows: list[ScoredRow], got: str = "Got") -> list[str]:
@@ -434,7 +490,7 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
         if r.now_passing:
             lines += details(f"{r.config}: {len(r.now_passing)} now passing since `main`", r.now_passing, "Got on `main`")
         if r.misses:
-            lines += details(f"{r.config}: {len(r.misses)} misrouted", r.misses)
+            lines += details(f"{r.config}: {len(r.misses)} failing", r.misses)
     return "\n".join(lines) + "\n"
 
 
