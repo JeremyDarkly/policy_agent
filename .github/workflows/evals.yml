@@ -1,0 +1,150 @@
+# Advisory LaunchDarkly evals: evaluates AI Config variations against stored
+# datasets with evals/ci_eval.py, and reports in the job summary and on PRs.
+# Never blocks a merge. See evals/README.md ("CI evals").
+#
+# Runs on main keep their results as the eval-results artifact. Other runs
+# compare with the latest one.
+name: LaunchDarkly evals
+
+on:
+  pull_request:
+    paths:
+      - app/backend/src/agents/**
+      - infrastructure/launchdarkly/ai_configs_resources.tf
+      - infrastructure/launchdarkly/model_configs.tf
+      - evals/ci_eval.py
+      - evals/ci_targets.toml
+      - evals/pyproject.toml
+      - evals/uv.lock
+      - .github/workflows/evals.yml
+  push:
+    branches: [main]
+    paths:
+      - app/backend/src/agents/**
+      - infrastructure/launchdarkly/ai_configs_resources.tf
+      - infrastructure/launchdarkly/model_configs.tf
+      - evals/ci_eval.py
+      - evals/ci_targets.toml
+      - evals/pyproject.toml
+      - evals/uv.lock
+      - .github/workflows/evals.yml
+  workflow_dispatch:
+    inputs:
+      config:
+        description: AI Config key to evaluate (blank for every target in ci_targets.toml)
+        default: ""
+      variation:
+        description: Variation key
+        default: default
+      full:
+        description: Use the full datasets instead of the quick ones
+        type: boolean
+        default: false
+
+concurrency:
+  group: evals-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evals:
+    # Pull requests from forks don't get secrets or an AWS token.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write       # AWS sign-in through OIDC
+      actions: read         # download the latest main results
+      pull-requests: write  # PR comment
+    env:
+      LD_PROJECT_KEY: ${{ secrets.LD_PROJECT_KEY }}
+      LD_API_TOKEN: ${{ secrets.LD_API_TOKEN }}
+      LD_SDK_KEY: ${{ secrets.LD_SDK_KEY }}
+      LD_API_BASE_URI: ${{ secrets.LD_API_BASE_URI }}
+      LD_UI_BASE_URI: ${{ secrets.LD_UI_BASE_URI }}
+      LD_BASE_URI: ${{ secrets.LD_BASE_URI }}
+      LD_STREAM_URI: ${{ secrets.LD_STREAM_URI }}
+      LD_EVENTS_URI: ${{ secrets.LD_EVENTS_URI }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: evals/uv.lock
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: policy-agent-ci-evals-${{ github.run_id }}
+
+      - name: Install
+        working-directory: evals
+        run: uv sync --locked
+
+      - name: Download the latest main results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p baseline results
+          id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow evals.yml --branch main \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -n "$id" ]; then
+            gh run download "$id" --repo "$GITHUB_REPOSITORY" --name eval-results --dir baseline \
+              || echo "No eval-results artifact on run $id"
+          else
+            echo "No successful run on main yet"
+          fi
+
+      - name: Run evals
+        working-directory: evals
+        env:
+          CONFIG: ${{ inputs.config }}
+          VARIATION: ${{ inputs.variation || 'default' }}
+          FULL: ${{ inputs.full }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # main keeps quick and full results so every run has something to compare with.
+          if [ "$GITHUB_REF" = refs/heads/main ]; then modes="quick full"
+          elif [ "$FULL" = true ]; then modes=full
+          else modes=quick
+          fi
+          label="${PR:+pr-$PR}"
+          label="${label:-${GITHUB_REF_NAME//\//-}}-${GITHUB_SHA::7}"
+          status=0
+          for mode in $modes; do
+            flag=""; [ "$mode" = quick ] && flag=--quick
+            uv run python ci_eval.py $flag --variation "$VARIATION" ${CONFIG:+--config "$CONFIG"} \
+              --label "$label" --no-run-links --summary-file ../results/summary.md \
+              --json-out "../results/results-$mode.json" --baseline "../baseline/results-$mode.json" \
+              || status=1
+          done
+          exit $status
+
+      - name: Write the job summary
+        if: always() && hashFiles('results/summary.md') != ''
+        run: cat results/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the PR
+        if: always() && github.event_name == 'pull_request' && hashFiles('results/summary.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          marker="<!-- launchdarkly-ci-evals -->"
+          body="$(printf '%s\n' "$marker"; cat results/summary.md)"
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+            --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | tail -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" >/dev/null
+          else
+            gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "$body"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('results/results-*.json') != ''
+        with:
+          name: eval-results
+          path: results/results-*.json
+          retention-days: 90

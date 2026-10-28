@@ -142,3 +142,15 @@ dataset**) with that key first. Results are advisory: the script exits non-zero 
 uv run python ci_eval.py --env-file ../.env.staging-org --quick          # quick datasets
 uv run python ci_eval.py --env-file ../.env.staging-org --config triage_agent --variation default
 ```
+
+`.github/workflows/evals.yml` runs it in GitHub Actions on PRs that change the agents, prompts or CI eval files, on
+pushes to `main`, and by hand (**Actions > LaunchDarkly evals > Run workflow**, with a config, variation and full/quick).
+PRs use the quick datasets. Runs on `main` do quick and full, and keep the results as the `eval-results` artifact. Every
+run compares with the latest `main` results (`--baseline`) and writes the summary to the job, and PR runs also post it
+as one PR comment that later runs update. The repo is public, so the workflow passes `--no-run-links`: the summary
+names each run instead of linking to the LaunchDarkly host. PRs from forks are skipped, since they get no secrets.
+
+The workflow needs these repository secrets: `AWS_ROLE_ARN` (an IAM role GitHub can assume through OIDC, allowed to
+call Bedrock for the models in `infrastructure/launchdarkly/model_configs.tf`), `LD_PROJECT_KEY`, `LD_API_TOKEN`,
+`LD_SDK_KEY`, and the endpoint variables `LD_API_BASE_URI`, `LD_UI_BASE_URI`, `LD_BASE_URI`, `LD_STREAM_URI` and
+`LD_EVENTS_URI` (leave these unset for production).
