@@ -163,9 +163,11 @@ the SDK's offline variables (`response_to_evaluate`, `message_history`, `ground_
 doesn't send either.
 
 `.github/workflows/evals.yml` runs it in GitHub Actions on PRs that change the agents, prompts or CI eval files, on
-pushes to `main`, and by hand (**Actions > LaunchDarkly evals > Run workflow**, with a config, variation and full/quick).
-PRs use the quick datasets. Runs on `main` do quick and full, and keep the results as the `eval-results` artifact. Every
-run compares with the latest `main` results (`--baseline`) and writes the summary to the job, and PR runs also post it
+pushes to `main`, nightly at 09:00 UTC, and by hand (**Actions > LaunchDarkly evals > Run workflow**, with a config,
+variation and full/quick). PRs and pushes to `main` use the quick datasets and the nightly run uses the full ones, which
+keeps the daily LaunchDarkly token use down: a full run of every target used a large share of it. Runs on `main` keep
+their results as the `eval-results-quick` or `eval-results-full` artifact. Every run compares with the latest `main`
+results for the same datasets (`--baseline`) and writes the summary to the job, and PR runs also post it
 as one PR comment that later runs update. The repo is public, so the workflow passes `--no-run-links`: the summary
 names each run instead of linking to the LaunchDarkly host. PRs from forks are skipped, since they get no secrets.
 

@@ -2,8 +2,10 @@
 # datasets with evals/ci_eval.py, and reports in the job summary and on PRs.
 # Never blocks a merge. See evals/README.md ("CI evals").
 #
-# Runs on main keep their results as the eval-results artifact. Other runs
-# compare with the latest one.
+# PRs and pushes to main use the quick datasets; the nightly run uses the full
+# ones. Every run on main keeps its results as the eval-results-quick or
+# eval-results-full artifact, and every run compares with the latest one from
+# main for the same datasets.
 name: LaunchDarkly evals
 
 on:
@@ -28,6 +30,8 @@ on:
       - evals/pyproject.toml
       - evals/uv.lock
       - .github/workflows/evals.yml
+  schedule:
+    - cron: "0 9 * * *"  # nightly full run, 09:00 UTC
   workflow_dispatch:
     inputs:
       config:
@@ -42,7 +46,8 @@ on:
         default: false
 
 concurrency:
-  group: evals-${{ github.ref }}
+  # Per event too, so a push to main doesn't cancel the nightly run.
+  group: evals-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
@@ -90,14 +95,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p baseline results
-          id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow evals.yml --branch main \
-            --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
-          if [ -n "$id" ]; then
-            gh run download "$id" --repo "$GITHUB_REPOSITORY" --name eval-results --dir baseline \
-              || echo "No eval-results artifact on run $id"
-          else
-            echo "No successful run on main yet"
-          fi
+          # Quick and full results come from different runs on main, so each
+          # is the newest unexpired artifact of its name from a main run.
+          for mode in quick full; do
+            id=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=eval-results-$mode&per_page=50" \
+              --jq '[.artifacts[] | select(.expired | not) | select(.workflow_run.head_branch == "main")][0].id // empty')
+            if [ -n "$id" ]; then
+              gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > "baseline/$mode.zip"
+              unzip -o -q "baseline/$mode.zip" -d baseline && rm "baseline/$mode.zip"
+            else
+              echo "No $mode results from main yet"
+            fi
+          done
 
       - name: Run evals
         working-directory: evals
@@ -107,22 +116,13 @@ jobs:
           FULL: ${{ inputs.full }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          # main keeps quick and full results so every run has something to compare with.
-          if [ "$GITHUB_REF" = refs/heads/main ]; then modes="quick full"
-          elif [ "$FULL" = true ]; then modes=full
-          else modes=quick
-          fi
+          if [ "$GITHUB_EVENT_NAME" = schedule ] || [ "$FULL" = true ]; then mode=full; else mode=quick; fi
           label="${PR:+pr-$PR}"
           label="${label:-${GITHUB_REF_NAME//\//-}}-${GITHUB_SHA::7}"
-          status=0
-          for mode in $modes; do
-            flag=""; [ "$mode" = quick ] && flag=--quick
-            uv run python ci_eval.py $flag ${VARIATION:+--variation "$VARIATION"} ${CONFIG:+--config "$CONFIG"} \
-              --label "$label" --no-run-links --summary-file ../results/summary.md \
-              --json-out "../results/results-$mode.json" --baseline "../baseline/results-$mode.json" \
-              || status=1
-          done
-          exit $status
+          flag=""; [ "$mode" = quick ] && flag=--quick
+          uv run python ci_eval.py $flag ${VARIATION:+--variation "$VARIATION"} ${CONFIG:+--config "$CONFIG"} \
+            --label "$label" --no-run-links --summary-file ../results/summary.md \
+            --json-out "../results/results-$mode.json" --baseline "../baseline/results-$mode.json"
 
       - name: Write the job summary
         if: always() && hashFiles('results/summary.md') != ''
@@ -145,8 +145,15 @@ jobs:
           fi
 
       - uses: actions/upload-artifact@v4
-        if: always() && hashFiles('results/results-*.json') != ''
+        if: always() && hashFiles('results/results-quick.json') != ''
         with:
-          name: eval-results
-          path: results/results-*.json
+          name: eval-results-quick
+          path: results/results-quick.json
+          retention-days: 90
+
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('results/results-full.json') != ''
+        with:
+          name: eval-results-full
+          path: results/results-full.json
           retention-days: 90
