@@ -13,8 +13,11 @@ Evaluations run from code with the LaunchDarkly Python AI SDK against the stagin
 | `guarded_rollout_questions.jsonl` | Customer questions the guarded rollout notebook sends as traffic |
 | `setup_triage_experiment.py` | Script: creates the triage routing experiment (3 challenger variations, 4 metrics, a 4-arm experiment) |
 | `run_triage_experiment.py` | Script: sends labeled routing traffic through the real triage node, or pilots every variation offline |
-| `triage_routing_dataset.jsonl` | 48 routing questions labeled with the expected specialist; 29 are hard cases |
+| `triage_routing_dataset.jsonl` | 48 routing questions labeled with the expected specialist; 29 are hard cases. Upload as stored dataset `triage_routing_dataset` for `ci_eval.py` |
+| `triage_routing_dataset_quick.jsonl` | 12 of those rows, 3 per specialist; stored dataset key `triage_routing_dataset_quick` |
 | `triage_prompts/tuned.md` | The tuned triage prompt the challenger variations use |
+| `ci_eval.py` | Script for CI: evaluates AI Config variations against stored datasets, without the app, and writes a Markdown summary |
+| `ci_targets.toml` | The datasets, scorers and judges `ci_eval.py` uses for each AI Config |
 
 ```sh
 cd evals
@@ -127,3 +130,15 @@ $RUN --users 800                                                              # 
 ```
 
 While the experiment runs, every `triage_agent` evaluation is randomized, including chats in the UI.
+
+## CI evals
+
+`ci_eval.py` evaluates AI Config variations directly: the AI SDK reads each variation's model and prompt from
+LaunchDarkly and generates on Bedrock, so the app doesn't need to be running. Each target in `ci_targets.toml` names a
+dataset stored in LaunchDarkly. Upload the matching `.jsonl` file in the LaunchDarkly UI (**Library > Datasets > New
+dataset**) with that key first. Results are advisory: the script exits non-zero only when a run can't complete.
+
+```sh
+uv run python ci_eval.py --env-file ../.env.staging-org --quick          # quick datasets
+uv run python ci_eval.py --env-file ../.env.staging-org --config triage_agent --variation default
+```

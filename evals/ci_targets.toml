@@ -1,0 +1,16 @@
+# What ci_eval.py evaluates for each AI Config.
+#
+# dataset / quick_dataset: keys of datasets stored in LaunchDarkly. Upload the
+#   matching .jsonl file from this folder in the LaunchDarkly UI
+#   (Library > Datasets > New dataset) with that key. --quick uses quick_dataset.
+# scorers: names of local scorers defined in ci_eval.py (SCORERS).
+# judges: keys of LaunchDarkly judge configs to run on every row.
+#
+# Tools: the backend doesn't give the model the tools attached to these
+# variations, so ci_eval.py runs every target with no tools, as production does.
+
+[triage_agent]
+dataset = "triage_routing_dataset"
+quick_dataset = "triage_routing_dataset_quick"
+scorers = ["routed-to-expected-specialist"]
+judges = []
