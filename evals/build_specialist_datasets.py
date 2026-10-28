@@ -280,7 +280,7 @@ def main() -> None:
         path = OUT_DIR / f"{key}.jsonl"
         with path.open("w") as f:
             for r in rows:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                f.write(json.dumps(r) + "\n")  # ASCII-only; see the README note on uploads
         print(f"{path.relative_to(EVALS_DIR)}: {len(rows)} rows")
 
 
