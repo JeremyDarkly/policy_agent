@@ -116,10 +116,24 @@ def as_text(value: Any) -> str:
     return str(value) if isinstance(value, (str, int, float, bool)) else json.dumps(value, default=str)
 
 
-def row(query: str, context_vars: dict[str, Any], expected: str, metadata: dict[str, Any]) -> dict[str, Any]:
-    # Prompt templates and judge templates read these; LaunchDarkly stores
-    # dataset variables as strings.
-    variables = {k: as_text(v) for k, v in context_vars.items() if k != "query"}
+# The variables each agent's prompt and its judges (ci_targets.toml) read. The
+# full context is already in the row's input, as the backend sends it, so rows
+# carry only these. That keeps rows short: the LaunchDarkly upload screen showed
+# files with rows over about 4,096 characters as empty.
+PROMPT_AND_JUDGE_VARIABLES = {
+    "account_agent": ["account_id", "account_info", "account_type", "domain", "location", "name"],
+    "branch_agent": ["account_type", "branch_info", "domain", "location", "name"],
+    "scheduler_agent": ["account_type", "available_slots", "domain", "location", "name"],
+    "brand_agent": ["domain", "name", "specialist_response"],
+}
+MAX_ROW_CHARS = 4000
+
+
+def row(
+    config: str, query: str, context_vars: dict[str, Any], expected: str, metadata: dict[str, Any]
+) -> dict[str, Any]:
+    # LaunchDarkly stores dataset variables as strings.
+    variables = {k: as_text(context_vars[k]) for k in PROMPT_AND_JUDGE_VARIABLES[config] if k in context_vars}
     return {
         "input": user_message(query, context_vars),
         "expected_output": expected,
@@ -252,17 +266,17 @@ def build() -> dict[str, list[dict[str, Any]]]:
         datasets[f"{config}_dataset_quick"] = [r for r, quick in rows if quick]
 
     add("account_agent", [
-        (row(q, {**account_vars, "query": q}, e, {"difficulty": "unanswerable" if "isn't" in e else "answerable"}), quick)
+        (row("account_agent", q, {**account_vars, "query": q}, e, {"difficulty": "unanswerable" if "isn't" in e else "answerable"}), quick)
         for q, e, quick in ACCOUNT_QUESTIONS
     ])
-    add("branch_agent", [(row(q, {**branch_vars, "query": q}, e, {}), quick) for q, e, quick in BRANCH_QUESTIONS])
+    add("branch_agent", [(row("branch_agent", q, {**branch_vars, "query": q}, e, {}), quick) for q, e, quick in BRANCH_QUESTIONS])
     add("scheduler_agent", [
-        (row(q, {**scheduler_vars, "query": q}, e, {}), quick) for q, e, quick in SCHEDULER_QUESTIONS
+        (row("scheduler_agent", q, {**scheduler_vars, "query": q}, e, {}), quick) for q, e, quick in SCHEDULER_QUESTIONS
     ])
     # Brand voice gets no "query" (its user message starts "User query: "), and
     # the draft only inside the context JSON, as agents/brand_voice_agent.py sends it.
     add("brand_agent", [
-        (row("", {
+        (row("brand_agent", "", {
             **base,
             "customer_name": base.get("name", "there"),
             "original_query": q,
@@ -278,9 +292,12 @@ def main() -> None:
     OUT_DIR.mkdir(exist_ok=True)
     for key, rows in build().items():
         path = OUT_DIR / f"{key}.jsonl"
+        lines = [json.dumps(r) for r in rows]  # ASCII-only, to be safe with the upload screen
+        too_long = [i for i, line in enumerate(lines) if len(line) > MAX_ROW_CHARS]
+        if too_long:
+            raise SystemExit(f"error: {key} rows {too_long} are over {MAX_ROW_CHARS} characters")
         with path.open("w") as f:
-            for r in rows:
-                f.write(json.dumps(r) + "\n")  # ASCII-only; see the README note on uploads
+            f.writelines(line + "\n" for line in lines)
         print(f"{path.relative_to(EVALS_DIR)}: {len(rows)} rows")
 
 

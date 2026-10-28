@@ -154,8 +154,9 @@ targets serve aren't evaluated, and the summary names them. `--variation` evalua
 **Specialist datasets.** `build_specialist_datasets.py` writes the account, branch, scheduler and brand voice
 datasets into `ci_datasets/`. Each row reproduces the user message and prompt variables the backend sends that agent,
 built from the backend's `create_user_profile`. Rebuild after changing the questions, then upload the changed files
-again. The files are written ASCII-only (`\u00e9` for `é`): an upload whose rows had non-ASCII text in `metadata`
-came through empty. They're judged by `ci-judge-accuracy` and `ci-judge-coherence`, offline copies of the app's two judges that read
+again. Rows carry only the variables their prompt and judges read, since the full context is already in `input`. That
+keeps rows short: the LaunchDarkly upload screen showed files with rows over about 4,096 characters as empty, so the
+builder stops if a row is over 4,000. They're judged by `ci-judge-accuracy` and `ci-judge-coherence`, offline copies of the app's two judges that read
 the SDK's offline variables (`response_to_evaluate`, `message_history`, `ground_truth_context`). They're defined in
 `infrastructure/launchdarkly/ai_configs_resources.tf`. In `ci_targets.toml`, a judge entry can set a `threshold` and a
 `ground_truth` template rendered with the row's variables. `drop_parameters` leaves out model parameters the backend
