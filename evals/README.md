@@ -154,3 +154,8 @@ The workflow needs these repository secrets: `AWS_ROLE_ARN` (an IAM role GitHub 
 call Bedrock for the models in `infrastructure/launchdarkly/model_configs.tf`), `LD_PROJECT_KEY`, `LD_API_TOKEN`,
 `LD_SDK_KEY`, and the endpoint variables `LD_API_BASE_URI`, `LD_UI_BASE_URI`, `LD_BASE_URI`, `LD_STREAM_URI` and
 `LD_EVENTS_URI` (leave these unset for production).
+
+The role's trust policy must match the repo's OIDC subject format. Check it with
+`gh api repos/<owner>/<repo>/actions/oidc/customization/sub`: if `use_immutable_subject` is true, the subject is
+`repo:<owner>@<owner id>/<repo>@<repo id>:...` (the `sub_claim_prefix` it returns), not `repo:<owner>/<repo>:...`, and
+a trust policy written for the short form fails with "Not authorized to perform sts:AssumeRoleWithWebIdentity".
