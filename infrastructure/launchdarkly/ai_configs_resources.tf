@@ -601,6 +601,164 @@ resource "launchdarkly_ai_config_variation" "ai_judge_coherence" {
   tool_keys = []
 }
 
+# Offline judges for evals/ci_eval.py. Same rubrics and models as the two online
+# judges above, but they read the SDK's offline-eval variables instead of the
+# names the app fills in at runtime: {{response_to_evaluate}} (the generated
+# answer), {{message_history}} (the row's input and the answer), and
+# {{ground_truth_context}} (set per target in evals/ci_targets.toml). Domain and
+# name come from each dataset row's variables.
+
+resource "launchdarkly_ai_config" "ci_judge_accuracy" {
+  project_key = var.project_key
+  key         = "ci-judge-accuracy"
+  name        = "CI Judge: Accuracy"
+  mode        = "judge"
+
+  evaluation_metric_key = "$ld:ai:judge:ci-accuracy"
+  # See ai_judge_accuracy: pin is_inverted to dodge the provider's
+  # null-vs-false "inconsistent result after apply" bug.
+  is_inverted = false
+  description = "Offline judge for CI evals: scores factual alignment of a response with the ground truth context (typical threshold 0.8)."
+  tags = [
+    "demo",
+    "ci-evals",
+  ]
+}
+
+resource "launchdarkly_ai_config_variation" "ci_judge_accuracy" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.ci_judge_accuracy.key
+  key              = "default"
+  name             = "Default"
+  model_config_key = launchdarkly_model_config.claude_sonnet_5.key
+  state            = "published"
+
+  messages = [{
+    role = "system"
+
+    content = <<-EOT
+    **ACCURACY EVALUATOR**
+    Evaluates a customer support response against the customer's context (source of truth).
+
+    You are an expert evaluator assessing whether a response is factually accurate based on the customer's account/profile context.
+
+    The context below is the ONLY source of truth.
+
+    EVALUATION METHODOLOGY (G-Eval):
+
+    Follow these evaluation steps systematically:
+
+    1. **Review the Context (Source of Truth)**: Carefully read the customer's context:
+       - Account type, tier, and status
+       - Fees, interest, balances, and product terms present in the context
+       - Location, and any constraints, conditions, or requirements
+
+    2. **Compare Against the Response**: For each claim in the response, verify it against the context:
+       - Is the information explicitly stated in the context?
+       - Are numbers, amounts, and specific terms accurate?
+       - Are account details (type, tier, status) correct?
+
+    3. **Assess Factual Accuracy**:
+       - Information grounded in the context is GOOD (even if rephrased for clarity)
+       - Omission of critical details is UNACCEPTABLE - heavily penalize
+       - Information not found in the context is HALLUCINATION - assign very low score
+       - Incorrect interpretation of the context is CATASTROPHIC
+       - NOTE: General banking guidance that does not assert account-specific facts is acceptable
+         and should NOT be penalized as a hallucination
+
+    4. **Check Completeness**:
+       - Are relevant account facts (type, tier, fees) reflected when the question asks for them?
+       - Are important caveats or requirements preserved?
+
+    5. **Assign Score**: Rate accuracy on scale 0.00 to 1.00 (2 decimals places), e.g.:
+       - 1.00 = All account-specific claims perfectly grounded, complete, accurate
+       - 0.80 = Facts correct, some general context added for clarity (still grounded)
+       - 0.65 = Important detail from the context omitted or slightly misinterpreted
+       - 0.34 = Significant deviations from the context
+       - 0.10 = Major hallucinations or incorrect account information
+       - 0.0 = Completely fabricated or contradicts the context
+
+    INPUTS YOU'LL RECEIVE:
+    - conversation: {{message_history}}
+    - context: {{ground_truth_context}} ← THIS IS THE SOURCE OF TRUTH
+    - response: {{response_to_evaluate}} ← THIS IS WHAT YOU EVALUATE
+
+    Return ONLY valid JSON:
+    {
+        "score": <float 0.0-1.0>,
+        "reasoning": "<2-3 sentence explanation citing specific context content>",
+        "issues": ["<list specific discrepancies between the response and the context>", "<or empty list if none>"]
+    }
+  EOT
+  }]
+
+  tool_keys = []
+}
+
+resource "launchdarkly_ai_config" "ci_judge_coherence" {
+  project_key = var.project_key
+  key         = "ci-judge-coherence"
+  name        = "CI Judge: Coherence"
+  mode        = "judge"
+
+  evaluation_metric_key = "$ld:ai:judge:ci-coherence"
+  # See ai_judge_accuracy: pin is_inverted to dodge the provider's
+  # null-vs-false "inconsistent result after apply" bug.
+  is_inverted = false
+  description = "Offline judge for CI evals: scores clarity, structure, and coherence of a customer-facing response (typical threshold 0.7)."
+  tags = [
+    "demo",
+    "ci-evals",
+  ]
+}
+
+resource "launchdarkly_ai_config_variation" "ci_judge_coherence" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.ci_judge_coherence.key
+  key              = "default"
+  name             = "Default"
+  model_config_key = launchdarkly_model_config.claude_sonnet_4.key
+  state            = "published"
+
+  messages = [{
+    role = "system"
+
+    content = <<-EOT
+    You are a coherence and quality judge for a customer support AI system.
+
+    Domain: {{domain}} Customer: {{name}}
+
+    Your task is to evaluate whether the customer-facing response is clear, well-structured, professional, and appropriate for a {{domain}} support interaction.
+
+    Evaluation Criteria
+    Clarity — The response should be easy to understand. Technical terms, industry jargon, or banking-specific language should be explained in plain language.
+    Structure — Information should be logically organized. Complex answers should use formatting (bullet points, numbered lists) to aid readability.
+    Tone — The response should be warm, empathetic, and professional. It should feel like a helpful human support agent, not a robotic system.
+    Relevance — The response should directly address the customer's question without unnecessary tangents or filler.
+    Actionability — Where appropriate, the response should include clear next steps the customer can take.
+    Personalization — The response should use the customer's name naturally and reference their specific account or context when available.
+    Appropriate Closing — The response should end with a helpful offer for further assistance without being overly formulaic.
+    Input
+    Conversation: {{message_history}}
+    Customer-Facing Output (to evaluate): {{response_to_evaluate}}
+
+    Instructions
+    Evaluate the response as if you are a quality assurance reviewer for {{domain}}'s customer support team.
+    Score from 0.0 (incoherent, inappropriate, or unhelpful) to 1.0 (exceptionally clear, well-structured, and on-brand).
+    A score of 0.7 or above indicates a passing evaluation.
+    Respond in JSON only:
+
+    {
+      "score": 0.0-1.0,
+      "reasoning": "2-3 sentence explanation of your assessment",
+      "issues": ["list of specific coherence or quality issues, if any"]
+    }
+  EOT
+  }]
+
+  tool_keys = []
+}
+
 # Keyed maps of the explicit resources above, consumed by outputs.tf.
 locals {
   ai_config_resources = {
@@ -612,6 +770,8 @@ locals {
       launchdarkly_ai_config.brand_agent,
       launchdarkly_ai_config.ai_judge_accuracy,
       launchdarkly_ai_config.ai_judge_coherence,
+      launchdarkly_ai_config.ci_judge_accuracy,
+      launchdarkly_ai_config.ci_judge_coherence,
     ] : r.key => r
   }
   ai_config_variation_resources = {
@@ -623,6 +783,8 @@ locals {
       launchdarkly_ai_config_variation.brand_agent,
       launchdarkly_ai_config_variation.ai_judge_accuracy,
       launchdarkly_ai_config_variation.ai_judge_coherence,
+      launchdarkly_ai_config_variation.ci_judge_accuracy,
+      launchdarkly_ai_config_variation.ci_judge_coherence,
     ] : r.config_key => r
   }
 }

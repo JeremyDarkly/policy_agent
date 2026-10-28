@@ -32,7 +32,15 @@ from typing import Any
 
 from dotenv import load_dotenv
 from launchdarkly_ai_langchain_messages import create_langchain_messages_handler
-from launchdarkly_ai_server import AIConfig, DatasetRow, Judge, Scorer, init_evaluations, shutdown
+from launchdarkly_ai_server import (
+    AIConfig,
+    DatasetRow,
+    Judge,
+    ProviderHandler,
+    Scorer,
+    init_evaluations,
+    shutdown,
+)
 
 EVALS_DIR = Path(__file__).resolve().parent
 
@@ -67,6 +75,9 @@ class TargetResult:
     summary: dict[str, int] = field(default_factory=dict)
     misses: list[ScoredRow] = field(default_factory=list)
     error: str = ""
+    # Distinct errors raised while generating or judging rows. The SDK counts
+    # those rows as errors but doesn't say why.
+    row_errors: list[str] = field(default_factory=list)
     # Set by compare_with_baseline when a baseline result for the same
     # config, variation and dataset exists.
     baseline_passed: int | None = None
@@ -135,6 +146,24 @@ SCORERS = {
 
 # --- Running -----------------------------------------------------------------
 
+MAX_ROW_ERRORS = 3
+
+
+def recording_handler(inner: ProviderHandler, result: TargetResult) -> ProviderHandler:
+    """Wrap the handler to keep the errors it raises, keeping the metadata judges need."""
+
+    async def recorded(config, user_input=None, tool_handlers=None, variables=None, history=None):
+        try:
+            return await inner(config, user_input, tool_handlers, variables, history)
+        except Exception as error:
+            message = f"{type(error).__name__}: {error}"[:300]
+            if message not in result.row_errors and len(result.row_errors) < MAX_ROW_ERRORS:
+                result.row_errors.append(message)
+            raise
+
+    return ProviderHandler(recorded, provides_for=inner.provides_for, capture_content=inner.capture_content)
+
+
 
 def load_targets(path: Path, only: list[str]) -> dict[str, dict[str, Any]]:
     targets = tomllib.loads(path.read_text())
@@ -150,9 +179,36 @@ def load_targets(path: Path, only: list[str]) -> dict[str, dict[str, Any]]:
     return targets
 
 
+def judge_for(entry: str | dict[str, Any]) -> Judge:
+    """A judge from ci_targets.toml: a key, or {key, threshold, ground_truth}.
+
+    ground_truth is a template rendered with the row's variables, and becomes
+    the judge's {{ground_truth_context}}.
+    """
+    if isinstance(entry, str):
+        return Judge(key=entry)
+    options: dict[str, Any] = {}
+    if "threshold" in entry:
+        options["threshold"] = entry["threshold"]
+    if "ground_truth" in entry:
+        options["ground_truth_context"] = entry["ground_truth"]
+    return Judge(key=entry["key"], **options)
+
+
+def generation_for(target: dict[str, Any]) -> dict[str, Any] | None:
+    """Overrides layered on the variation's settings.
+
+    drop_parameters lists model parameters to leave out, for parameters the
+    backend doesn't send either (its Bedrock wrapper sends only temperature).
+    LangChain treats a None parameter as unset.
+    """
+    dropped = target.get("drop_parameters", [])
+    return {"parameters": {name: None for name in dropped}} if dropped else None
+
+
 def criteria_for(target: dict[str, Any]) -> list[Judge | Scorer]:
     criteria: list[Judge | Scorer] = [Scorer(name=name, fn=SCORERS[name]) for name in target.get("scorers", [])]
-    criteria += [Judge(key=key) for key in target.get("judges", [])]
+    criteria += [judge_for(entry) for entry in target.get("judges", [])]
     return criteria
 
 
@@ -169,7 +225,8 @@ async def run_target(evals: Any, config: str, target: dict[str, Any], args: argp
             key=result.key,
             dataset=dataset,
             ai_config=AIConfig(key=config, variation=args.variation),
-            handler=create_langchain_messages_handler(),
+            generation=generation_for(target),
+            handler=recording_handler(create_langchain_messages_handler(), result),
             tools=[],
             criteria=criteria_for(target),
             concurrency=args.concurrency,
@@ -256,6 +313,8 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
     for r in results:
         if r.error:
             lines += ["", f"**{r.config}** couldn't run: `{r.error}`"]
+        if r.row_errors:
+            lines += ["", f"**{r.config}** row errors:", *(f"- `{e}`" for e in r.row_errors)]
         if r.newly_failing:
             lines += details(f"{r.config}: {len(r.newly_failing)} newly failing since `main`", r.newly_failing)
         if r.now_passing:
