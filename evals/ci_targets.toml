@@ -14,3 +14,40 @@ dataset = "triage_routing_dataset"
 quick_dataset = "triage_routing_dataset_quick"
 scorers = ["routed-to-expected-specialist"]
 judges = []
+
+# The specialist and brand voice datasets are built by build_specialist_datasets.py
+# into ci_datasets/. Judges read the row's variables; ground_truth is a template
+# rendered with them and becomes the judge's {{ground_truth_context}}.
+
+[account_agent]
+dataset = "account_agent_dataset"
+quick_dataset = "account_agent_dataset_quick"
+judges = [
+  { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = "{{account_info}}" },
+]
+
+[branch_agent]
+dataset = "branch_agent_dataset"
+quick_dataset = "branch_agent_dataset_quick"
+judges = [
+  { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = "{{branch_info}}" },
+]
+
+[scheduler_agent]
+dataset = "scheduler_agent_dataset"
+quick_dataset = "scheduler_agent_dataset_quick"
+judges = [
+  { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = "Available appointment slots (offer only these):\n{{available_slots}}" },
+  { key = "ci-judge-coherence", threshold = 0.7 },
+]
+
+[brand_agent]
+dataset = "brand_agent_dataset"
+quick_dataset = "brand_agent_dataset_quick"
+# The variation sets temperature and top_p, which Claude Haiku 4.5 rejects
+# together. The backend's Bedrock wrapper sends only temperature, so CI does too.
+drop_parameters = ["top_p", "top_k"]
+judges = [
+  { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = "The specialist's draft (every fact must be kept):\n{{specialist_response}}" },
+  { key = "ci-judge-coherence", threshold = 0.7 },
+]

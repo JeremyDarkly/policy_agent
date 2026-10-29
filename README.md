@@ -105,8 +105,8 @@ docker compose run --rm terraform output     # show managed keys and IDs
 
 | Resource | Count | File |
 |---|---|---|
-| AI Configs (5 agents + 2 judges) | 7 | `ai_configs_resources.tf` |
-| AI Config variations (`default`, published) | 7 | `ai_configs_resources.tf` |
+| AI Configs (5 agents + 4 judges) | 9 | `ai_configs_resources.tf` |
+| AI Config variations (`default`, published) | 9 | `ai_configs_resources.tf` |
 | Reusable model configs | 6 | `model_configs.tf` |
 | AI tool definitions | 20 | `tools.tf` |
 | AI agent graph (`banking_agent_graph`) | 1 | `agent_graph.tf` |

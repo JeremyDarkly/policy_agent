@@ -32,7 +32,16 @@ from typing import Any
 
 from dotenv import load_dotenv
 from launchdarkly_ai_langchain_messages import create_langchain_messages_handler
-from launchdarkly_ai_server import AIConfig, DatasetRow, Judge, Scorer, init_evaluations, shutdown
+from launchdarkly_ai_server.judge_scoring import numeric_score, parse_judge_response
+from launchdarkly_ai_server import (
+    AIConfig,
+    DatasetRow,
+    Judge,
+    ProviderHandler,
+    Scorer,
+    init_evaluations,
+    shutdown,
+)
 
 EVALS_DIR = Path(__file__).resolve().parent
 
@@ -46,6 +55,7 @@ ENV_MAP = {
     "LD_BASE_URI": "LAUNCHDARKLY_BASE_URI",
     "LD_STREAM_URI": "LAUNCHDARKLY_STREAM_URI",
     "LD_EVENTS_URI": "LAUNCHDARKLY_EVENTS_URI",
+    "LD_ENVIRONMENT": "LAUNCHDARKLY_ENVIRONMENT",
 }
 
 
@@ -61,12 +71,21 @@ class TargetResult:
     config: str
     variation: str
     dataset: str
+    # Why this variation was evaluated: "served", "listed" or "chosen".
+    source: str = ""
+    # Targeting facts worth knowing, such as other variations rules serve.
+    notes: list[str] = field(default_factory=list)
+    # Set when there was nothing to evaluate, with the reason.
+    skipped: str = ""
     key: str = ""
     passed: bool | None = None
     url: str = ""
     summary: dict[str, int] = field(default_factory=dict)
     misses: list[ScoredRow] = field(default_factory=list)
     error: str = ""
+    # Distinct errors raised while generating or judging rows. The SDK counts
+    # those rows as errors but doesn't say why.
+    row_errors: list[str] = field(default_factory=list)
     # Set by compare_with_baseline when a baseline result for the same
     # config, variation and dataset exists.
     baseline_passed: int | None = None
@@ -135,6 +154,144 @@ SCORERS = {
 
 # --- Running -----------------------------------------------------------------
 
+MAX_ROW_ERRORS = 3
+
+
+def row_label(row_input: str) -> str:
+    """The customer's question, from a row input in the backend's "User query" format."""
+    first, _, rest = (row_input or "").partition("\n")
+    query = first.removeprefix("User query:").strip()
+    if not query and "User context:" in rest:
+        # Brand voice rows: the question is in the context as original_query.
+        try:
+            query = json.loads(rest.split("User context:", 1)[1]).get("original_query", "")
+        except (json.JSONDecodeError, AttributeError):
+            query = ""
+    return query or first[:100]
+
+
+@dataclass
+class JudgeInfo:
+    key: str
+    threshold: float
+
+
+def judge_lookup(evals: Any, target: dict[str, Any]) -> dict[str, JudgeInfo]:
+    """evaluationMetricKey -> judge, since a judge call's config carries only the metric key."""
+    lookup = {}
+    for entry in target.get("judges", []):
+        judge = judge_for(entry)
+        config = evals.api.get(f"projects/{evals.project_key}/ai-configs/{judge.key}")
+        lookup[config["evaluationMetricKey"]] = JudgeInfo(judge.key, judge.threshold)
+    return lookup
+
+
+def recording_handler(
+    inner: ProviderHandler, result: TargetResult, judges: dict[str, JudgeInfo]
+) -> ProviderHandler:
+    """Wrap the handler to keep its errors and low judge scores, keeping the metadata judges need.
+
+    The SDK reports only row counts, so this is where per-row judge results come from.
+    """
+
+    async def recorded(config, user_input=None, tool_handlers=None, variables=None, history=None):
+        try:
+            output = await inner(config, user_input, tool_handlers, variables, history)
+        except Exception as error:
+            message = f"{type(error).__name__}: {error}"[:300]
+            if message not in result.row_errors and len(result.row_errors) < MAX_ROW_ERRORS:
+                result.row_errors.append(message)
+            raise
+        judge = judges.get(config.get("evaluationMetricKey", ""))
+        if judge is not None and variables and "formatting_instructions" in variables:
+            try:
+                raw, reason = parse_judge_response(output.get("output", output.get("response")))
+            except ValueError:
+                return output  # the SDK reports it as an invalid judge output
+            score = numeric_score(raw)
+            if score is not None and judge.threshold is not None and score < judge.threshold:
+                result.misses.append(
+                    ScoredRow(
+                        input=row_label(variables.get("input", "")),
+                        expected=f"{judge.key} ≥ {judge.threshold}",
+                        actual=f"{score:.2f}: {' '.join(str(reason).split())[:200]}",
+                    )
+                )
+        return output
+
+    return ProviderHandler(recorded, provides_for=inner.provides_for, capture_content=inner.capture_content)
+
+
+
+@dataclass
+class Selection:
+    """The variations to evaluate for one AI Config, and what to say about them."""
+
+    variations: list[tuple[str, str]]  # (variation key, source)
+    notes: list[str]
+
+
+def variation_key(variation: dict[str, Any]) -> str | None:
+    """A targeting variation's key; None for LaunchDarkly's auto-added disabled one."""
+    meta = (variation.get("value") or {}).get("_ldMeta") or {}
+    return meta.get("variationKey") if meta.get("enabled", True) else None
+
+
+def served_indexes(serve: dict[str, Any]) -> dict[int, float]:
+    """Variation index -> share (0-1) for a fallthrough, rule or target."""
+    if "variation" in serve:
+        return {serve["variation"]: 1.0}
+    weights = (serve.get("rollout") or {}).get("variations") or []
+    return {w["variation"]: w["weight"] / 100_000 for w in weights if w.get("weight")}
+
+
+def select_variations(
+    evals: Any, config: str, target: dict[str, Any], environment: str | None, chosen: str | None
+) -> Selection:
+    """The variation the config's default rule serves in the environment, plus listed ones.
+
+    --variation replaces both. Variations that only targeting rules or individual
+    targets serve aren't evaluated, but are named in a note.
+    """
+    if chosen:
+        return Selection([(chosen, "chosen")], [])
+    targeting = evals.api.get(f"projects/{evals.project_key}/ai-configs/{config}/targeting")
+    env = (targeting.get("environments") or {}).get(environment)
+    if env is None:
+        raise ValueError(f"environment {environment!r} not found in {config}'s targeting")
+    keys = [variation_key(v) for v in targeting.get("variations") or []]
+    notes: list[str] = []
+    selected: list[tuple[str, str]] = []
+
+    if env.get("enabled", True):
+        default = served_indexes(env.get("fallthrough") or {})
+        if len(default) > 1:
+            split = ", ".join(f"{share:.0%} {keys[i] or 'disabled'}" for i, share in default.items())
+            notes.append(f"The default rule is a percentage rollout ({split}); each part is evaluated.")
+    else:
+        default = {env.get("offVariation", 0): 1.0}
+        notes.append(f"Targeting is off in `{environment}`, so it serves the off variation.")
+    for index in default:
+        if keys[index] is None:
+            notes.append(f"`{environment}` serves LaunchDarkly's disabled variation, so there's nothing to evaluate.")
+        else:
+            selected.append((keys[index], "served"))
+
+    others = set()
+    if env.get("enabled", True):
+        for serve in [*(env.get("rules") or []), *(env.get("targets") or []), *(env.get("contextTargets") or [])]:
+            others.update(keys[i] for i in served_indexes(serve) if keys[i])
+    others -= {key for key, _ in selected}
+    for key in target.get("variations", []):
+        if key not in {k for k, _ in selected}:
+            selected.append((key, "listed"))
+        others.discard(key)
+    if others:
+        names = ", ".join(f"`{k}`" for k in sorted(others))
+        notes.append(f"Targeting rules or individual targets also serve {names}. Add them to `variations` in "
+                     "ci_targets.toml to evaluate them.")
+    return Selection(selected, notes)
+
 
 def load_targets(path: Path, only: list[str]) -> dict[str, dict[str, Any]]:
     targets = tomllib.loads(path.read_text())
@@ -150,26 +307,81 @@ def load_targets(path: Path, only: list[str]) -> dict[str, dict[str, Any]]:
     return targets
 
 
+def judge_for(entry: str | dict[str, Any]) -> Judge:
+    """A judge from ci_targets.toml: a key, or {key, threshold, ground_truth}.
+
+    ground_truth is a template rendered with the row's variables, and becomes
+    the judge's {{ground_truth_context}}.
+    """
+    if isinstance(entry, str):
+        return Judge(key=entry)
+    options: dict[str, Any] = {}
+    if "threshold" in entry:
+        options["threshold"] = entry["threshold"]
+    if "ground_truth" in entry:
+        options["ground_truth_context"] = entry["ground_truth"]
+    return Judge(key=entry["key"], **options)
+
+
+def generation_for(target: dict[str, Any]) -> dict[str, Any] | None:
+    """Overrides layered on the variation's settings.
+
+    drop_parameters lists model parameters to leave out, for parameters the
+    backend doesn't send either (its Bedrock wrapper sends only temperature).
+    LangChain treats a None parameter as unset.
+    """
+    dropped = target.get("drop_parameters", [])
+    return {"parameters": {name: None for name in dropped}} if dropped else None
+
+
 def criteria_for(target: dict[str, Any]) -> list[Judge | Scorer]:
     criteria: list[Judge | Scorer] = [Scorer(name=name, fn=SCORERS[name]) for name in target.get("scorers", [])]
-    criteria += [Judge(key=key) for key in target.get("judges", [])]
+    criteria += [judge_for(entry) for entry in target.get("judges", [])]
     return criteria
 
 
-async def run_target(evals: Any, config: str, target: dict[str, Any], args: argparse.Namespace) -> TargetResult:
+def dataset_for(target: dict[str, Any], args: argparse.Namespace) -> str:
+    return target["quick_dataset"] if args.quick and target.get("quick_dataset") else target["dataset"]
+
+
+async def run_config(evals: Any, config: str, target: dict[str, Any], args: argparse.Namespace) -> list[TargetResult]:
+    """Evaluate every selected variation of one AI Config."""
+    dataset = dataset_for(target, args)
+    try:
+        selection = select_variations(evals, config, target, args.environment, args.variation)
+    except Exception as error:  # report every target, then exit non-zero
+        return [TargetResult(config=config, variation="–", dataset=dataset,
+                             error=f"reading targeting: {type(error).__name__}: {error}")]
+    if not selection.variations:
+        return [TargetResult(config=config, variation="–", dataset=dataset, notes=selection.notes,
+                             skipped="no variation to evaluate")]
+    results = []
+    for index, (variation, source) in enumerate(selection.variations):
+        result = await run_target(evals, config, target, variation, args)
+        result.source = source
+        if index == 0:
+            result.notes = selection.notes
+        results.append(result)
+    return results
+
+
+async def run_target(
+    evals: Any, config: str, target: dict[str, Any], variation: str, args: argparse.Namespace
+) -> TargetResult:
     global current
-    dataset = target["quick_dataset"] if args.quick and target.get("quick_dataset") else target["dataset"]
-    result = TargetResult(config=config, variation=args.variation, dataset=dataset)
-    print(f"running {config}/{args.variation} on dataset {dataset}", flush=True)
+    dataset = dataset_for(target, args)
+    result = TargetResult(config=config, variation=variation, dataset=dataset)
+    print(f"running {config}/{variation} on dataset {dataset}", flush=True)
     current = result
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    result.key = f"ci-{args.label}-{config}-{args.variation}-{stamp}".lower()
+    result.key = f"ci-{args.label}-{config}-{variation}-{stamp}".lower()
     try:
         run = await evals.run(
             key=result.key,
             dataset=dataset,
-            ai_config=AIConfig(key=config, variation=args.variation),
-            handler=create_langchain_messages_handler(),
+            ai_config=AIConfig(key=config, variation=variation),
+            generation=generation_for(target),
+            handler=recording_handler(create_langchain_messages_handler(), result, judge_lookup(evals, target)),
             tools=[],
             criteria=criteria_for(target),
             concurrency=args.concurrency,
@@ -210,16 +422,21 @@ def compare_with_baseline(results: list[TargetResult], path: Path) -> bool:
         if r.error or b is None:
             continue
         r.baseline_passed = b["summary"]["passed"]
-        before = {m["input"]: ScoredRow(**m) for m in b["misses"]}
-        after = {m.input: m for m in r.misses}
+        # Keyed by input and criterion: one row can fail several judges.
+        before = {(m["input"], m["expected"]): ScoredRow(**m) for m in b["misses"]}
+        after = {(m.input, m.expected): m for m in r.misses}
         r.newly_failing = [m for key, m in after.items() if key not in before]
         r.now_passing = [m for key, m in before.items() if key not in after]
     return True
 
 
+def cell(text: str) -> str:
+    return " ".join(text.split()).replace("|", "\\|")
+
+
 def rows_table(rows: list[ScoredRow], got: str) -> list[str]:
     lines = [f"| Input | Expected | {got} |", "|---|---|---|"]
-    return lines + [f"| {m.input.replace('|', '\\|')} | {m.expected} | {m.actual} |" for m in rows]
+    return lines + [f"| {cell(m.input)} | {cell(m.expected)} | {cell(m.actual)} |" for m in rows]
 
 
 def details(summary: str, rows: list[ScoredRow], got: str = "Got") -> list[str]:
@@ -236,32 +453,44 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
         "|---|---|---|---|---|---|---|",
     ]
     for r in results:
-        if r.error:
-            lines.append(f"| `{r.config}` | `{r.variation}` | `{r.dataset}` | – | – | error | – |")
+        variation = f"`{r.variation}`" + (f" ({r.source})" if r.source else "")
+        if r.error or r.skipped:
+            verdict = "error" if r.error else "skipped"
+            lines.append(f"| `{r.config}` | {variation} | `{r.dataset}` | – | – | {verdict} | – |")
             continue
         s = r.summary
         counts = f"{s['passed']}/{s['total']}" + (f" ({s['error']} errors)" if s["error"] else "")
         if r.baseline_passed is None:
-            delta = "–"
+            # A baseline file without this config, variation and dataset.
+            delta = "not on `main`" if compared else "–"
         else:
             change = s["passed"] - r.baseline_passed
             delta = "no change" if change == 0 else f"{change:+d} (was {r.baseline_passed})"
         verdict = "passed" if r.passed else "failed"
         run = f"[open]({r.url})" if links else f"`{r.key}`"
-        lines.append(f"| `{r.config}` | `{r.variation}` | `{r.dataset}` | {counts} | {delta} | {verdict} | {run} |")
+        lines.append(f"| `{r.config}` | {variation} | `{r.dataset}` | {counts} | {delta} | {verdict} | {run} |")
+    if any(r.source for r in results):
+        lines += ["", "*served*: what the default rule serves in the environment. *listed*: from `variations` in "
+                  "ci_targets.toml. *chosen*: from `--variation`."]
     if not links:
         lines += ["", "Find a run in LaunchDarkly under **Evaluations** by the name in the Run column."]
     if compared is False:
         lines += ["", "No `main` result to compare with yet."]
     for r in results:
+        for note in r.notes:
+            lines += ["", f"**{r.config}**: {note}"]
+        if r.skipped:
+            lines += ["", f"**{r.config}** skipped: {r.skipped}."]
         if r.error:
             lines += ["", f"**{r.config}** couldn't run: `{r.error}`"]
+        if r.row_errors:
+            lines += ["", f"**{r.config}** row errors:", *(f"- `{e}`" for e in r.row_errors)]
         if r.newly_failing:
             lines += details(f"{r.config}: {len(r.newly_failing)} newly failing since `main`", r.newly_failing)
         if r.now_passing:
             lines += details(f"{r.config}: {len(r.now_passing)} now passing since `main`", r.now_passing, "Got on `main`")
         if r.misses:
-            lines += details(f"{r.config}: {len(r.misses)} misrouted", r.misses)
+            lines += details(f"{r.config}: {len(r.misses)} failing", r.misses)
     return "\n".join(lines) + "\n"
 
 
@@ -270,7 +499,11 @@ async def main() -> int:
     parser.add_argument("--env-file", help="load credentials from this env file (CI sets them as env vars)")
     parser.add_argument("--targets", default=str(EVALS_DIR / "ci_targets.toml"))
     parser.add_argument("--config", action="append", default=[], help="AI Config key to run; repeatable (default: all)")
-    parser.add_argument("--variation", default="default")
+    parser.add_argument(
+        "--variation",
+        help="evaluate this variation of every target (default: what each config serves in --environment)",
+    )
+    parser.add_argument("--environment", help="LaunchDarkly environment key (default: $LD_ENVIRONMENT)")
     parser.add_argument("--quick", action="store_true", help="use each target's quick_dataset")
     parser.add_argument("--label", default="local", help="included in run keys, e.g. pr-12")
     parser.add_argument("--concurrency", type=int, default=4)
@@ -294,12 +527,18 @@ async def main() -> int:
         print(f"error: set {', '.join(missing)} (or the LAUNCHDARKLY_* equivalents)", file=sys.stderr)
         return 1
 
+    args.environment = args.environment or os.getenv("LD_ENVIRONMENT")
+    if not args.variation and not args.environment:
+        print("error: pass --variation, or set --environment (or LD_ENVIRONMENT) to evaluate served variations",
+              file=sys.stderr)
+        return 1
+
     targets = load_targets(Path(args.targets), args.config)
     evals = init_evaluations()
     results = []
     try:
         for config, target in targets.items():
-            results.append(await run_target(evals, config, target, args))
+            results += await run_config(evals, config, target, args)
     finally:
         await shutdown()
 

@@ -46,6 +46,8 @@ CONFIG_KEYS = [
     "brand_agent",
     "ai-judge-accuracy",
     "ai-judge-coherence",
+    "ci-judge-accuracy",
+    "ci-judge-coherence",
 ]
 
 DEFAULT_VARIATION_NAME = "Default"

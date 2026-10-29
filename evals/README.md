@@ -18,6 +18,9 @@ Evaluations run from code with the LaunchDarkly Python AI SDK against the stagin
 | `triage_prompts/tuned.md` | The tuned triage prompt the challenger variations use |
 | `ci_eval.py` | Script for CI: evaluates AI Config variations against stored datasets, without the app, and writes a Markdown summary |
 | `ci_targets.toml` | The datasets, scorers and judges `ci_eval.py` uses for each AI Config |
+| `CI_EVALS.md` | How the LaunchDarkly evals GitHub Action works: triggers, what a run does, setup and troubleshooting |
+| `build_specialist_datasets.py` | Script: builds the CI datasets for the account, branch, scheduler and brand voice agents in `ci_datasets/` |
+| `ci_datasets/` | Those datasets, a full and a quick one per agent; stored dataset keys are the file names without `.jsonl` |
 
 ```sh
 cd evals
@@ -143,19 +146,23 @@ uv run python ci_eval.py --env-file ../.env.staging-org --quick          # quick
 uv run python ci_eval.py --env-file ../.env.staging-org --config triage_agent --variation default
 ```
 
-`.github/workflows/evals.yml` runs it in GitHub Actions on PRs that change the agents, prompts or CI eval files, on
-pushes to `main`, and by hand (**Actions > LaunchDarkly evals > Run workflow**, with a config, variation and full/quick).
-PRs use the quick datasets. Runs on `main` do quick and full, and keep the results as the `eval-results` artifact. Every
-run compares with the latest `main` results (`--baseline`) and writes the summary to the job, and PR runs also post it
-as one PR comment that later runs update. The repo is public, so the workflow passes `--no-run-links`: the summary
-names each run instead of linking to the LaunchDarkly host. PRs from forks are skipped, since they get no secrets.
+**Which variation.** Without `--variation`, each target is evaluated on the variation its default rule
+(fallthrough) serves in `--environment` (default `$LD_ENVIRONMENT`, from `LAUNCHDARKLY_ENVIRONMENT` in the env file),
+read from the AI Config's targeting. A percentage rollout evaluates each variation in it. A target's `variations` list
+in `ci_targets.toml` adds more, for example challenger variations. Variations that only targeting rules or individual
+targets serve aren't evaluated, and the summary names them. `--variation` evaluates one variation of every target.
 
-The workflow needs these repository secrets: `AWS_ROLE_ARN` (an IAM role GitHub can assume through OIDC, allowed to
-call Bedrock for the models in `infrastructure/launchdarkly/model_configs.tf`), `LD_PROJECT_KEY`, `LD_API_TOKEN`,
-`LD_SDK_KEY`, and the endpoint variables `LD_API_BASE_URI`, `LD_UI_BASE_URI`, `LD_BASE_URI`, `LD_STREAM_URI` and
-`LD_EVENTS_URI` (leave these unset for production).
+**Specialist datasets.** `build_specialist_datasets.py` writes the account, branch, scheduler and brand voice
+datasets into `ci_datasets/`. Each row reproduces the user message and prompt variables the backend sends that agent,
+built from the backend's `create_user_profile`. Rebuild after changing the questions, then upload the changed files
+again. Rows carry only the variables their prompt and judges read, since the full context is already in `input`. That
+keeps rows short: the LaunchDarkly upload screen showed files with rows over about 4,096 characters as empty, so the
+builder stops if a row is over 4,000. They're judged by `ci-judge-accuracy` and `ci-judge-coherence`, offline copies of the app's two judges that read
+the SDK's offline variables (`response_to_evaluate`, `message_history`, `ground_truth_context`). They're defined in
+`infrastructure/launchdarkly/ai_configs_resources.tf`. In `ci_targets.toml`, a judge entry can set a `threshold` and a
+`ground_truth` template rendered with the row's variables. `drop_parameters` leaves out model parameters the backend
+doesn't send either.
 
-The role's trust policy must match the repo's OIDC subject format. Check it with
-`gh api repos/<owner>/<repo>/actions/oidc/customization/sub`: if `use_immutable_subject` is true, the subject is
-`repo:<owner>@<owner id>/<repo>@<repo id>:...` (the `sub_claim_prefix` it returns), not `repo:<owner>/<repo>:...`, and
-a trust policy written for the short form fails with "Not authorized to perform sts:AssumeRoleWithWebIdentity".
+`.github/workflows/evals.yml` runs `ci_eval.py` in GitHub Actions on PRs, pushes to `main`, nightly and by hand.
+[CI_EVALS.md](CI_EVALS.md) describes what triggers it, what a run does, the quick and full datasets, and the
+secrets and AWS role it needs.
