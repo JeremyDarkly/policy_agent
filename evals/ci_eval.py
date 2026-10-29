@@ -25,6 +25,8 @@ import os
 import re
 import sys
 import tomllib
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,14 +35,15 @@ from typing import Any
 from dotenv import load_dotenv
 from launchdarkly_ai_langchain_messages import create_langchain_messages_handler
 from launchdarkly_ai_server.judge_scoring import numeric_score, parse_judge_response
-from launchdarkly_ai_server import (
+from launchdarkly_ai_server import ProviderHandler, shutdown
+from launchdarkly_ai_server.evaluations import (
+    DEFAULT_BASE_URI,
     AIConfig,
     DatasetRow,
     Judge,
-    ProviderHandler,
+    LDApiError,
     Scorer,
     init_evaluations,
-    shutdown,
 )
 
 EVALS_DIR = Path(__file__).resolve().parent
@@ -176,12 +179,33 @@ class JudgeInfo:
     threshold: float
 
 
+def ld_get(path: str) -> Any:
+    """GET from the LaunchDarkly REST API, for the AI Config reads the SDK doesn't offer.
+
+    The SDK's own API client is internal, so this sends the same request it would.
+    """
+    base = (os.getenv("LD_API_BASE_URI") or DEFAULT_BASE_URI).strip().rstrip("/")
+    request = urllib.request.Request(
+        f"{base}/api/v2/{path.lstrip('/')}",
+        headers={
+            "Authorization": os.environ["LD_API_TOKEN"],
+            "Accept": "application/json",
+            "LD-API-Version": "20240415",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        raise LDApiError(error.code, "GET", path, error.read().decode(errors="replace")[:300]) from None
+
+
 def judge_lookup(evals: Any, target: dict[str, Any]) -> dict[str, JudgeInfo]:
     """evaluationMetricKey -> judge, since a judge call's config carries only the metric key."""
     lookup = {}
     for entry in target.get("judges", []):
         judge = judge_for(entry)
-        config = evals.api.get(f"projects/{evals.project_key}/ai-configs/{judge.key}")
+        config = ld_get(f"projects/{evals.project_key}/ai-configs/{judge.key}")
         lookup[config["evaluationMetricKey"]] = JudgeInfo(judge.key, judge.threshold)
     return lookup
 
@@ -255,7 +279,7 @@ def select_variations(
     """
     if chosen:
         return Selection([(chosen, "chosen")], [])
-    targeting = evals.api.get(f"projects/{evals.project_key}/ai-configs/{config}/targeting")
+    targeting = ld_get(f"projects/{evals.project_key}/ai-configs/{config}/targeting")
     env = (targeting.get("environments") or {}).get(environment)
     if env is None:
         raise ValueError(f"environment {environment!r} not found in {config}'s targeting")

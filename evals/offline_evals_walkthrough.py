@@ -370,7 +370,8 @@ for name in ("LD_API_TOKEN", "LD_SDK_KEY", "OPENAI_API_KEY", "AWS_PROFILE"):
 
 # %%
 from launchdarkly_ai_openai_messages import create_openai_messages_handler
-from launchdarkly_ai_server import DatasetRow, EvalTool, Judge, ProviderHandler, Scorer, init_evaluations, shutdown
+from launchdarkly_ai_server import ProviderHandler, shutdown
+from launchdarkly_ai_server.evaluations import DatasetRow, EvalTool, Judge, Scorer, init_evaluations
 
 # The project holds the evaluations and judges. Credentials and staging endpoints come from the environment.
 evals = init_evaluations(project_key=PROJECT_KEY)

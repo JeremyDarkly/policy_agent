@@ -28,7 +28,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 from launchdarkly_ai_openai_messages import create_openai_messages_handler
-from launchdarkly_ai_server import DatasetRow, Judge, Scorer, init_evaluations, shutdown
+from launchdarkly_ai_server import shutdown
+from launchdarkly_ai_server.evaluations import DatasetRow, Judge, Scorer, init_evaluations
 
 # The app's .env uses LAUNCHDARKLY_* names; the AI SDK reads LD_* names.
 ENV_MAP = {
