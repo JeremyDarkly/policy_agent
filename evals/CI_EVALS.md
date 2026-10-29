@@ -68,6 +68,40 @@ fail the eval show as "failed" in the summary but leave the job green.
 The repository is public, so the workflow passes `--no-run-links`. The summary gives each LaunchDarkly evaluation run
 by name instead of linking to it. Find a run in LaunchDarkly under **Evaluations** by that name.
 
+### How the variations are chosen
+
+> This diagram only illustrates how variations are chosen today. The rules are still open to change.
+
+For each AI Config, `select_variations` in `ci_eval.py` decides which variations to evaluate:
+
+```mermaid
+flowchart TD
+    start(["One AI Config from ci_targets.toml"]) --> flag{"--variation given?<br/>(manual run's variation input)"}
+    flag -- yes --> chosen["Evaluate only that variation<br/>source: chosen"]
+    flag -- no --> read["Read the AI Config's targeting<br/>in LD_ENVIRONMENT"]
+    read --> on{"Targeting on?"}
+    on -- no --> off["Take the off variation"]
+    on -- yes --> fall{"What does the default rule serve?"}
+    fall -- one variation --> one["Take that variation"]
+    fall -- percentage rollout --> split["Take every variation in the rollout"]
+    off --> disabled{"LaunchDarkly's disabled<br/>variation?"}
+    one --> disabled
+    split --> disabled
+    disabled -- yes --> skip["Skip it, with a note"]
+    disabled -- no --> served["Evaluate it<br/>source: served"]
+    served --> listed["Add the target's variations list<br/>source: listed"]
+    skip --> listed
+    listed --> others{"Do rules or individual targets<br/>serve variations not selected?"}
+    others -- yes --> note["Name them in a note;<br/>they aren't evaluated"]
+    others -- no --> run(["One evaluation per selected variation"])
+    note --> run
+    chosen --> run
+```
+
+The source (*served*, *listed* or *chosen*) appears next to each variation in the summary table. To evaluate a
+variation that only a targeting rule serves, such as a challenger, add it to that target's `variations` list in
+`ci_targets.toml`.
+
 ## Quick and full datasets
 
 Every target has a full dataset and a quick one (the same key with a `_quick` suffix):
