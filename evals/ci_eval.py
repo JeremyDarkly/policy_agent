@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+from launchdarkly_ai_langchain_agents import create_langchain_agents_handler
 from launchdarkly_ai_langchain_messages import create_langchain_messages_handler
 from launchdarkly_ai_server.judge_scoring import numeric_score, parse_judge_response
 from launchdarkly_ai_server import ProviderHandler, shutdown
@@ -400,12 +401,18 @@ async def run_target(
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     result.key = f"ci-{args.label}-{config}-{variation}-{stamp}".lower()
     try:
+        judges = judge_lookup(evals, target)
         run = await evals.run(
             key=result.key,
             dataset=dataset,
             ai_config=AIConfig(key=config, variation=variation),
             generation=generation_for(target),
-            handler=recording_handler(create_langchain_messages_handler(), result, judge_lookup(evals, target)),
+            # The agents are agent-mode AI Configs (instructions) and the judges are
+            # messages-mode ones; the SDK picks the handler by the config's mode.
+            handlers=[
+                recording_handler(handler, result, judges)
+                for handler in (create_langchain_agents_handler(), create_langchain_messages_handler())
+            ],
             tools=[],
             criteria=criteria_for(target),
             concurrency=args.concurrency,

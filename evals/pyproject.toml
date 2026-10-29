@@ -7,6 +7,7 @@ dependencies = [
   "launchdarkly-ai-server @ git+https://github.com/launchdarkly/python-ai-sdk.git@launchdarkly-ai-server-0.5.0#subdirectory=packages/client",
   "launchdarkly-ai-openai-messages @ git+https://github.com/launchdarkly/python-ai-sdk.git@launchdarkly-ai-server-0.5.0#subdirectory=packages/openai-messages",
   "launchdarkly-ai-langchain-messages @ git+https://github.com/launchdarkly/python-ai-sdk.git@launchdarkly-ai-server-0.5.0#subdirectory=packages/langchain-messages",
+  "launchdarkly-ai-langchain-agents @ git+https://github.com/launchdarkly/python-ai-sdk.git@launchdarkly-ai-server-0.5.0#subdirectory=packages/langchain-agents",
   "langchain-aws>=1.0",
   "launchdarkly-server-sdk>=9.0",
   "python-dotenv>=1.0",
