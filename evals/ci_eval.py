@@ -37,12 +37,11 @@ from launchdarkly_ai_langchain_agents import create_langchain_agents_handler
 from launchdarkly_ai_langchain_messages import create_langchain_messages_handler
 from launchdarkly_ai_server.judge_scoring import numeric_score, parse_judge_response
 from launchdarkly_ai_server import ProviderHandler, shutdown
-from launchdarkly_ai_server.evaluations import (
-    DEFAULT_BASE_URI,
+from launchdarkly_ai_server.experimental.evaluations import (
     AIConfig,
     DatasetRow,
+    EvaluationsError,
     Judge,
-    LDApiError,
     Scorer,
     init_evaluations,
 )
@@ -185,7 +184,7 @@ def ld_get(path: str) -> Any:
 
     The SDK's own API client is internal, so this sends the same request it would.
     """
-    base = (os.getenv("LD_API_BASE_URI") or DEFAULT_BASE_URI).strip().rstrip("/")
+    base = (os.getenv("LD_API_BASE_URI") or "https://app.launchdarkly.com").strip().rstrip("/")
     request = urllib.request.Request(
         f"{base}/api/v2/{path.lstrip('/')}",
         headers={
@@ -198,7 +197,8 @@ def ld_get(path: str) -> Any:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.load(response)
     except urllib.error.HTTPError as error:
-        raise LDApiError(error.code, "GET", path, error.read().decode(errors="replace")[:300]) from None
+        body = error.read().decode(errors="replace")[:300]
+        raise EvaluationsError(f"LaunchDarkly API GET {path} failed with {error.code}: {body}") from None
 
 
 def judge_lookup(evals: Any, target: dict[str, Any]) -> dict[str, JudgeInfo]:

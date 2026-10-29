@@ -370,8 +370,8 @@ for name in ("LD_API_TOKEN", "LD_SDK_KEY", "OPENAI_API_KEY", "AWS_PROFILE"):
 
 # %%
 from launchdarkly_ai_openai_messages import create_openai_messages_handler
-from launchdarkly_ai_server import ProviderHandler, shutdown
-from launchdarkly_ai_server.evaluations import DatasetRow, EvalTool, Judge, Scorer, init_evaluations
+from launchdarkly_ai_server import ProviderHandler, create_handler, shutdown
+from launchdarkly_ai_server.experimental.evaluations import DatasetRow, EvalTool, Judge, Scorer, init_evaluations
 
 # The project holds the evaluations and judges. Credentials and staging endpoints come from the environment.
 evals = init_evaluations(project_key=PROJECT_KEY)
@@ -441,8 +441,9 @@ if RUN["first_eval"]:
         generation={
             "provider": "OpenAI",
             "model": OPENAI_MODEL,
+            "mode": "completion",  # a messages handler takes a list of messages
             "parameters": {"temperature": 0},
-            "instructions": INSTRUCTIONS,
+            "messages": [{"role": "system", "content": INSTRUCTIONS}],
         },
         concurrency=5,
     )
@@ -452,8 +453,9 @@ if RUN["first_eval"]:
 # %% [markdown]
 # ### Custom handlers
 #
-# A handler is any async function that returns `{"output": ...}`. This one calls no model, so it tests credentials,
-# the dataset and the event path at no provider cost.
+# A handler is any async function that returns `{"output": ...}`, wrapped with `create_handler((provider, mode), fn)`
+# so the harness can match it to the generation's provider and mode. This one calls no model, so it tests
+# credentials, the dataset and the event path at no provider cost.
 
 # %%
 async def deterministic_handler(
@@ -461,6 +463,7 @@ async def deterministic_handler(
     user_input: str | None = None,
     tool_handlers: dict[str, Any] | None = None,
     variables: dict[str, Any] | None = None,
+    history: list[Any] | None = None,
 ) -> dict[str, Any]:
     return {"output": f"smoke response: {user_input or ''}"}
 
@@ -469,8 +472,8 @@ if RUN["smoke"]:
     result = await evals.run(
         key=unique("smoke"),
         dataset=DATASET,
-        handler=deterministic_handler,
-        generation={"provider": "custom", "model": "deterministic-smoke-handler",
+        handler=create_handler(("custom", "agent"), deterministic_handler),
+        generation={"provider": "custom", "model": "deterministic-smoke-handler", "mode": "agent",
                     "instructions": "Return a deterministic smoke-test response."},
         concurrency=2,
     )
@@ -510,8 +513,8 @@ elif RUN["judges_and_scorers"]:
         key=unique("judges-and-scorers"),
         dataset=DATASET,
         handler=log.handler(create_openai_messages_handler()),
-        generation={"provider": "OpenAI", "model": OPENAI_MODEL, "parameters": {"temperature": 0},
-                    "instructions": INSTRUCTIONS},
+        generation={"provider": "OpenAI", "model": OPENAI_MODEL, "mode": "completion", "parameters": {"temperature": 0},
+                    "messages": [{"role": "system", "content": INSTRUCTIONS}]},
         criteria=[
             Judge(key=ANSWER_JUDGE, threshold=0.7, pass_rate_threshold=0.9),
             log.scorer("nonempty-output", score_nonempty),
@@ -588,8 +591,9 @@ elif RUN["tool_trajectory"]:
         handler=log.handler(create_openai_messages_handler()),
         tools=[find_branch_tool(tool_calls)],
         generation={
-            "provider": "OpenAI", "model": OPENAI_MODEL, "parameters": {"temperature": 0},
-            "instructions": INSTRUCTIONS + f" Use the {TOOL_KEY} tool for branch or ATM questions.",
+            "provider": "OpenAI", "model": OPENAI_MODEL, "mode": "completion", "parameters": {"temperature": 0},
+            "messages": [{"role": "system",
+                          "content": INSTRUCTIONS + f" Use the {TOOL_KEY} tool for branch or ATM questions."}],
         },
         criteria=[Judge(key=TRAJECTORY_JUDGE, threshold=0.8)],
         concurrency=2,
@@ -606,7 +610,7 @@ elif RUN["tool_trajectory"]:
 # ## Step 7: Generate and judge on Amazon Bedrock through LangChain
 #
 # The LangChain handler serves every provider. Generation runs on Bedrock, and the project's own **Terraform-provisioned
-# Bedrock judge** `ai-judge-accuracy` grades the answers through the same handler, so no `judge_handlers` or OpenAI key is needed.
+# Bedrock judge** `ai-judge-accuracy` grades the answers through the same handler, so no second handler or OpenAI key is needed.
 # The handler builds `ChatBedrockConverse` from the standard AWS credential chain, here `AWS_PROFILE` from the
 # env file. Skipped when there's no valid AWS session.
 
@@ -629,8 +633,8 @@ if RUN["bedrock"] and aws_ready:
         key=unique("bedrock-judges"),
         dataset=DATASET,
         handler=log.handler(create_langchain_messages_handler()),
-        generation={"provider": "Bedrock", "model": BEDROCK_MODEL, "parameters": {"temperature": 0},
-                    "instructions": INSTRUCTIONS},
+        generation={"provider": "Bedrock", "model": BEDROCK_MODEL, "mode": "completion", "parameters": {"temperature": 0},
+                    "messages": [{"role": "system", "content": INSTRUCTIONS}]},
         criteria=[Judge(key=BEDROCK_JUDGE), log.scorer("nonempty-output", score_nonempty)],
         concurrency=2,  # new Bedrock accounts throttle at low request rates
     )
@@ -649,8 +653,8 @@ if RUN["bedrock"] and aws_ready:
 AGENT_URL = os.getenv("POLICY_AGENT_URL", "http://localhost:8000")
 
 
-def make_policy_agent_handler(routes: dict[str, list[str]]) -> Callable[..., Any]:
-    async def policy_agent_handler(config, user_input=None, tool_handlers=None, variables=None):
+def make_policy_agent_handler(routes: dict[str, list[str]]) -> ProviderHandler:
+    async def policy_agent_handler(config, user_input=None, tool_handlers=None, variables=None, history=None):
         def post() -> dict[str, Any]:
             body = json.dumps({"userInput": user_input or "", "userName": "Demo User"}).encode()
             request = urllib.request.Request(f"{AGENT_URL}/api/chat", data=body,
@@ -664,7 +668,7 @@ def make_policy_agent_handler(routes: dict[str, list[str]]) -> Callable[..., Any
         routes[user_input or ""] = [step.get("agent", "") for step in reply.get("agentFlow") or []]
         return {"output": reply.get("response") or ""}
 
-    return policy_agent_handler
+    return create_handler(("custom", "agent"), policy_agent_handler)
 
 
 def agent_reachable() -> bool:
@@ -688,9 +692,9 @@ elif RUN["live_agent"] and aws_ready and agent_reachable():
     result = await evals.run(
         key=unique("policy-agent-live"),
         dataset=DATASET,
-        handler=log.handler(make_policy_agent_handler(routes)),
-        judge_handlers=[create_openai_messages_handler()],  # the main handler can't serve the OpenAI judge
-        generation={"provider": "custom", "model": "policy-agent-api",
+        # The agent handler only serves "custom", so the OpenAI judge needs its own handler.
+        handlers=[log.handler(make_policy_agent_handler(routes)), create_openai_messages_handler()],
+        generation={"provider": "custom", "model": "policy-agent-api", "mode": "agent",
                     "instructions": "Generated by the running ToggleBank agent (/api/chat)."},
         criteria=[Judge(key=ANSWER_JUDGE, threshold=0.7),
                   log.scorer("routed-to-expected-specialist", score_routing)],
