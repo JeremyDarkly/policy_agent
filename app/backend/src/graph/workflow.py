@@ -1,4 +1,4 @@
-"""Workflow graph for the multi-agent system."""
+"""Workflow graph for the multi-agent system (e2e eval check for #38; not for merge)."""
 
 import functools
 from typing import Any, Callable, Literal
