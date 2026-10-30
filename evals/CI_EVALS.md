@@ -127,6 +127,66 @@ or add the variation to the target's `variations` list. The AI Config targeting 
 rule serves (JeremyDarkly/policy_agent#33), so that note reads rules from the flags API; if that read fails, the note
 says so.
 
+## End-to-end evals
+
+`.github/workflows/e2e-evals.yml` runs `ci_eval.py --e2e`. It starts the backend in the runner and sends each row of
+the triage datasets to `/api/chat`, so the real graph answers it: triage, then a specialist (or nothing, for a general
+question), then brand voice. It uses the `[e2e]` target in `ci_targets.toml` and reports in its own PR comment.
+
+| Trigger | When | Dataset |
+|---|---|---|
+| Pull request, push to `main` | The change touches `app/backend/**` (except `app/backend/tests/**`), `evals/ci_eval.py`, `evals/ci_targets.toml`, `evals/pyproject.toml`, `evals/uv.lock` or the workflow file | `triage_routing_dataset_quick` (12 rows) |
+| Schedule | Nightly at 09:30 UTC, after the config-level run | `triage_routing_dataset` (48 rows) |
+| Manual | **Actions > LaunchDarkly end-to-end evals > Run workflow** | quick, or full if you tick **full** |
+
+Each row is scored on:
+
+- **`e2e-routed`**: the specialist the graph ran matches the row's `expected_specialist`. A general question passes
+  only if triage sent it straight to brand voice.
+- **`e2e-handoff`**: the route is complete (triage, at most one specialist, brand voice) and the reply isn't empty.
+  A row where the backend set `error` counts as an error row.
+- **`e2e-slots-offered`**: for scheduler rows, every slot ID in the reply is one the scheduler was given. Only the
+  date-time digits are compared, since models sometimes drop the `SLOT-` prefix. Those IDs are listed as malformed
+  in the summary, not failed.
+- **`ci-judge-accuracy`**: brand voice's reply keeps the facts in the specialist's draft and adds none that are in
+  neither the draft nor the customer profile brand voice was sent. The handler records the profile and the draft as
+  `customer_profile` and `specialist_draft` tool calls, which the judge reads in `{{message_history}}`. The AI SDK
+  has no supported way to give a judge data the generation produced (#40), so the run's trajectory shows these
+  calls even though no agent made them.
+
+The summary lists the failing rows, the route and the variation and model each agent served per row, malformed slot
+IDs, and the run's time, agent generations and judge calls. The results compare with the latest `main` results, as
+the config-level ones do, from the `e2e-results-quick` and `e2e-results-full` artifacts.
+
+How a run differs from the config-level one:
+
+| | Config-level (`evals.yml`) | End-to-end (`e2e-evals.yml`) |
+|---|---|---|
+| What answers a row | One variation, through the AI SDK | The running backend, all agents |
+| Which variation | Each one the default rule or a test context is served | Whatever the backend is served for one context (`customer`) |
+| Catches | A variation's prompt or model getting worse | Routing and handoff bugs in `src/graph/`, prompt building in `src/utils/`, brand voice inventing facts from the real draft and profile |
+| Misses | Wiring between agents; the app's own prompt building | Variations no request reaches; agents' scores on their own |
+| Cost of a quick run | Depends on the targets | About 2 minutes, 33 generations and 12 judge calls |
+
+The backend starts with `python server.py` and the session credentials from the AWS step, not `docker compose`, which
+mounts `~/.aws`. It uses `LD_ENVIRONMENT`, the same environment as the config-level run, so it sees the targeting
+that run evaluates. Each request sends:
+
+- `userKey` `ci-e2e-customer` and the attributes of `[contexts.customer]`
+- `conversationId` `ci-e2e-<label>`
+- `includeTrace: true`, which adds each agent's variation, model and output to the response
+- `onlineJudges: false`, which skips the app's background judges
+
+CI traffic goes to the same Monitoring tabs as the demo. Filter it out by the `ci-e2e-` context key or conversation
+ID, or move the job to its own environment if it gets noisy.
+
+If the backend doesn't answer `/health` in 60 seconds, the job fails as a setup error. On any failure the last 200
+lines of the backend log are printed to the job log, where GitHub masks secret values. The log isn't uploaded as an
+artifact, because it has the LaunchDarkly hostnames and artifacts aren't masked.
+
+To turn end-to-end runs off, disable the workflow under **Actions**, or delete `e2e-evals.yml`. The config-level runs
+are unaffected.
+
 ## Quick and full datasets
 
 Every target has a full dataset and a quick one (the same key with a `_quick` suffix):
@@ -165,6 +225,7 @@ dataset to replace one. `build_specialist_datasets.py` rebuilds the specialist d
 | `LD_SDK_KEY` | The server-side SDK key of `LD_ENVIRONMENT`. Used to evaluate the test contexts. |
 | `LD_ENVIRONMENT` | The environment whose targeting decides the served variation |
 | `LD_API_BASE_URI`, `LD_UI_BASE_URI`, `LD_BASE_URI`, `LD_STREAM_URI`, `LD_EVENTS_URI` | LaunchDarkly endpoints. Leave them unset for production. |
+| `LAUNCHDARKLY_OTLP_ENDPOINT`, `LAUNCHDARKLY_OBSERVABILITY_BACKEND_URL` | End-to-end runs only: the backend's observability endpoints. Leave them unset for production. |
 
 **OIDC trust policy.** The role's trust policy must match the repository's OIDC subject format. Check it with
 `gh api repos/<owner>/<repo>/actions/oidc/customization/sub`. If `use_immutable_subject` is true, the subject is
@@ -180,6 +241,14 @@ The same script runs from this folder with an env file:
 uv run python ci_eval.py --env-file ../.env.staging-org --quick
 uv run python ci_eval.py --env-file ../.env.staging-org --config brand_agent --variation default
 ```
+
+For an end-to-end run, start the backend first (`cd app/backend && python server.py`), then:
+
+```sh
+uv run python ci_eval.py --env-file ../.env.staging-org --e2e --quick
+```
+
+Set `POLICY_AGENT_URL` if the backend isn't on `http://localhost:8000`.
 
 Local runs use your own AWS credentials and LaunchDarkly token, and count toward your own daily evaluation token limit.
 

@@ -6,6 +6,9 @@
 # scorers: names of local scorers defined in ci_eval.py (SCORERS).
 # judges: keys of LaunchDarkly judge configs to run on every row.
 #
+# [e2e] at the end is the end-to-end target: `ci_eval.py --e2e` runs only it
+# against the running backend, and other runs skip it.
+#
 # Tools: the backend doesn't give the model the tools attached to these
 # variations, so ci_eval.py runs every target with no tools, as production does.
 
