@@ -174,6 +174,7 @@ def account_specialist_node(state: AgentState) -> dict[str, Any]:
             **state.get("agent_data", {}),
             "account_specialist": {
                 "model": model_id,  # Track which model was used
+                "variation": ld_config.get("_variation"),  # Variation LaunchDarkly served
                 "served_model": served_model_id,  # Model the API reported
                 "source": "account_profile",
                 "account_context": account_info_str,  # Source of truth for evaluation

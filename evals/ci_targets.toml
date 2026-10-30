@@ -6,6 +6,9 @@
 # scorers: names of local scorers defined in ci_eval.py (SCORERS).
 # judges: keys of LaunchDarkly judge configs to run on every row.
 #
+# [e2e] at the end is the end-to-end target: `ci_eval.py --e2e` runs only it
+# against the running backend, and other runs skip it.
+#
 # Tools: the backend doesn't give the model the tools attached to these
 # variations, so ci_eval.py runs every target with no tools, as production does.
 
@@ -92,4 +95,31 @@ drop_parameters = ["top_p", "top_k"]
 judges = [
   { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = "The specialist's draft (every fact must be kept):\n{{specialist_response}}" },
   { key = "ci-judge-coherence", threshold = 0.7 },
+]
+
+# --- End-to-end ----------------------------------------------------------------
+# `ci_eval.py --e2e` runs only this target, and other runs skip it. Each row is
+# sent to the running backend's /api/chat, so the real graph answers it with
+# whatever LaunchDarkly serves `context` (a name from [contexts]; the request's
+# userKey is "ci-e2e-<name>"). POLICY_AGENT_URL overrides url.
+#
+# The handler records the profile brand voice was sent and each specialist's
+# draft as customer_profile and specialist_draft tool calls, which the judge
+# reads in {{message_history}}. e2e-slots-offered compares slot IDs in the
+# reply with the ones the scheduler was given.
+[e2e]
+url = "http://localhost:8000"
+dataset = "triage_routing_dataset"
+quick_dataset = "triage_routing_dataset_quick"
+context = "customer"
+concurrency = 2
+scorers = ["e2e-routed", "e2e-handoff", "e2e-slots-offered"]
+judges = [
+  { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = """\
+The message history has a customer_profile call: the customer's profile, which the brand voice agent was \
+given. It may also have a specialist_draft call: what the specialist agent wrote. Every fact in the draft \
+(appointment slots, phone numbers, steps, account details) must be kept in the response. The response may \
+also use facts from the customer profile. Any fact in neither the draft nor the profile is invented. With no \
+specialist_draft call, the question was general: grade that the response answers it, using only the profile \
+and general banking knowledge, with no invented account data.""" },
 ]

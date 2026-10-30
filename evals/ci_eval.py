@@ -20,10 +20,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import inspect
 import json
 import os
 import re
 import sys
+import time
 import tomllib
 import urllib.error
 import urllib.request
@@ -39,10 +41,11 @@ from ldclient.config import Config
 from launchdarkly_ai_langchain_agents import create_langchain_agents_handler
 from launchdarkly_ai_langchain_messages import create_langchain_messages_handler
 from launchdarkly_ai_server.judge_scoring import numeric_score, parse_judge_response
-from launchdarkly_ai_server import ProviderHandler, shutdown
+from launchdarkly_ai_server import ProviderHandler, create_handler, shutdown
 from launchdarkly_ai_server.experimental.evaluations import (
     AIConfig,
     DatasetRow,
+    EvalTool,
     EvaluationsError,
     Judge,
     Scorer,
@@ -103,6 +106,10 @@ class TargetResult:
     baseline_passed: int | None = None
     newly_failing: list[ScoredRow] = field(default_factory=list)
     now_passing: list[ScoredRow] = field(default_factory=list)
+    # --e2e only: each row's route and what each agent served (E2ERow), and
+    # the run's cost: wall seconds, agent generations and judge calls.
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    cost: dict[str, float] = field(default_factory=dict)
 
 
 # --- Scorers -----------------------------------------------------------------
@@ -159,8 +166,94 @@ def score_routing(row: DatasetRow, output: str | None) -> float:
     return 1.0 if actual == expected else 0.0
 
 
+# --- End-to-end scorers --------------------------------------------------------
+# With --e2e the backend answers each row through /api/chat. The handler keeps
+# the response's trace here, keyed by row input, since a scorer only receives
+# the row and the output text.
+
+SPECIALISTS = ("account_specialist", "branch_specialist", "scheduler_specialist")
+
+
+@dataclass
+class E2ERow:
+    """One row's trip through the backend, for the scorers and the summary."""
+
+    input: str
+    route: list[str] = field(default_factory=list)
+    # One entry per agent that ran: agent, config_key, variation, model, served_model.
+    agents: list[dict[str, Any]] = field(default_factory=list)
+    reply: str = ""
+    error: str = ""
+    seconds: float = 0.0
+    # Slot IDs the scheduler was given, and malformed IDs (no SLOT- prefix) in the reply.
+    available_slots: list[str] = field(default_factory=list)
+    malformed_slot_ids: list[str] = field(default_factory=list)
+
+
+e2e_rows: dict[str, E2ERow] = {}
+
+SLOT_DIGITS = re.compile(r"(?<![\w-])(SLOT-)?(\d{8}-\d{4})\b")
+
+
+def route_label(route: list[str]) -> str:
+    return " → ".join(route) or "–"
+
+
+def score_e2e_routed(row: DatasetRow, output: str | None) -> float:
+    """1.0 when the real graph ran the row's expected specialist.
+
+    A general question passes only if triage sent it straight to brand voice.
+    """
+    expected = (row.metadata or {}).get("expected_specialist", "")
+    route = e2e_rows[row.input or ""].route
+    ok = route == ["triage_router", "brand_voice"] if expected == "brand_voice" else expected in route
+    if not ok and current is not None:
+        current.misses.append(ScoredRow(input=row.input or "", expected=expected, actual=route_label(route)))
+    return 1.0 if ok else 0.0
+
+
+def score_e2e_handoff(row: DatasetRow, output: str | None) -> float:
+    """1.0 when the route is complete (triage, at most one specialist, brand voice) and the reply isn't empty.
+
+    Rows where the backend set `error` raise in the handler, so they count as errors, not here.
+    """
+    route = e2e_rows[row.input or ""].route
+    complete = (
+        route[:1] == ["triage_router"]
+        and route[-1:] == ["brand_voice"]
+        and (len(route) == 2 or (len(route) == 3 and route[1] in SPECIALISTS))
+    )
+    ok = complete and bool((output or "").strip())
+    if not ok and current is not None:
+        actual = route_label(route) if not complete else "empty reply"
+        current.misses.append(ScoredRow(input=row.input or "", expected="complete handoff", actual=actual))
+    return 1.0 if ok else 0.0
+
+
+def score_e2e_slots_offered(row: DatasetRow, output: str | None) -> float:
+    """For scheduler rows, 1.0 when every slot ID in the reply is one the scheduler was given.
+
+    Compares the date-time digits, since models sometimes drop the SLOT- prefix;
+    those IDs are counted as malformed in the summary, not failed. Other rows pass.
+    """
+    e2e = e2e_rows[row.input or ""]
+    if "scheduler_specialist" not in e2e.route:
+        return 1.0
+    real = {match[1] for slot in e2e.available_slots for match in SLOT_DIGITS.findall(slot)}
+    found = SLOT_DIGITS.findall(output or "")
+    e2e.malformed_slot_ids = sorted({digits for prefix, digits in found if not prefix})
+    invented = sorted({digits for _, digits in found} - real)
+    if invented and current is not None:
+        current.misses.append(ScoredRow(input=row.input or "", expected="only offered slot IDs",
+                                        actual="not offered: " + ", ".join(invented)))
+    return 0.0 if invented else 1.0
+
+
 SCORERS = {
     "routed-to-expected-specialist": score_routing,
+    "e2e-routed": score_e2e_routed,
+    "e2e-handoff": score_e2e_handoff,
+    "e2e-slots-offered": score_e2e_slots_offered,
 }
 
 
@@ -402,10 +495,22 @@ def select_variations(
     return Selection(selected, notes, served_to, uncovered, context_errors)
 
 
-def load_targets(path: Path, only: list[str]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """The targets to run, and the [contexts] table of test contexts."""
+def load_targets(
+    path: Path, only: list[str], e2e: bool = False
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """The targets to run, and the [contexts] table of test contexts.
+
+    The [e2e] table is the only target with e2e, and is skipped without it.
+    """
     targets = tomllib.loads(path.read_text())
     contexts = targets.pop("contexts", {})
+    e2e_target = targets.pop("e2e", None)
+    if e2e:
+        if e2e_target is None:
+            raise SystemExit(f"error: --e2e needs an [e2e] table in {path.name}")
+        if e2e_target.get("context") not in contexts:
+            raise SystemExit(f"error: [e2e] context {e2e_target.get('context')!r} not in [contexts]")
+        targets, only = {"e2e": e2e_target}, []
     if only:
         unknown = sorted(set(only) - set(targets))
         if unknown:
@@ -534,6 +639,162 @@ async def run_target(
     return result
 
 
+# --- End-to-end runs ---------------------------------------------------------
+
+E2E_TOOLS = [
+    EvalTool(
+        key="customer_profile",
+        implementation=lambda args: "recorded",
+        schema={"type": "object", "properties": {"profile": {"type": "string"}}},
+        description="The customer profile the app sent to the brand voice agent.",
+    ),
+    EvalTool(
+        key="specialist_draft",
+        implementation=lambda args: "recorded",
+        schema={"type": "object", "properties": {"agent": {"type": "string"}, "draft": {"type": "string"}}},
+        description="The specialist agent's draft, before brand voice rewrote it.",
+    ),
+]
+
+URL = re.compile(r"https?://[^\s'\"]+")
+
+
+def redact(text: str) -> str:
+    """Drop URLs and configured hostnames from backend errors; the summary is posted to a public PR."""
+    text = URL.sub("<url>", text)
+    for name, value in os.environ.items():
+        if any(part in name for part in ("URI", "URL", "ENDPOINT", "HOST")) and len(value) > 8:
+            text = text.replace(value, "<host>")
+    return text
+
+
+def e2e_url(target: dict[str, Any]) -> str:
+    return (os.getenv("POLICY_AGENT_URL") or target.get("url", "http://localhost:8000")).rstrip("/") + "/api/chat"
+
+
+def e2e_request(row_input: str, variables: dict[str, Any], context: tuple[str, dict[str, Any]], label: str) -> dict:
+    """The /api/chat body for one row, sent as the named test context."""
+    name, attributes = context
+    body = {
+        "userInput": row_input,
+        "domain": variables.get("domain", "togglebank"),
+        "userKey": str(attributes.get("key", f"ci-e2e-{name}")),
+        "includeTrace": True,
+        "onlineJudges": False,
+        "conversationId": f"ci-e2e-{label}",
+    }
+    for field_name, attribute in (("role", "role"), ("plan", "plan"), ("userType", "user_type")):
+        if attribute in attributes:
+            body[field_name] = attributes[attribute]
+    return body
+
+
+def post_json(url: str, body: dict[str, Any]) -> dict[str, Any]:
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=180) as response:
+        return json.loads(response.read())
+
+
+async def call_tool(tool_handlers: dict[str, Any] | None, key: str, arguments: dict[str, Any]) -> None:
+    if tool_handlers and key in tool_handlers:
+        result = tool_handlers[key](arguments)
+        if inspect.isawaitable(result):
+            await result
+
+
+def e2e_handler(target: dict[str, Any], context: tuple[str, dict[str, Any]], label: str) -> ProviderHandler:
+    """Generation handler: ask the running backend instead of calling a model.
+
+    It records the profile brand voice was sent and each specialist's draft as
+    tool calls, so the judge sees them in {{message_history}}: the SDK can't put
+    data the generation produced into a judge's ground truth (#40).
+    """
+    url = e2e_url(target)
+
+    async def handler(config, user_input=None, tool_handlers=None, variables=None, history=None):
+        del config, history
+        started = time.perf_counter()
+        reply = await asyncio.to_thread(post_json, url, e2e_request(user_input or "", variables or {}, context, label))
+        trace = reply.get("trace") or {}
+        agents = trace.get("agents") or []
+        route = [a["agent"] for a in agents] or [step.get("agent", "") for step in reply.get("agentFlow") or []]
+        scheduler = next((a for a in agents if a["agent"] == "scheduler_specialist"), {})
+        e2e_rows[user_input or ""] = E2ERow(
+            input=user_input or "",
+            route=route,
+            agents=[{k: a.get(k) for k in ("agent", "config_key", "variation", "model", "served_model")}
+                    for a in agents],
+            reply=reply.get("response") or "",
+            error=redact(reply.get("error") or ""),
+            seconds=round(time.perf_counter() - started, 1),
+            available_slots=scheduler.get("available_slots") or [],
+        )
+        if reply.get("error"):
+            # The backend answers errors with HTTP 200 and a friendly reply, so check `error`.
+            raise RuntimeError(f"backend error: {redact(reply['error'])[:200]}")
+        await call_tool(tool_handlers, "customer_profile", {"profile": json.dumps(trace.get("profile") or {})})
+        for agent in agents:
+            if agent["agent"] in SPECIALISTS:
+                await call_tool(tool_handlers, "specialist_draft", {"agent": agent["agent"],
+                                                                    "draft": agent.get("output") or ""})
+        return {"output": reply.get("response") or ""}
+
+    return create_handler(("custom", "agent"), handler)
+
+
+async def run_e2e(evals: Any, target: dict[str, Any], contexts: dict[str, dict[str, Any]],
+                  args: argparse.Namespace) -> TargetResult:
+    """Evaluate the dataset through the running backend's /api/chat, as one test context."""
+    global current
+    dataset = dataset_for(target, args)
+    name = target["context"]
+    result = TargetResult(config="e2e", variation="served", dataset=dataset, source="e2e",
+                          contexts=[{"name": name, "reason": "sent with each request"}])
+    print(f"running e2e on dataset {dataset} against {e2e_url(target)} as {name}", flush=True)
+    current = result
+    e2e_rows.clear()
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    result.key = f"ci-{args.label}-e2e-{name}-{stamp}".lower()
+    started = time.perf_counter()
+    try:
+        judges = judge_lookup(evals, target)
+        run = await evals.run(
+            key=result.key,
+            dataset=dataset,
+            generation={
+                "provider": "custom",
+                "model": "policy-agent-api",
+                "mode": "agent",
+                "instructions": "Generated by the running ToggleBank backend (/api/chat).",
+            },
+            handlers=[
+                recording_handler(handler, result, judges)
+                for handler in (e2e_handler(target, (name, contexts[name]), args.label),
+                                create_langchain_messages_handler())
+            ],
+            tools=E2E_TOOLS,
+            criteria=criteria_for(target),
+            concurrency=target.get("concurrency", args.concurrency),
+            poll_timeout_seconds=900,
+        )
+    except Exception as error:  # report the target, then exit non-zero
+        result.error = f"{type(error).__name__}: {error}"
+        return result
+    finally:
+        current = None
+        result.rows = [dataclasses.asdict(row) for row in e2e_rows.values()]
+    result.passed = run.passed
+    result.url = run.url
+    s = run.summary
+    result.summary = {"total": s.total_rows, "passed": s.passed_rows, "failed": s.failed_rows, "error": s.error_rows}
+    result.cost = {
+        "seconds": round(time.perf_counter() - started),
+        "generations": sum(len(row["agents"]) for row in result.rows),
+        "judge_calls": len(target.get("judges", [])) * (s.total_rows - s.error_rows),
+    }
+    return result
+
+
 def compare_with_baseline(results: list[TargetResult], path: Path) -> bool:
     """Fill in each result's comparison with a matching baseline result.
 
@@ -576,8 +837,9 @@ def details(summary: str, rows: list[ScoredRow], got: str = "Got") -> list[str]:
 def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bool | None = None) -> str:
     links = not getattr(args, "no_run_links", False)
     mode = "quick" if args.quick else "full"
+    kind = "end-to-end evals" if getattr(args, "e2e", False) else "evals"
     lines = [
-        f"### LaunchDarkly evals ({mode}, advisory)",
+        f"### LaunchDarkly {kind} ({mode}, advisory)",
         "",
         "| AI Config | Variation | Served to | Dataset | Rows passed | vs `main` | Verdict | Run |",
         "|---|---|---|---|---|---|---|---|",
@@ -605,7 +867,8 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
     if any(r.source for r in results):
         lines += ["", "*served*: what the default rule serves in the environment. *context*: what LaunchDarkly "
                   "serves a test context from `[contexts]` in ci_targets.toml. *listed*: from `variations` in "
-                  "ci_targets.toml. *chosen*: from `--variation`. *Served to*: the test contexts LaunchDarkly "
+                  "ci_targets.toml. *chosen*: from `--variation`. *e2e*: whatever the running backend served "
+                  "each agent; see the rows below. *Served to*: the test contexts LaunchDarkly "
                   "serves the variation to, and why."]
     if not links:
         lines += ["", "Find a run in LaunchDarkly under **Evaluations** by the name in the Run column."]
@@ -626,7 +889,32 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
             lines += details(f"{r.config}: {len(r.now_passing)} now passing since `main`", r.now_passing, "Got on `main`")
         if r.misses:
             lines += details(f"{r.config}: {len(r.misses)} failing", r.misses)
+        if r.rows:
+            lines += e2e_details(r)
     return "\n".join(lines) + "\n"
+
+
+def served_label(agent: dict[str, Any]) -> str:
+    model = (agent.get("served_model") or agent.get("model") or "?").split(":")[0].split(".")[-1]
+    return f"{agent['agent']}: `{agent.get('variation') or '?'}` ({model})"
+
+
+def e2e_details(r: TargetResult) -> list[str]:
+    """What each agent served, per row, and the run's cost."""
+    lines = []
+    if r.cost:
+        lines += ["", f"**{r.config}** cost: {r.cost['seconds']} s, {r.cost['generations']} agent generations, "
+                      f"{r.cost['judge_calls']} judge calls."]
+    malformed = sorted({i for row in r.rows for i in row.get("malformed_slot_ids", [])})
+    if malformed:
+        lines += ["", f"**{r.config}**: {len(malformed)} slot IDs without the `SLOT-` prefix in replies "
+                      f"(reported, not scored): {', '.join(malformed)}."]
+    table = ["| Input | Route | Served | Seconds |", "|---|---|---|---|"]
+    for row in r.rows:
+        served = "<br>".join(served_label(a) for a in row["agents"]) or cell(row.get("error") or "–")
+        table.append(f"| {cell(row['input'])} | {route_label(row['route'])} | {served} | {row['seconds']} |")
+    return lines + ["", f"<details><summary>{r.config}: route and served variation per row</summary>", "",
+                    *table, "", "</details>"]
 
 
 def start_ld_client(project_key: str, environment: str) -> Any:
@@ -660,6 +948,11 @@ async def main() -> int:
     parser.add_argument("--environment", help="LaunchDarkly environment key (default: $LD_ENVIRONMENT)")
     parser.add_argument("--quick", action="store_true", help="use each target's quick_dataset")
     parser.add_argument(
+        "--e2e",
+        action="store_true",
+        help="run only the [e2e] target: send each row to the running backend's /api/chat",
+    )
+    parser.add_argument(
         "--no-contexts",
         action="store_true",
         help="don't evaluate the variations ci_targets.toml's test contexts are served",
@@ -687,15 +980,16 @@ async def main() -> int:
         return 1
 
     args.environment = args.environment or os.getenv("LD_ENVIRONMENT")
-    if not args.variation and not args.environment:
+    if not args.e2e and not args.variation and not args.environment:
         print("error: pass --variation, or set --environment (or LD_ENVIRONMENT) to evaluate served variations",
               file=sys.stderr)
         return 1
 
-    targets, contexts = load_targets(Path(args.targets), args.config)
+    targets, contexts = load_targets(Path(args.targets), args.config, args.e2e)
     evals = init_evaluations()
     args.ld_client, args.test_contexts = None, {}
-    if contexts and not args.variation and not args.no_contexts:
+    # The backend resolves its own variations in an e2e run.
+    if contexts and not args.e2e and not args.variation and not args.no_contexts:
         try:
             args.ld_client = start_ld_client(evals.project_key, args.environment)
         except (EvaluationsError, RuntimeError) as error:
@@ -706,7 +1000,10 @@ async def main() -> int:
     results = []
     try:
         for config, target in targets.items():
-            results += await run_config(evals, config, target, args)
+            if args.e2e:
+                results.append(await run_e2e(evals, target, contexts, args))
+            else:
+                results += await run_config(evals, config, target, args)
     finally:
         if args.ld_client is not None:
             args.ld_client.close()

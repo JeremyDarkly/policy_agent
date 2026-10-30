@@ -168,3 +168,7 @@ doesn't send either.
 `.github/workflows/evals.yml` runs `ci_eval.py` in GitHub Actions on PRs, pushes to `main`, nightly and by hand.
 [CI_EVALS.md](CI_EVALS.md) describes what triggers it, what a run does, the quick and full datasets, and the
 secrets and AWS role it needs.
+
+`.github/workflows/e2e-evals.yml` runs `ci_eval.py --e2e`: it starts the backend in the runner and sends the triage
+datasets through `/api/chat`, scoring routing, handoffs, offered slots and brand voice's facts. See
+[CI_EVALS.md](CI_EVALS.md), "End-to-end evals".

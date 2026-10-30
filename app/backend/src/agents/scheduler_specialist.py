@@ -137,6 +137,7 @@ def scheduler_specialist_node(state: AgentState) -> dict[str, Any]:
             **state.get("agent_data", {}),
             "scheduler_specialist": {
                 "model": model_id,  # Track which model was used
+                "variation": ld_config.get("_variation"),  # Variation LaunchDarkly served
                 "served_model": served_model_id,  # Model the API reported
                 "available_slots": available_slots[:10],
                 "response": response_text,
