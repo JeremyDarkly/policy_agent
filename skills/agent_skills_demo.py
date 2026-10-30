@@ -295,7 +295,9 @@ for ref in references.get("items", []):
 # ## Act 3: Serve
 #
 # Skills have no targeting of their own. The variation a context is served decides which skills it gets. Here
-# the Internal demo login (`<name>-internal-dev`) is targeted at `skills-demo`, and everyone else keeps `Default`.
+# a rule serves `skills-demo` to contexts with `role` `employee`, which includes the Internal demo login
+# (`<name>-internal-dev`), and everyone else keeps `Default`. A rule rather than a target on that one key means CI's
+# `employee` test context (`evals/ci_targets.toml`) is served `skills-demo` too, so CI evaluates it during the demo.
 #
 # The agent then resolves its config the way production code does, through the SDK. It reads the pinned skill references
 # from the served variation and fetches each pinned version. It writes the skills as `<root>/<key>/SKILL.md` plus a
@@ -305,10 +307,57 @@ for ref in references.get("items", []):
 # rollouts work on the skill set too.
 
 # %%
-def target(config_key: str, user_key: str, variation_name: str | None) -> None:
-    """Serve the named variation to `user_key` in this environment, or remove the user's target when it's None.
+SKILLED_ROLE = "employee"
+RULE_DESCRIPTION = "Skills demo: serve skills-demo to employees"
+
+
+def patch_targeting(config_key: str, instructions: list[dict[str, Any]]) -> None:
+    status, body = ld_api("PATCH", f"/ai-configs/{config_key}/targeting",
+                          {"environmentKey": ENVIRONMENT_KEY, "instructions": instructions},
+                          content_type="application/json; domain-model=launchdarkly.semanticpatch")
+    if status != 200:
+        raise SystemExit(f"targeting {config_key}: HTTP {status} {body}")
+
+
+def demo_rule_id(config_key: str) -> str | None:
+    """The ID of this demo's rule, found by its description.
+
+    The AI Config targeting API leaves rules' IDs and descriptions out, so this reads the flag the config is stored as.
+    """
+    base = os.environ["LD_API_BASE_URI"].rstrip("/")
+    request = urllib.request.Request(f"{base}/api/v2/flags/{PROJECT_KEY}/{config_key}?env={ENVIRONMENT_KEY}",
+                                     headers={"Authorization": os.environ["LD_API_TOKEN"], "LD-API-Version": "20240415"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        flag = json.load(response)
+    rules = flag["environments"][ENVIRONMENT_KEY].get("rules", [])
+    return next((r["_id"] for r in rules if r.get("description") == RULE_DESCRIPTION), None)
+
+
+def serve_role(config_key: str, variation_name: str | None) -> None:
+    """Serve the named variation to contexts with `role` SKILLED_ROLE, or remove that rule when it's None.
 
     The targeting endpoint identifies variations by name and ID, not by key."""
+    rule_id = demo_rule_id(config_key)
+    if variation_name is None:
+        if rule_id is not None:
+            patch_targeting(config_key, [{"kind": "removeRule", "ruleId": rule_id}])
+            print(f"  {config_key}: removed the role={SKILLED_ROLE} rule")
+        return
+    if rule_id is not None:
+        return
+    status, targeting = ld_api("GET", f"/ai-configs/{config_key}/targeting")
+    if status != 200:
+        raise SystemExit(f"targeting {config_key}: HTTP {status} {targeting}")
+    wanted = next(v for v in targeting.get("variations", []) if v.get("name") == variation_name)
+    patch_targeting(config_key, [{
+        "kind": "addRule", "description": RULE_DESCRIPTION, "variationId": wanted["_id"],
+        "clauses": [{"contextKind": "user", "attribute": "role", "op": "in", "values": [SKILLED_ROLE], "negate": False}],
+    }])
+    print(f"  {config_key}: role={SKILLED_ROLE} -> {variation_name}")
+
+
+def remove_user_target(config_key: str, user_key: str) -> None:
+    """Remove an individual target on `user_key`, which earlier versions of this notebook added."""
     status, targeting = ld_api("GET", f"/ai-configs/{config_key}/targeting")
     if status != 200:
         raise SystemExit(f"targeting {config_key}: HTTP {status} {targeting}")
@@ -316,27 +365,15 @@ def target(config_key: str, user_key: str, variation_name: str | None) -> None:
     env = targeting.get("environments", {}).get(ENVIRONMENT_KEY, {})
     current = next((t for t in env.get("contextTargets", []) + env.get("targets", [])
                     if user_key in t.get("values", [])), None)
-    current_name = variations[current["variation"]].get("name") if current else None
-    if current_name == variation_name:
-        return
-    instructions = []
     if current is not None:
-        instructions.append({"kind": "removeTargets", "contextKind": current.get("contextKind", "user"),
-                             "variationId": variations[current["variation"]]["_id"], "values": [user_key]})
-    if variation_name is not None:
-        wanted = next(v for v in variations if v.get("name") == variation_name)
-        instructions.append({"kind": "addTargets", "contextKind": "user",
-                             "variationId": wanted["_id"], "values": [user_key]})
-    status, body = ld_api("PATCH", f"/ai-configs/{config_key}/targeting",
-                          {"environmentKey": ENVIRONMENT_KEY, "instructions": instructions},
-                          content_type="application/json; domain-model=launchdarkly.semanticpatch")
-    if status != 200:
-        raise SystemExit(f"target {user_key} on {config_key}: HTTP {status} {body}")
-    print(f"  {config_key}: {user_key} -> {variation_name or 'fallthrough'}")
+        patch_targeting(config_key, [{"kind": "removeTargets", "contextKind": current.get("contextKind", "user"),
+                                      "variationId": variations[current["variation"]]["_id"], "values": [user_key]}])
+        print(f"  {config_key}: removed the individual target on {user_key}")
 
 
 for config_key in (AGENT, SHARED_AGENT):
-    target(config_key, SKILLED_USER, DEMO_VARIATION_NAME)
+    remove_user_target(config_key, SKILLED_USER)
+    serve_role(config_key, DEMO_VARIATION_NAME)
 
 # %% [markdown]
 # **Streaming or polling.** By default the SDK client streams, so changes arrive within seconds. If the env file sets
@@ -364,9 +401,14 @@ await init_client(client=LD)  # the AI SDK and its evaluations reuse this client
 print(f"SDK initialized: {LD.is_initialized()}  ({'polling' if POLL_URI else 'streaming'})")
 
 
+# The role each demo login has in the app (app/ui/src/lib/demoUser.ts), which the targeting rule matches on.
+ROLES = {SKILLED_USER: SKILLED_ROLE, OTHER_USER: "customer"}
+
+
 def served(config_key: str, user_key: str) -> dict[str, Any]:
     """The variation the SDK serves this user: its key, and the skills it pins."""
-    context = Context.builder(user_key).kind("user").set("domain", "togglebank").build()
+    context = (Context.builder(user_key).kind("user").set("domain", "togglebank")
+               .set("role", ROLES.get(user_key, "customer")).build())
     raw = LD.variation(config_key, context, None) or {}
     variation_key = (raw.get("_ldMeta") or {}).get("variationKey")
     if "skills" in raw:  # the delivered variation carries its pinned references
@@ -765,7 +807,7 @@ if RUN["catch"] and evals:
 # %% [markdown]
 # ## Reset
 #
-# Puts both agents back as they were: removes the user target and deletes the `skills-demo` variations. Set
+# Puts both agents back as they were: removes the `role` rule and deletes the `skills-demo` variations. Set
 # `RESET = True` and run this cell after the demo. The skills and their versions stay in the library unless
 # `RESET_SKILLS = True`. Delete them after a rehearsal, so the live run publishes v1, v2 and v3 in front of the audience.
 
@@ -774,7 +816,8 @@ RESET = False
 RESET_SKILLS = False
 if RESET:
     for config_key in (AGENT, SHARED_AGENT):
-        target(config_key, SKILLED_USER, None)
+        serve_role(config_key, None)
+        remove_user_target(config_key, SKILLED_USER)
         status, _ = ld_api("DELETE", f"/ai-configs/{config_key}/variations/{DEMO_VARIATION}")
         print(f"  deleted {config_key}/{DEMO_VARIATION}: HTTP {status}")
     if RESET_SKILLS:

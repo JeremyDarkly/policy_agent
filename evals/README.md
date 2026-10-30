@@ -149,8 +149,10 @@ uv run python ci_eval.py --env-file ../.env.staging-org --config triage_agent --
 **Which variation.** Without `--variation`, each target is evaluated on the variation its default rule
 (fallthrough) serves in `--environment` (default `$LD_ENVIRONMENT`, from `LAUNCHDARKLY_ENVIRONMENT` in the env file),
 read from the AI Config's targeting. A percentage rollout evaluates each variation in it. A target's `variations` list
-in `ci_targets.toml` adds more, for example challenger variations. Variations that only targeting rules or individual
-targets serve aren't evaluated, and the summary names them. `--variation` evaluates one variation of every target.
+in `ci_targets.toml` adds more, for example challenger variations. The test contexts in `ci_targets.toml`'s
+`[contexts]` table add the variations LaunchDarkly serves them, so a variation a rule or individual target serves is
+evaluated when a context matches it (see `CI_EVALS.md`, "Test contexts"); the summary names any it misses.
+`--no-contexts` skips the contexts, and `--variation` evaluates one variation of every target.
 
 **Specialist datasets.** `build_specialist_datasets.py` writes the account, branch, scheduler and brand voice
 datasets into `ci_datasets/`. Each row reproduces the user message and prompt variables the backend sends that agent,

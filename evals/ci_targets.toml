@@ -9,6 +9,48 @@
 # Tools: the backend doesn't give the model the tools attached to these
 # variations, so ci_eval.py runs every target with no tools, as production does.
 
+# --- Test contexts -------------------------------------------------------------
+# For each target, ci_eval.py asks LaunchDarkly (with the server SDK) which
+# variation each test context below is served, and evaluates every variation
+# they reach, as well as what the default rule serves. So a variation that a
+# targeting rule or individual target serves is evaluated without being listed.
+#
+# A context chooses the variation only. Its attributes don't reach the prompt:
+# prompt variables still come from each dataset row's variables.
+#
+# Attributes match what the app sends (app/ui/src/lib/demoUser.ts and
+# app/backend/src/utils/user_profile.py). kind defaults to "user" and key to
+# "ci-<name>". A target resolves every context unless it sets
+# contexts = ["name", ...] (or contexts = [] for none). --no-contexts turns
+# this off for one run.
+#
+# A context costs one SDK evaluation. Eval runs are per distinct variation, so
+# a context served a variation already selected adds no model calls.
+
+# The app's two demo logins.
+[contexts.customer]
+role = "customer"
+user_type = "customer"
+plan = "commercial"
+
+[contexts.employee]
+role = "employee"
+user_type = "internal"
+plan = "internal"
+
+# Plan tiers. No config targets on plan yet; these test a future rule on it.
+[contexts.customer-bronze]
+role = "customer"
+user_type = "customer"
+plan = "bronze"
+customer_tier = "bronze"
+
+[contexts.customer-platinum]
+role = "customer"
+user_type = "customer"
+plan = "platinum"
+customer_tier = "platinum"
+
 [triage_agent]
 dataset = "triage_routing_dataset"
 quick_dataset = "triage_routing_dataset_quick"
