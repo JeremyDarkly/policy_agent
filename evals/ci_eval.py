@@ -32,7 +32,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import ldclient
 from dotenv import load_dotenv
+from ldclient import Context
+from ldclient.config import Config
 from launchdarkly_ai_langchain_agents import create_langchain_agents_handler
 from launchdarkly_ai_langchain_messages import create_langchain_messages_handler
 from launchdarkly_ai_server.judge_scoring import numeric_score, parse_judge_response
@@ -74,10 +77,16 @@ class TargetResult:
     config: str
     variation: str
     dataset: str
-    # Why this variation was evaluated: "served", "listed" or "chosen".
+    # Why this variation was evaluated: "served", "context", "listed" or "chosen".
     source: str = ""
+    # The test contexts LaunchDarkly serves this variation to: {name, reason}.
+    contexts: list[dict[str, str]] = field(default_factory=list)
     # Targeting facts worth knowing, such as other variations rules serve.
     notes: list[str] = field(default_factory=list)
+    # Set on a config's first result. Variations targeting serves that nothing
+    # evaluated, and test contexts that couldn't be evaluated.
+    uncovered: list[str] = field(default_factory=list)
+    context_errors: list[str] = field(default_factory=list)
     # Set when there was nothing to evaluate, with the reason.
     skipped: str = ""
     key: str = ""
@@ -254,6 +263,10 @@ class Selection:
 
     variations: list[tuple[str, str]]  # (variation key, source)
     notes: list[str]
+    # Variation key -> the test contexts served it, as {name, reason}.
+    contexts: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    uncovered: list[str] = field(default_factory=list)
+    context_errors: list[str] = field(default_factory=list)
 
 
 def variation_key(variation: dict[str, Any]) -> str | None:
@@ -270,13 +283,72 @@ def served_indexes(serve: dict[str, Any]) -> dict[int, float]:
     return {w["variation"]: w["weight"] / 100_000 for w in weights if w.get("weight")}
 
 
-def select_variations(
-    evals: Any, config: str, target: dict[str, Any], environment: str | None, chosen: str | None
-) -> Selection:
-    """The variation the config's default rule serves in the environment, plus listed ones.
+def targeted_variations(targeting: dict[str, Any], environment: str) -> set[str]:
+    """Variation keys that rules and individual targets serve in the environment."""
+    env = (targeting.get("environments") or {}).get(environment) or {}
+    if not env.get("enabled", True):
+        return set()
+    keys = [variation_key(v) for v in targeting.get("variations") or []]
+    serves = [*(env.get("rules") or []), *(env.get("targets") or []), *(env.get("contextTargets") or [])]
+    return {keys[i] for serve in serves for i in served_indexes(serve) if keys[i]}
 
-    --variation replaces both. Variations that only targeting rules or individual
-    targets serve aren't evaluated, but are named in a note.
+
+def build_context(name: str, attributes: dict[str, Any]) -> Context:
+    """A test context from ci_targets.toml's [contexts.<name>] table."""
+    builder = Context.builder(str(attributes.get("key", f"ci-{name}"))).kind(attributes.get("kind", "user"))
+    for attribute, value in attributes.items():
+        if attribute not in ("key", "kind"):
+            builder.set(attribute, value)
+    return builder.build()
+
+
+def reason_label(reason: dict[str, Any]) -> str:
+    kind = reason.get("kind", "")
+    if kind == "RULE_MATCH":
+        return f"rule {reason.get('ruleIndex', 0) + 1}"
+    return {"TARGET_MATCH": "individual target", "FALLTHROUGH": "default rule", "OFF": "targeting off"}.get(
+        kind, kind.lower()
+    )
+
+
+def resolve_contexts(
+    client: Any, config: str, contexts: dict[str, Context]
+) -> tuple[dict[str, list[dict[str, str]]], list[str]]:
+    """Which variation LaunchDarkly serves each test context, as the app would be served it.
+
+    Returns variation key -> [{name, reason}], and the contexts that couldn't be evaluated.
+    """
+    served: dict[str, list[dict[str, str]]] = {}
+    errors: list[str] = []
+    for name, context in contexts.items():
+        detail = client.variation_detail(config, context, {})
+        reason = detail.reason or {}
+        meta = (detail.value or {}).get("_ldMeta") or {}
+        if reason.get("kind") == "ERROR":
+            errors.append(f"`{name}`: {reason.get('errorKind', 'error')}")
+        elif not meta.get("enabled", True):
+            errors.append(f"`{name}` gets LaunchDarkly's disabled variation ({reason_label(reason)})")
+        elif not meta.get("variationKey"):
+            errors.append(f"`{name}`: the served value has no variation key")
+        else:
+            served.setdefault(meta["variationKey"], []).append({"name": name, "reason": reason_label(reason)})
+    return served, errors
+
+
+def select_variations(
+    evals: Any,
+    config: str,
+    target: dict[str, Any],
+    environment: str | None,
+    chosen: str | None,
+    client: Any = None,
+    contexts: dict[str, Context] | None = None,
+) -> Selection:
+    """The variation the config's default rule serves in the environment, plus the
+    variations the test contexts are served, plus listed ones.
+
+    --variation replaces all of them. Variations that targeting serves but that none
+    of these reach aren't evaluated, but are named in a note.
     """
     if chosen:
         return Selection([(chosen, "chosen")], [])
@@ -302,24 +374,38 @@ def select_variations(
         else:
             selected.append((keys[index], "served"))
 
-    others = set()
-    if env.get("enabled", True):
-        for serve in [*(env.get("rules") or []), *(env.get("targets") or []), *(env.get("contextTargets") or [])]:
-            others.update(keys[i] for i in served_indexes(serve) if keys[i])
-    others -= {key for key, _ in selected}
+    served_to: dict[str, list[dict[str, str]]] = {}
+    context_errors: list[str] = []
+    if client is not None and contexts:
+        served_to, context_errors = resolve_contexts(client, config, contexts)
+        for key in served_to:
+            if key not in {k for k, _ in selected}:
+                selected.append((key, "context"))
     for key in target.get("variations", []):
         if key not in {k for k, _ in selected}:
             selected.append((key, "listed"))
-        others.discard(key)
-    if others:
-        names = ", ".join(f"`{k}`" for k in sorted(others))
-        notes.append(f"Targeting rules or individual targets also serve {names}. Add them to `variations` in "
-                     "ci_targets.toml to evaluate them.")
-    return Selection(selected, notes)
+
+    # The AI Config targeting API leaves out the variation a rule serves, so read
+    # rules from the flag the AI Config is stored as. This only feeds the note below.
+    try:
+        others = targeted_variations(ld_get(f"flags/{evals.project_key}/{config}?env={environment}"), environment)
+    except EvaluationsError:
+        others = targeted_variations(targeting, environment)
+        notes.append("Couldn't read targeting rules, so variations only rules serve may be missing below.")
+    uncovered = sorted(others - {k for k, _ in selected})
+    if uncovered:
+        names = ", ".join(f"`{k}`" for k in uncovered)
+        notes.append(f"Targeting rules or individual targets also serve {names}, which no test context reaches. "
+                     "Add a context to `[contexts]` in ci_targets.toml, or the variation to `variations`.")
+    if context_errors:
+        notes.append(f"Test contexts that couldn't be evaluated: {'; '.join(context_errors)}.")
+    return Selection(selected, notes, served_to, uncovered, context_errors)
 
 
-def load_targets(path: Path, only: list[str]) -> dict[str, dict[str, Any]]:
+def load_targets(path: Path, only: list[str]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """The targets to run, and the [contexts] table of test contexts."""
     targets = tomllib.loads(path.read_text())
+    contexts = targets.pop("contexts", {})
     if only:
         unknown = sorted(set(only) - set(targets))
         if unknown:
@@ -329,7 +415,16 @@ def load_targets(path: Path, only: list[str]) -> dict[str, dict[str, Any]]:
         for name in target.get("scorers", []):
             if name not in SCORERS:
                 raise SystemExit(f"error: {key} uses unknown scorer {name!r}")
-    return targets
+        unknown = sorted(set(target.get("contexts", [])) - set(contexts))
+        if unknown:
+            raise SystemExit(f"error: {key} uses unknown context {', '.join(unknown)}")
+    return targets, contexts
+
+
+def contexts_for(target: dict[str, Any], contexts: dict[str, Context]) -> dict[str, Context]:
+    """The test contexts a target is resolved for: its `contexts` list, or all of them."""
+    names = target.get("contexts")
+    return contexts if names is None else {name: contexts[name] for name in names}
 
 
 def judge_for(entry: str | dict[str, Any]) -> Judge:
@@ -373,7 +468,8 @@ async def run_config(evals: Any, config: str, target: dict[str, Any], args: argp
     """Evaluate every selected variation of one AI Config."""
     dataset = dataset_for(target, args)
     try:
-        selection = select_variations(evals, config, target, args.environment, args.variation)
+        selection = select_variations(evals, config, target, args.environment, args.variation,
+                                      args.ld_client, contexts_for(target, args.test_contexts))
     except Exception as error:  # report every target, then exit non-zero
         return [TargetResult(config=config, variation="–", dataset=dataset,
                              error=f"reading targeting: {type(error).__name__}: {error}")]
@@ -384,8 +480,11 @@ async def run_config(evals: Any, config: str, target: dict[str, Any], args: argp
     for index, (variation, source) in enumerate(selection.variations):
         result = await run_target(evals, config, target, variation, args)
         result.source = source
+        result.contexts = selection.contexts.get(variation, [])
         if index == 0:
             result.notes = selection.notes
+            result.uncovered = selection.uncovered
+            result.context_errors = selection.context_errors
         results.append(result)
     return results
 
@@ -480,14 +579,15 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
     lines = [
         f"### LaunchDarkly evals ({mode}, advisory)",
         "",
-        "| AI Config | Variation | Dataset | Rows passed | vs `main` | Verdict | Run |",
-        "|---|---|---|---|---|---|---|",
+        "| AI Config | Variation | Served to | Dataset | Rows passed | vs `main` | Verdict | Run |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
         variation = f"`{r.variation}`" + (f" ({r.source})" if r.source else "")
+        served_to = ", ".join(f"{c['name']} ({c['reason']})" for c in r.contexts) or "–"
         if r.error or r.skipped:
             verdict = "error" if r.error else "skipped"
-            lines.append(f"| `{r.config}` | {variation} | `{r.dataset}` | – | – | {verdict} | – |")
+            lines.append(f"| `{r.config}` | {variation} | {served_to} | `{r.dataset}` | – | – | {verdict} | – |")
             continue
         s = r.summary
         counts = f"{s['passed']}/{s['total']}" + (f" ({s['error']} errors)" if s["error"] else "")
@@ -499,10 +599,14 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
             delta = "no change" if change == 0 else f"{change:+d} (was {r.baseline_passed})"
         verdict = "passed" if r.passed else "failed"
         run = f"[open]({r.url})" if links else f"`{r.key}`"
-        lines.append(f"| `{r.config}` | {variation} | `{r.dataset}` | {counts} | {delta} | {verdict} | {run} |")
+        lines.append(
+            f"| `{r.config}` | {variation} | {served_to} | `{r.dataset}` | {counts} | {delta} | {verdict} | {run} |"
+        )
     if any(r.source for r in results):
-        lines += ["", "*served*: what the default rule serves in the environment. *listed*: from `variations` in "
-                  "ci_targets.toml. *chosen*: from `--variation`."]
+        lines += ["", "*served*: what the default rule serves in the environment. *context*: what LaunchDarkly "
+                  "serves a test context from `[contexts]` in ci_targets.toml. *listed*: from `variations` in "
+                  "ci_targets.toml. *chosen*: from `--variation`. *Served to*: the test contexts LaunchDarkly "
+                  "serves the variation to, and why."]
     if not links:
         lines += ["", "Find a run in LaunchDarkly under **Evaluations** by the name in the Run column."]
     if compared is False:
@@ -525,6 +629,25 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
     return "\n".join(lines) + "\n"
 
 
+def start_ld_client(project_key: str, environment: str) -> Any:
+    """A server SDK client for evaluating test contexts, as the app is evaluated.
+
+    It sends no events, so CI's test contexts don't show up in LaunchDarkly. The SDK
+    key decides the environment it evaluates in, so check it's --environment's key.
+    """
+    env = ld_get(f"projects/{project_key}/environments/{environment}")
+    if env.get("apiKey") and env["apiKey"] != os.environ["LD_SDK_KEY"]:
+        raise RuntimeError(f"LD_SDK_KEY isn't the SDK key of environment {environment!r}")
+    options = {name: os.environ[var] for name, var in
+               (("base_uri", "LD_BASE_URI"), ("stream_uri", "LD_STREAM_URI"), ("events_uri", "LD_EVENTS_URI"))
+               if os.getenv(var)}
+    client = ldclient.LDClient(Config(os.environ["LD_SDK_KEY"], send_events=False, **options), start_wait=10)
+    if not client.is_initialized():
+        client.close()
+        raise RuntimeError("the LaunchDarkly server SDK didn't initialize in 10 s")
+    return client
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--env-file", help="load credentials from this env file (CI sets them as env vars)")
@@ -536,6 +659,11 @@ async def main() -> int:
     )
     parser.add_argument("--environment", help="LaunchDarkly environment key (default: $LD_ENVIRONMENT)")
     parser.add_argument("--quick", action="store_true", help="use each target's quick_dataset")
+    parser.add_argument(
+        "--no-contexts",
+        action="store_true",
+        help="don't evaluate the variations ci_targets.toml's test contexts are served",
+    )
     parser.add_argument("--label", default="local", help="included in run keys, e.g. pr-12")
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--summary-file", default=os.getenv("GITHUB_STEP_SUMMARY"))
@@ -564,13 +692,24 @@ async def main() -> int:
               file=sys.stderr)
         return 1
 
-    targets = load_targets(Path(args.targets), args.config)
+    targets, contexts = load_targets(Path(args.targets), args.config)
     evals = init_evaluations()
+    args.ld_client, args.test_contexts = None, {}
+    if contexts and not args.variation and not args.no_contexts:
+        try:
+            args.ld_client = start_ld_client(evals.project_key, args.environment)
+        except (EvaluationsError, RuntimeError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            await shutdown()
+            return 1
+        args.test_contexts = {name: build_context(name, attributes) for name, attributes in contexts.items()}
     results = []
     try:
         for config, target in targets.items():
             results += await run_config(evals, config, target, args)
     finally:
+        if args.ld_client is not None:
+            args.ld_client.close()
         await shutdown()
 
     compared = compare_with_baseline(results, Path(args.baseline)) if args.baseline else None

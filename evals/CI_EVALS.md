@@ -46,9 +46,11 @@ Manual runs take three optional inputs:
    `eval-results-full` artifact from a run on `main`. If there isn't one yet, the comparison column says "not on
    `main`".
 4. **Runs `ci_eval.py`** for every target in `ci_targets.toml`, or the chosen config:
-   - **Picks the variation.** It reads the AI Config's targeting in `LD_ENVIRONMENT` and evaluates the variation the
-     default rule serves, or each variation in a percentage rollout. A target's `variations` list adds more, and
-     the manual **variation** input picks one instead.
+   - **Picks the variations.** It reads the AI Config's targeting in `LD_ENVIRONMENT` and evaluates the variation the
+     default rule serves, or each variation in a percentage rollout. It then asks LaunchDarkly which variation each
+     test context in `ci_targets.toml` is served (for example `employee`) and evaluates those too, so variations that
+     targeting rules or individual targets serve are tested without being listed. A target's `variations` list adds
+     more, and the manual **variation** input picks one instead.
    - **Generates a response for each row.** The LaunchDarkly AI SDK reads the variation's model and prompt and
      generates on Bedrock. The app doesn't need to be running.
    - **Scores each row.** Triage checks whether the reply would route to the expected specialist. The other agents are
@@ -89,8 +91,9 @@ flowchart TD
     split --> disabled
     disabled -- yes --> skip["Skip it, with a note"]
     disabled -- no --> served["Evaluate it<br/>source: served"]
-    served --> listed["Add the target's variations list<br/>source: listed"]
-    skip --> listed
+    served --> contexts["Ask the server SDK which variation<br/>each test context is served;<br/>add new ones<br/>source: context"]
+    skip --> contexts
+    contexts --> listed["Add the target's variations list<br/>source: listed"]
     listed --> others{"Do rules or individual targets<br/>serve variations not selected?"}
     others -- yes --> note["Name them in a note;<br/>they aren't evaluated"]
     others -- no --> run(["One evaluation per selected variation"])
@@ -98,9 +101,31 @@ flowchart TD
     chosen --> run
 ```
 
-The source (*served*, *listed* or *chosen*) appears next to each variation in the summary table. To evaluate a
-variation that only a targeting rule serves, such as a challenger, add it to that target's `variations` list in
-`ci_targets.toml`.
+The source (*served*, *context*, *listed* or *chosen*) appears next to each variation in the summary table, and the
+**Served to** column names the test contexts LaunchDarkly serves it to and why, for example `employee (rule 1)`.
+
+### Test contexts
+
+`[contexts]` in `ci_targets.toml` holds named test contexts with the attributes the app sends: `customer` and
+`employee` (the app's two demo logins) and `customer-bronze` and `customer-platinum` (plan tiers). For each target,
+`ci_eval.py` evaluates the AI Config for each context with the LaunchDarkly server SDK, as the app does, and evaluates
+every distinct variation they reach. So when a rule such as `role is one of employee` serves a variation, CI evaluates
+it with no change to `ci_targets.toml`.
+
+- A context chooses the variation only. Its attributes don't reach the prompt; prompt variables come from each
+  dataset row.
+- The variation runs on the target's normal dataset, so its results compare with the default variation's.
+- Eval runs are per distinct variation, so a context served a variation already selected costs one SDK evaluation
+  and no model calls.
+- A target can limit its contexts with `contexts = ["employee"]`, or turn them off with `contexts = []`.
+  `--no-contexts` turns them off for one run, and `--variation` ignores them.
+- The SDK client sends no events, so test contexts don't appear in LaunchDarkly. `ci_eval.py` checks that
+  `LD_SDK_KEY` is the SDK key of `LD_ENVIRONMENT` before it evaluates any context.
+
+If targeting serves a variation no test context reaches, the summary names it. Add a context that matches the rule,
+or add the variation to the target's `variations` list. The AI Config targeting API doesn't return the variation a
+rule serves (JeremyDarkly/policy_agent#33), so that note reads rules from the flags API; if that read fails, the note
+says so.
 
 ## Quick and full datasets
 
@@ -137,7 +162,7 @@ dataset to replace one. `build_specialist_datasets.py` rebuilds the specialist d
 | `AWS_ROLE_ARN` | An IAM role GitHub can assume through OIDC, allowed to call Bedrock for the models in `infrastructure/launchdarkly/model_configs.tf` |
 | `LD_PROJECT_KEY` | The LaunchDarkly project |
 | `LD_API_TOKEN` | A LaunchDarkly API access token that can create evaluations and read AI Configs and datasets |
-| `LD_SDK_KEY` | The server-side SDK key of the environment |
+| `LD_SDK_KEY` | The server-side SDK key of `LD_ENVIRONMENT`. Used to evaluate the test contexts. |
 | `LD_ENVIRONMENT` | The environment whose targeting decides the served variation |
 | `LD_API_BASE_URI`, `LD_UI_BASE_URI`, `LD_BASE_URI`, `LD_STREAM_URI`, `LD_EVENTS_URI` | LaunchDarkly endpoints. Leave them unset for production. |
 

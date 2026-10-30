@@ -49,11 +49,14 @@ and the `RUN` switches for rehearsals.
 - Two library skills: `togglebank-dispute-handling` (v1–v3) and `plain-english`.
 - A `skills-demo` variation on `account_agent` and on `branch_agent`, copied from `Default` without its Library tools.
   Terraform doesn't manage these variations.
-- A user target: `<name>-internal-dev` is served `skills-demo`, so the app's **Internal** demo login gets it too.
-  `<name>` is `DEMO_USER_NAME` as a slug, for example `jeremy-mcgee`.
+- A targeting rule, `role` is one of `employee`, that serves `skills-demo`. The app's **Internal** demo login has
+  `role=employee`, so it gets `skills-demo`, and so does CI's `employee` test context (`evals/ci_targets.toml`), so CI
+  evaluates `skills-demo` while the demo is set up. The rule is found again by its description, `Skills demo: serve
+  skills-demo to employees`. Setup also removes the individual target on `<name>-internal-dev` that earlier versions
+  of the notebook added (`<name>` is `DEMO_USER_NAME` as a slug).
 - A `load_skill` Library tool and a `dispute-answer-quality` judge.
 
-The notebook's **Reset** cell removes the target and the `skills-demo` variations. Add `RESET_SKILLS = True` to delete
+The notebook's **Reset** cell removes the rule and the `skills-demo` variations. Add `RESET_SKILLS = True` to delete
 the skills as well. Do that after a rehearsal, so the live demo publishes v1, v2 and v3 in front of the audience.
 
 ## SDK status
