@@ -69,6 +69,6 @@ An idea is a GitHub issue. Its state is the single lifecycle label it carries. M
 
 - **You**: `approved`, `declined`, removing `blocked`, adding `spike` after the fact.
 - **GitHub Actions**: guards above, declined cleanup. Never runs Claude Code.
-- **Local watcher**: `building`, `done`, run-started comments, heartbeats.
+- **Local watcher** ([`watcher/`](watcher/README.md)): launching runs, `building`, `done`, run-started comments, heartbeats, run budgets.
 - **Proposal run**: `proposal`, `blocked`, `product-gap` issues.
 - **Build run**: `in-review`, `blocked`, PR, task comments.
