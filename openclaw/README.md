@@ -164,17 +164,52 @@ Plugin settings go under `plugins.entries.ld-agentcontrol.config` in the OpenCla
 
 ## Traces
 
-Each run's trace goes to LaunchDarkly observability through OpenClaw's own `diagnostics-otel` plugin, not through
-this plugin. `run_checks.sh` installs it into `.state/` and turns on trace export. Each run then exports
-`openclaw.harness.run` > `openclaw.run` > `openclaw.model.call` (plus `openclaw.tool.execution` for tool calls). The
-model-call span carries `gen_ai.operation.name`, `gen_ai.request.model` and `gen_ai.usage.*`, so LaunchDarkly's LLM
-views can read it.
+When the `openclaw-agentcontrol-tracing` flag is on for a run, the plugin exports the run to LaunchDarkly
+observability as one trace, linked to the `openclaw_agent` config, so it appears on the config's Monitoring tab next
+to the backend's agents. `tracing.ts` builds it from the plugin's hooks:
 
-`env.sh` points the exporter at LaunchDarkly's OTLP/HTTP endpoint and sets `launchdarkly.project_id` to the SDK key.
-For a non-production instance, set `LAUNCHDARKLY_OTLP_HTTP_ENDPOINT` in the env file. Without it, `env.sh` turns
-export off (`OTEL_SDK_DISABLED=true`), so the instance's SDK key never goes to the production collector.
+| Span | From / to | Carries |
+| --- | --- | --- |
+| `invoke_agent <agentId>` (root) | the run's first hook / `agent_end` | the `feature_flag` event that links the config, `launchdarkly.config.key`, `launchdarkly.variation.key`, `gen_ai.conversation.id` (the session key); `openclaw.blocked_reason` on a blocked run |
+| `chat <model>` | `model_call_started` / `model_call_ended` | `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model` (the served model), TTFT, error status |
+| `execute_tool <name>` | `before_tool_call` / `after_tool_call` | `gen_ai.tool.name`, `gen_ai.tool.call.id`; `openclaw.blocked=true` for a blocked call, `openclaw.skill` for `load_skill` |
 
-These traces are not linked to the `openclaw_agent` config; see the first item under [OpenClaw](#openclaw).
+Details:
+- **Usage is per run.** OpenClaw reports token usage once per run, in `llm_output` after the last model call. So the
+  run's total goes on the last `chat` span, marked `openclaw.usage.scope=run`. Per-trace totals are right; the split
+  between calls isn't there.
+- **The link.** The `feature_flag` event has the same attributes LaunchDarkly's tracing hooks send:
+  `feature_flag.key`, `feature_flag.provider.name`, `feature_flag.context.id`, `feature_flag.result.variationIndex`,
+  and `feature_flag.set.id` when the SDK reports the environment ID.
+- **The Monitoring tab lags.** A trace shows under **Monitor > Traces** at once, and on the config's Monitoring tab
+  some minutes later (#30). Runs whose model calls all fail, and blocked runs, show under Traces only (#31).
+- **Provider.** The plugin's tracer provider isn't registered globally, so it doesn't clash with `diagnostics-otel` or
+  another OpenTelemetry SDK. It uses `env.sh`'s `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_RESOURCE_ATTRIBUTES`
+  (`launchdarkly.project_id` set to the SDK key); `OTEL_SERVICE_NAME` replaces the default service name,
+  `openclaw-agentcontrol`. For a non-production instance, set `LAUNCHDARKLY_OTLP_HTTP_ENDPOINT`
+  in the env file. Without it, `env.sh` sets `OTEL_SDK_DISABLED=true`, which turns tracing off, so the instance's SDK
+  key never goes to the production collector.
+- **Failures.** Export batches that fail are sent as the `openclaw-trace-export-failed` metric event with the next run
+  that finishes.
+
+`setup_config.py setup` creates the flag and metric. When it creates the flag, it turns tracing on for `helper` only;
+an existing flag's targeting is left alone, and so is a rollout. To change it:
+- `python3 setup_config.py tracing all` traces every run;
+- `tracing off` traces none;
+- `tracing helper` goes back to the default;
+- `tracing` on its own prints the current mode (`custom` for targeting set some other way).
+
+`run_checks.sh` records the mode before it starts and puts it back afterwards. It uses `tracing` in two checks:
+- the `tracing` check;
+- the kill-switch check, which confirms that a blocked run is still exported.
+
+Both skip that part when the mode is `custom`. A blocked run's trace is finished in `before_agent_run`, since the run
+may end without `agent_end`. `trace_load.sh` sends traffic for the flag's guardrails. Command-line
+runs all share the context key `openclaw-local-operator`, so a percentage rollout of the flag puts every run in the same
+bucket. Roll out by `agentId` rule instead.
+
+OpenClaw's own `diagnostics-otel` stays installed with its trace export off (`"traces": false` in `run_checks.sh`).
+Turning it back on adds OpenClaw's unlinked trace alongside the plugin's, with each LLM call counted twice.
 
 ## Gaps and unexpected behavior
 
@@ -262,10 +297,14 @@ streams. To find out, edit a variation and evaluate it from a new streaming clie
 
 ### OpenClaw
 
-- **Traces can't be linked to the AgentControl config.** LaunchDarkly links a trace to a config through a
-  `feature_flag` event on a span that is active when the config is evaluated. OpenClaw's spans are never active in
-  plugin hooks: a probe in `before_agent_run`, `before_model_resolve`, `llm_input` and `agent_end` found no active
-  span. So the SDK's tracing hook has nothing to attach the event to. The tracker's metrics still reach the config.
+- **OpenClaw's own spans can't be linked to the AgentControl config.** LaunchDarkly links a trace to a config through
+  a `feature_flag` event. `diagnostics-otel` builds its spans from OpenClaw's diagnostic events after the fact, and
+  none of them is ever active in a plugin hook. A probe in `before_agent_run`, `before_model_resolve`, `llm_input` and
+  `agent_end` found no active span. Its tracer provider is also private, and the trace IDs plugins see aren't the
+  exported ones.
+  - Workaround: the plugin exports its own trace (see [Traces](#traces)). Details in #28.
+- **Token usage arrives once per run.** `llm_input` and `llm_output` fire once per run, not per model call, and
+  `llm_output` has the run's total. No public hook gives a single call's usage.
 - **Only models in OpenClaw's catalog are accepted.** `openai/gpt-4o-mini` was rejected as a "retired or
   noncanonical model ref". A variation's model has to be one both the LaunchDarkly project and OpenClaw's catalog
   know, such as `gpt-5.4-mini`.

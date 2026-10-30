@@ -2,7 +2,8 @@
 # Runs the checks in PLAN.md against real OpenClaw agents and the openclaw_agent AgentControl config.
 #
 #   ./run_checks.sh            all checks
-#   ./run_checks.sh baseline   one check: baseline, targeting, tools, live, skills, skillchange, servedmodel, killswitch
+#   ./run_checks.sh baseline   one check: baseline, targeting, tools, live, skills, skillchange, servedmodel, killswitch,
+#                              tracing
 #
 # OpenClaw runs against a throwaway state directory (.state/), never ~/.openclaw. Each run is a real model call.
 set -uo pipefail
@@ -13,6 +14,7 @@ STATE="$OPENCLAW_STATE_DIR"
 LOG="$STATE/decisions.jsonl"
 OPENCLAW="./node_modules/.bin/openclaw"
 FAILURES=0
+TRACING_BEFORE=""
 
 pass() { echo "  PASS  $1"; }
 fail() { echo "  FAIL  $1"; FAILURES=$((FAILURES + 1)); }
@@ -21,6 +23,8 @@ prepare() {
   [ -x "$OPENCLAW" ] || npm install --silent
   [ -d plugin/node_modules ] || (cd plugin && npm install --silent)
   python3 setup_config.py setup > /dev/null || exit 1
+  # The tracing flag's mode before the checks (helper, all, off or custom). Checks that change it put it back.
+  TRACING_BEFORE=$(python3 setup_config.py tracing) || exit 1
   if [ ! -f "$STATE/openclaw.json" ]; then
     mkdir -p "$STATE/workspace-main" "$STATE/workspace-helper"
     cat > "$STATE/openclaw.json" <<EOF
@@ -47,18 +51,21 @@ EOF
     "$OPENCLAW" plugins install --link ./plugin --force --accept-capabilities > /dev/null 2>&1 \
       || { echo "plugin install failed"; exit 1; }
   fi
-  # Traces go to LaunchDarkly through OpenClaw's own exporter; env.sh sets the endpoint and project.
+  # Traces come from this plugin (tracing.ts), linked to the config. OpenClaw's diagnostics-otel stays installed with
+  # its trace export off, so each run is one trace; setting "traces": true brings back its unlinked trace as well.
+  # Pinned to the OpenClaw version in package.json: a newer diagnostics-otel refuses to load on an older runtime.
   if [ ! -d "$STATE/extensions/diagnostics-otel" ]; then
-    "$OPENCLAW" plugins install clawhub:@openclaw/diagnostics-otel > /dev/null 2>&1 \
+    "$OPENCLAW" plugins install clawhub:@openclaw/diagnostics-otel@2026.10.3 > /dev/null 2>&1 \
       || { echo "diagnostics-otel install failed"; exit 1; }
   fi
   "$OPENCLAW" config set diagnostics '{"enabled": true, "otel": {"enabled": true, "protocol": "http/protobuf",
-    "serviceName": "openclaw-agentcontrol", "traces": true, "metrics": false, "logs": false}}' --strict-json \
+    "serviceName": "openclaw-agentcontrol", "traces": false, "metrics": false, "logs": false}}' --strict-json \
     > /dev/null 2>&1 || { echo "diagnostics config failed"; exit 1; }
 }
 
 # Puts LaunchDarkly and OpenClaw back the way the checks expect, including after a failed or interrupted run.
 restore() {
+  case "$TRACING_BEFORE" in helper|all|off) python3 setup_config.py tracing "$TRACING_BEFORE" > /dev/null ;; esac
   python3 setup_config.py reset > /dev/null
   python3 setup_config.py on > /dev/null
   "$OPENCLAW" config set plugins.entries.ld-agentcontrol.config.hideTools true > /dev/null 2>&1
@@ -76,7 +83,7 @@ run_agent() {
 
 # field <name>: reads a value from the last run. reply, model, tools (comma-separated tool calls), tool_failures,
 # blocked_tools, offered_tools, blocked_run, variation, skills_loaded, blocked_skills (skills as key@version),
-# served_models (served model:source:mismatch).
+# served_models (served model:source:mismatch), trace_id (empty when the run wasn't traced).
 field() {
   python3 - "$1" "$STATE/last.json" "$LOG" <<'EOF'
 import json, sys
@@ -103,6 +110,7 @@ values = {
         f'{m["served"]}:{m["source"]}:{"mismatch" if m["mismatch"] else "match"}'
         for r in log if r["event"] == "finished" for m in r.get("servedModels", [])
     ),
+    "trace_id": next((r["traceId"] for r in log if r["event"] == "trace_exported"), ""),
 }
 print(values[name])
 EOF
@@ -239,19 +247,54 @@ check_servedmodel() {
   all_served "$served" "gpt-5.4-nano-*:response:match" && pass "helper served by $served" || fail "helper served_models=$served"
 }
 
+# tracing_changeable: whether a check may change the tracing flag, which it can put back only from a known mode.
+tracing_changeable() {
+  case "$TRACING_BEFORE" in helper|all|off) return 0 ;; esac
+  echo "  SKIP  openclaw-agentcontrol-tracing has custom targeting ($TRACING_BEFORE); not changing it"
+  return 1
+}
+
 check_killswitch() {
-  echo "8. Kill switch: turning the config off blocks runs"
+  echo "8. Kill switch: turning the config off blocks runs, and the blocked run is still traced"
+  local traced=false
+  if tracing_changeable; then python3 setup_config.py tracing all > /dev/null; traced=true; fi
   python3 setup_config.py off > /dev/null
   if retry_until '[ "$(field blocked_run)" = config_disabled ]' "Say hello in five words."; then
     pass "run blocked (exit $EXIT_CODE): $(field reply | cut -c1-80)"
+    if [ "$traced" = true ]; then
+      [ -n "$(field trace_id)" ] && pass "the blocked run's trace was exported: $(field trace_id)" \
+        || fail "the blocked run wasn't traced"
+    fi
   else
     fail "run wasn't blocked: $(field reply | cut -c1-80)"
   fi
   python3 setup_config.py on > /dev/null
+  [ "$traced" = true ] && python3 setup_config.py tracing "$TRACING_BEFORE" > /dev/null
+  return 0
+}
+
+check_tracing() {
+  echo "9. Tracing: openclaw-agentcontrol-tracing decides which runs are exported as linked traces"
+  tracing_changeable || return 0
+  python3 setup_config.py tracing helper > /dev/null
+  run_agent helper "Say hello in five words."
+  local trace_id
+  trace_id=$(field trace_id)
+  [ -n "$trace_id" ] && pass "helper's run was traced: $trace_id" || fail "helper's run wasn't traced"
+  run_agent main "Say hello in five words."
+  [ -z "$(field trace_id)" ] && pass "main's run wasn't traced" || fail "main's run was traced: $(field trace_id)"
+  python3 setup_config.py tracing all > /dev/null
+  if retry_until '[ -n "$(field trace_id)" ]' "Use the exec tool to run: ls"; then
+    pass "after turning tracing on for all, main's run was traced: $(field trace_id)"
+  else
+    fail "main's run still isn't traced after turning tracing on for all"
+  fi
+  python3 setup_config.py tracing "$TRACING_BEFORE" > /dev/null
+  echo "  Check the traces on the openclaw_agent Monitoring tab. They show up there some minutes after Traces."
 }
 
 prepare
-for check in "${@:-baseline targeting tools live skills skillchange servedmodel killswitch}"; do
+for check in "${@:-baseline targeting tools live skills skillchange servedmodel killswitch tracing}"; do
   for name in $check; do "check_$name"; done
 done
 echo

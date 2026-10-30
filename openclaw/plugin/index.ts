@@ -7,6 +7,9 @@
 // Skills pinned on the served variation are listed in the system prompt by name and description. The agent loads
 // one with the plugin's load_skill tool, which returns the exact pinned version from the SDK's skill store. Nothing
 // is written to disk.
+//
+// When the openclaw-agentcontrol-tracing flag is on for a run, the run is also exported as a trace linked to the
+// config (see tracing.ts).
 import { appendFileSync } from "node:fs";
 
 import {
@@ -15,12 +18,13 @@ import {
   setSkillStore,
   skillRefs,
 } from "@launchdarkly/ai-server/experimental";
-import { init, type LDClient, type LDContext } from "@launchdarkly/node-server-sdk";
+import { init, type LDClient, type LDContext, type LDEvaluationDetail } from "@launchdarkly/node-server-sdk";
 import { initAi, type LDAIAgentConfig, type LDAIClient, type LDAIConfigTracker } from "@launchdarkly/server-sdk-ai";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "typebox";
 
 import { MISMATCH_EVENT, SERVED_EVENT, modelsMatch, servedCalls } from "./served_model.ts";
+import { runTracer, type RunTrace } from "./tracing.ts";
 
 type Settings = {
   configKey: string;
@@ -35,6 +39,10 @@ const LOAD_SKILL = "load_skill";
 // OpenClaw's Tool Search controls. They only find and describe tools, and a call made through tool_call reaches
 // before_tool_call again under the real tool's name, so the tool list is still enforced there.
 const TOOL_SEARCH_CONTROLS = new Set(["tool_search", "tool_describe", "tool_call"]);
+// Boolean flag, evaluated per run with the same context as the config: whether to export the run's trace.
+const TRACING_FLAG = "openclaw-agentcontrol-tracing";
+// Metric event: trace export batches that failed, sent with the next run that finishes.
+const EXPORT_FAILED_EVENT = "openclaw-trace-export-failed";
 
 // A skill pinned on the served variation. Its content stays in the SDK's skill store until load_skill asks for it.
 type PinnedSkill = { key: string; version: number; name: string; description: string };
@@ -43,9 +51,10 @@ type PinnedSkill = { key: string; version: number; name: string; description: st
 // settings unless failClosed is set.
 type RunState =
   | { kind: "unavailable" }
-  | { kind: "disabled" }
+  | { kind: "disabled"; context: LDContext; trace?: RunTrace }
   | {
       kind: "served";
+      trace?: RunTrace;
       config: LDAIAgentConfig;
       context: LDContext;
       tracker: LDAIConfigTracker;
@@ -145,6 +154,8 @@ export default definePluginEntry({
     const settings = readSettings(api.pluginConfig);
     const runs = new Map<string, Promise<RunState>>();
     let client: Promise<{ ld: LDClient; ai: LDAIClient; skills?: FDv2SkillStore } | undefined> | undefined;
+    // Set by the SDK on each evaluation. Linking a trace works without it, but LaunchDarkly's hooks send it.
+    let environmentId: string | undefined;
 
     const log = (record: Record<string, unknown>) => {
       if (!settings.decisionLog) return;
@@ -171,6 +182,13 @@ export default definePluginEntry({
           streamUri: process.env.LAUNCHDARKLY_STREAM_URI || undefined,
           eventsUri: process.env.LAUNCHDARKLY_EVENTS_URI || undefined,
           stream: baseUri === undefined,
+          hooks: [{
+            getMetadata: () => ({ name: "ld-agentcontrol environment ID" }),
+            afterEvaluation(hookContext, data) {
+              if (hookContext.environmentId) environmentId = hookContext.environmentId;
+              return data;
+            },
+          }],
         });
         try {
           await ld.waitForInitialization({ timeout: settings.initTimeoutSeconds });
@@ -199,12 +217,11 @@ export default definePluginEntry({
 
     // The AI SDK's config object leaves out a variation's skill pins, so they're read from the raw variation.
     const pinnedSkills = async (
-      sdk: { ld: LDClient; skills?: FDv2SkillStore },
-      context: LDContext,
+      sdk: { skills?: FDv2SkillStore },
+      raw: LDEvaluationDetail["value"] | undefined,
       ctx: HookContext,
     ): Promise<PinnedSkill[]> => {
       if (!sdk.skills) return [];
-      const raw = await sdk.ld.variation(settings.configKey, context, null);
       let refs: { key: string; version: number }[] = [];
       try {
         refs = raw && typeof raw === "object" ? skillRefs(raw) : [];
@@ -224,7 +241,35 @@ export default definePluginEntry({
       return pinned;
     };
 
-    const evaluate = async (ctx: HookContext): Promise<RunState> => {
+    const tracingOn = async (ld: LDClient, context: LDContext): Promise<boolean> =>
+      runTracer() !== null && (await ld.variation(TRACING_FLAG, context, false)) === true;
+
+    // Starts the run's trace. The root span starts at the run's first hook, which isn't before_agent_run on the
+    // embedded runner. `detail` is the config's raw evaluation, for the variation index LaunchDarkly's hooks put on
+    // the feature_flag event.
+    const startTrace = (
+      context: LDContext,
+      ctx: HookContext,
+      startTime: number,
+      detail: LDEvaluationDetail,
+    ): RunTrace | undefined => {
+      const tracer = runTracer();
+      if (!tracer) return undefined;
+      const id = ctx.runId ?? ctx.sessionKey ?? "unknown";
+      const meta = (detail.value as { _ldMeta?: { variationKey?: string } } | null)?._ldMeta;
+      const run = tracer.start({ runId: id, agentId: ctx.agentId ?? "main", conversationId: ctx.sessionKey ?? id, startTime });
+      run.linkConfig({
+        configKey: settings.configKey,
+        variationKey: meta?.variationKey ?? "",
+        variationIndex: detail.variationIndex ?? undefined,
+        // buildContext makes a single user context, whose canonical key is its key.
+        contextId: String((context as { key: string }).key),
+        environmentId,
+      });
+      return run;
+    };
+
+    const evaluate = async (ctx: HookContext, startTime: number): Promise<RunState> => {
       const sdk = await connect();
       if (!sdk) {
         log({ event: "served", runId: ctx.runId, agentId: ctx.agentId, state: "unavailable" });
@@ -242,12 +287,16 @@ export default definePluginEntry({
           return { kind: "unavailable" };
         }
         log({ event: "served", runId: ctx.runId, agentId: ctx.agentId, state: "disabled" });
-        return { kind: "disabled" };
+        const trace = (await tracingOn(sdk.ld, context)) ? startTrace(context, ctx, startTime, detail) : undefined;
+        return { kind: "disabled", context, trace };
       }
       const tracker = config.createTracker();
       const { variationKey } = tracker.getTrackData();
       const tools = allowedTools(config, settings.toolPrefix);
-      const skills = await pinnedSkills(sdk, context, ctx);
+      // One raw evaluation serves both the skill pins and the trace link, so neither costs an extra one.
+      const traced = await tracingOn(sdk.ld, context);
+      const detail = sdk.skills || traced ? await sdk.ld.variationDetail(settings.configKey, context, null) : undefined;
+      const skills = await pinnedSkills(sdk, detail?.value, ctx);
       log({
         event: "served",
         runId: ctx.runId,
@@ -260,6 +309,7 @@ export default definePluginEntry({
       });
       return {
         kind: "served",
+        trace: traced && detail ? startTrace(context, ctx, startTime, detail) : undefined,
         config,
         context,
         tracker,
@@ -278,7 +328,7 @@ export default definePluginEntry({
       let state = runs.get(id);
       if (!state) {
         if (runs.size >= MAX_TRACKED_RUNS) runs.delete(runs.keys().next().value!);
-        state = evaluate(ctx).catch((error) => {
+        state = evaluate(ctx, Date.now()).catch((error) => {
           api.logger.warn(`ld-agentcontrol: evaluation failed: ${String(error)}`);
           return { kind: "unavailable" } as const;
         });
@@ -293,6 +343,11 @@ export default definePluginEntry({
       if (state.kind === "disabled" || (state.kind === "unavailable" && settings.failClosed)) {
         const reason = state.kind === "disabled" ? "config_disabled" : "launchdarkly_unavailable";
         log({ event: "blocked_run", runId: ctx.runId, agentId: ctx.agentId, reason });
+        // A blocked run may end without agent_end, so its trace is finished and exported here.
+        if (state.kind === "disabled" && state.trace) {
+          state.trace.blocked(reason);
+          await finishTrace(ctx.runId ?? ctx.sessionKey ?? "unknown", state.context, { success: false });
+        }
         return {
           outcome: "block",
           reason,
@@ -322,9 +377,20 @@ export default definePluginEntry({
       };
     });
 
-    // The enforcing check. It also covers runners that ignore toolsAllow.
+    // The enforcing check. It also covers runners that ignore toolsAllow. Each decision is also recorded on the trace.
     api.on("before_tool_call", async (event, ctx) => {
       const state = await runState(ctx);
+      const result = toolDecision(event, state, ctx);
+      const trace = state.kind === "unavailable" ? undefined : state.trace;
+      const pinned = event.toolName === LOAD_SKILL && result && "params" in result ? result.params : undefined;
+      const skill = pinned ? `${pinned.name}@${pinned.version}` : undefined;
+      const tool = { toolName: event.toolName, toolCallId: event.toolCallId, skill };
+      if (result && "block" in result) trace?.toolBlocked(tool);
+      else trace?.toolStarted(tool);
+      return result;
+    });
+
+    const toolDecision = (event: { toolName: string; params: Record<string, unknown> }, state: RunState, ctx: HookContext) => {
       if (event.toolName === LOAD_SKILL) return gateSkill(event.params, state, ctx);
       if (TOOL_SEARCH_CONTROLS.has(event.toolName)) return undefined;
       if (state.kind !== "served") {
@@ -342,6 +408,12 @@ export default definePluginEntry({
       state.toolCalls.push(`${settings.toolPrefix}${event.toolName}`);
       log({ event: "allowed_tool", runId: ctx.runId, agentId: ctx.agentId, tool: event.toolName, target: target(event.params) });
       return undefined;
+    };
+
+    api.on("after_tool_call", async (event, ctx) => {
+      const state = await runState({ ...ctx, runId: event.runId ?? ctx.runId });
+      if (state.kind === "unavailable") return;
+      state.trace?.toolEnded({ toolName: event.toolName, toolCallId: event.toolCallId, error: event.error });
     });
 
     // load_skill is allowed for any skill the run's variation pins, whatever its tool list says. The hook replaces
@@ -402,11 +474,22 @@ export default definePluginEntry({
       state.tokens.total += input + cacheRead + cacheWrite + output;
     });
 
+    api.on("model_call_started", async (event, ctx) => {
+      const state = await runState({ ...ctx, runId: event.runId ?? ctx.runId });
+      if (state.kind === "served") state.trace?.modelCallStarted({ provider: event.provider, model: event.model });
+    });
+
     api.on("model_call_ended", async (event, ctx) => {
       const state = await runState({ ...ctx, runId: event.runId ?? ctx.runId });
-      if (state.kind === "served" && state.firstTokenMs === undefined && event.timeToFirstByteMs !== undefined) {
+      if (state.kind !== "served") return;
+      if (state.firstTokenMs === undefined && event.timeToFirstByteMs !== undefined) {
         state.firstTokenMs = event.timeToFirstByteMs;
       }
+      state.trace?.modelCallEnded({
+        outcome: event.outcome,
+        errorCategory: event.errorCategory,
+        timeToFirstByteMs: event.timeToFirstByteMs,
+      });
     });
 
     // Records the run on the tracker and flushes, so one-shot command-line runs don't exit with events unsent.
@@ -416,6 +499,11 @@ export default definePluginEntry({
       if (!pending) return;
       runs.delete(id);
       const state = await pending;
+      // Normally a no-op: before_agent_run already finished a blocked run's trace.
+      if (state.kind === "disabled") {
+        if (state.trace) await finishTrace(id, state.context, { success: false });
+        return;
+      }
       if (state.kind !== "served") return;
       const { tracker } = state;
       if (event.durationMs !== undefined) tracker.trackDuration(event.durationMs);
@@ -426,6 +514,13 @@ export default definePluginEntry({
       else tracker.trackError();
       const sdk = await client;
       const served = reportServedModels(sdk?.ld, state, event.messages);
+      if (state.trace) {
+        await finishTrace(id, state.context, {
+          success: event.success,
+          usage: state.tokens,
+          servedModels: served.map((call) => call.served),
+        });
+      }
       log({
         event: "finished",
         runId: id,
@@ -440,6 +535,21 @@ export default definePluginEntry({
       });
       await sdk?.ld.flush();
     });
+
+    // Ends the run's spans and exports them now, since a one-shot command-line run exits right after agent_end.
+    const finishTrace = async (runId: string, context: LDContext, result: Parameters<RunTrace["finish"]>[0]) => {
+      const tracer = runTracer();
+      const traceId = tracer?.finish(runId, result);
+      if (!tracer || !traceId) return;
+      await tracer.flush();
+      log({ event: "trace_exported", runId, traceId });
+      const failures = tracer.takeExportFailures();
+      if (failures > 0) {
+        const sdk = await client;
+        sdk?.ld.track(EXPORT_FAILED_EVENT, context, { failures }, failures);
+        await sdk?.ld.flush();
+      }
+    };
 
     // Sends ai-model-served and ai-model-mismatch for each model call in this run, like the backend does per call.
     // The mismatch value is 1 when the model isn't the variation's model (or that model made more specific) and 0
@@ -464,6 +574,7 @@ export default definePluginEntry({
     };
 
     api.on("gateway_stop", async () => {
+      await runTracer()?.shutdown();
       const sdk = await client;
       sdk?.ld.close();
       await sdk?.skills?.close();
