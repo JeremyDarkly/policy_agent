@@ -50,8 +50,9 @@ EOF
   fi
   # Traces come from this plugin (tracing.ts), linked to the config. OpenClaw's diagnostics-otel stays installed with
   # its trace export off, so each run is one trace; setting "traces": true brings back its unlinked trace as well.
+  # Pinned to the OpenClaw version in package.json: a newer diagnostics-otel refuses to load on an older runtime.
   if [ ! -d "$STATE/extensions/diagnostics-otel" ]; then
-    "$OPENCLAW" plugins install clawhub:@openclaw/diagnostics-otel > /dev/null 2>&1 \
+    "$OPENCLAW" plugins install clawhub:@openclaw/diagnostics-otel@2026.10.3 > /dev/null 2>&1 \
       || { echo "diagnostics-otel install failed"; exit 1; }
   fi
   "$OPENCLAW" config set diagnostics '{"enabled": true, "otel": {"enabled": true, "protocol": "http/protobuf",
