@@ -1,0 +1,47 @@
+name: Product gap
+description: Something LaunchDarkly, an SDK, the docs or an integration should do and doesn't, found while working on an idea.
+title: "Gap: "
+labels: [product-gap]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Product area
+      options:
+        - agent-control
+        - observability
+        - evals
+        - autopilot
+        - sdk
+    validations:
+      required: true
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What was attempted
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: Include the error, status code or behavior seen.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version and date
+      description: Package or SDK version, or the date the UI behavior was seen.
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround
+      description: Leave blank if none.
+  - type: input
+    id: origin
+    attributes:
+      label: Originating issue
+      description: The idea this was found while working on, e.g. #19

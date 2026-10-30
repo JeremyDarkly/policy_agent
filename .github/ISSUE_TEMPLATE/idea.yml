@@ -1,0 +1,22 @@
+name: Idea
+description: An idea for a LaunchDarkly integration or field experiment. A proposal run picks it up.
+labels: [idea]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: Idea
+      description: What you'd want to see. A sentence is enough; links welcome. One idea per issue.
+    validations:
+      required: true
+  - type: dropdown
+    id: spike
+    attributes:
+      label: Spike allowed
+      description: May the proposal run execute code and probe the staging org? Adds the `spike` label.
+      options:
+        - "no"
+        - "yes"
+      default: 0
+    validations:
+      required: true

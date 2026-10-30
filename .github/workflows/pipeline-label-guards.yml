@@ -1,0 +1,75 @@
+name: pipeline-label-guards
+
+# Enforces the state machine in .claude/pipeline/STATE.md.
+# Never runs Claude Code; the local watcher does that.
+
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  issues: write
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const LIFECYCLE = ['idea', 'proposal', 'approved', 'building', 'in-review', 'done', 'declined'];
+            const AREAS = ['agent-control', 'observability', 'evals', 'autopilot', 'sdk'];
+
+            const issue = context.payload.issue;
+            const number = issue.number;
+            const labels = () => issue.labels.map(l => l.name);
+            const has = name => labels().includes(name);
+
+            async function remove(name) {
+              if (!has(name)) return;
+              await github.rest.issues.removeLabel({ ...context.repo, issue_number: number, name }).catch(() => {});
+              issue.labels = issue.labels.filter(l => l.name !== name);
+            }
+            async function add(name) {
+              if (has(name)) return;
+              await github.rest.issues.addLabels({ ...context.repo, issue_number: number, labels: [name] });
+              issue.labels.push({ name });
+            }
+            async function comment(body) {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: number, body });
+            }
+
+            // --- opened: read the issue-form dropdowns and translate them into labels
+            if (context.payload.action === 'opened') {
+              const body = issue.body || '';
+              // Idea form: "### Spike allowed\n\nyes"
+              if (/### Spike allowed\s*\n+\s*yes\b/i.test(body)) await add('spike');
+              // Gap form: "### Product area\n\n<area>"
+              const m = body.match(/### Product area\s*\n+\s*([a-z-]+)/i);
+              if (m && AREAS.includes(m[1].toLowerCase())) await add(m[1].toLowerCase());
+              return;
+            }
+
+            // --- labeled
+            const added = context.payload.label.name;
+
+            if (added === 'approved') {
+              const wasProposal = has('proposal');
+              if (!wasProposal) {
+                await remove('approved');
+                await comment('`approved` only applies to an issue with a finished proposal (`proposal` label). Removed it.');
+                return;
+              }
+            }
+
+            // One lifecycle label at a time: the newest wins.
+            if (LIFECYCLE.includes(added)) {
+              for (const name of LIFECYCLE) {
+                if (name !== added) await remove(name);
+              }
+            }
+
+            // Anything leaving the active path drops blocked.
+            if (added === 'done' || added === 'declined') {
+              await remove('blocked');
+            }
