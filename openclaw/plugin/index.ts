@@ -18,7 +18,7 @@ import {
   setSkillStore,
   skillRefs,
 } from "@launchdarkly/ai-server/experimental";
-import { init, type LDClient, type LDContext } from "@launchdarkly/node-server-sdk";
+import { init, type LDClient, type LDContext, type LDEvaluationDetail } from "@launchdarkly/node-server-sdk";
 import { initAi, type LDAIAgentConfig, type LDAIClient, type LDAIConfigTracker } from "@launchdarkly/server-sdk-ai";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "typebox";
@@ -217,12 +217,11 @@ export default definePluginEntry({
 
     // The AI SDK's config object leaves out a variation's skill pins, so they're read from the raw variation.
     const pinnedSkills = async (
-      sdk: { ld: LDClient; skills?: FDv2SkillStore },
-      context: LDContext,
+      sdk: { skills?: FDv2SkillStore },
+      raw: LDEvaluationDetail["value"] | undefined,
       ctx: HookContext,
     ): Promise<PinnedSkill[]> => {
       if (!sdk.skills) return [];
-      const raw = await sdk.ld.variation(settings.configKey, context, null);
       let refs: { key: string; version: number }[] = [];
       try {
         refs = raw && typeof raw === "object" ? skillRefs(raw) : [];
@@ -242,19 +241,21 @@ export default definePluginEntry({
       return pinned;
     };
 
-    // Starts the run's trace when the tracing flag is on for this context. The root span starts at the run's first
-    // hook, which isn't before_agent_run on the embedded runner.
-    const startTrace = async (
-      ld: LDClient,
+    const tracingOn = async (ld: LDClient, context: LDContext): Promise<boolean> =>
+      runTracer() !== null && (await ld.variation(TRACING_FLAG, context, false)) === true;
+
+    // Starts the run's trace. The root span starts at the run's first hook, which isn't before_agent_run on the
+    // embedded runner. `detail` is the config's raw evaluation, for the variation index LaunchDarkly's hooks put on
+    // the feature_flag event.
+    const startTrace = (
       context: LDContext,
       ctx: HookContext,
       startTime: number,
-    ): Promise<RunTrace | undefined> => {
+      detail: LDEvaluationDetail,
+    ): RunTrace | undefined => {
       const tracer = runTracer();
-      if (!tracer || !(await ld.variation(TRACING_FLAG, context, false))) return undefined;
+      if (!tracer) return undefined;
       const id = ctx.runId ?? ctx.sessionKey ?? "unknown";
-      // One more evaluation, for the variation index that LaunchDarkly's hooks put on the feature_flag event.
-      const detail = await ld.variationDetail(settings.configKey, context, null);
       const meta = (detail.value as { _ldMeta?: { variationKey?: string } } | null)?._ldMeta;
       const run = tracer.start({ runId: id, agentId: ctx.agentId ?? "main", conversationId: ctx.sessionKey ?? id, startTime });
       run.linkConfig({
@@ -286,12 +287,16 @@ export default definePluginEntry({
           return { kind: "unavailable" };
         }
         log({ event: "served", runId: ctx.runId, agentId: ctx.agentId, state: "disabled" });
-        return { kind: "disabled", context, trace: await startTrace(sdk.ld, context, ctx, startTime) };
+        const trace = (await tracingOn(sdk.ld, context)) ? startTrace(context, ctx, startTime, detail) : undefined;
+        return { kind: "disabled", context, trace };
       }
       const tracker = config.createTracker();
       const { variationKey } = tracker.getTrackData();
       const tools = allowedTools(config, settings.toolPrefix);
-      const skills = await pinnedSkills(sdk, context, ctx);
+      // One raw evaluation serves both the skill pins and the trace link, so neither costs an extra one.
+      const traced = await tracingOn(sdk.ld, context);
+      const detail = sdk.skills || traced ? await sdk.ld.variationDetail(settings.configKey, context, null) : undefined;
+      const skills = await pinnedSkills(sdk, detail?.value, ctx);
       log({
         event: "served",
         runId: ctx.runId,
@@ -304,7 +309,7 @@ export default definePluginEntry({
       });
       return {
         kind: "served",
-        trace: await startTrace(sdk.ld, context, ctx, startTime),
+        trace: traced && detail ? startTrace(context, ctx, startTime, detail) : undefined,
         config,
         context,
         tracker,
@@ -338,7 +343,11 @@ export default definePluginEntry({
       if (state.kind === "disabled" || (state.kind === "unavailable" && settings.failClosed)) {
         const reason = state.kind === "disabled" ? "config_disabled" : "launchdarkly_unavailable";
         log({ event: "blocked_run", runId: ctx.runId, agentId: ctx.agentId, reason });
-        if (state.kind === "disabled") state.trace?.blocked(reason);
+        // A blocked run may end without agent_end, so its trace is finished and exported here.
+        if (state.kind === "disabled" && state.trace) {
+          state.trace.blocked(reason);
+          await finishTrace(ctx.runId ?? ctx.sessionKey ?? "unknown", state.context, { success: false });
+        }
         return {
           outcome: "block",
           reason,
@@ -490,6 +499,7 @@ export default definePluginEntry({
       if (!pending) return;
       runs.delete(id);
       const state = await pending;
+      // Normally a no-op: before_agent_run already finished a blocked run's trace.
       if (state.kind === "disabled") {
         if (state.trace) await finishTrace(id, state.context, { success: false });
         return;
@@ -534,7 +544,11 @@ export default definePluginEntry({
       await tracer.flush();
       log({ event: "trace_exported", runId, traceId });
       const failures = tracer.takeExportFailures();
-      if (failures > 0) (await client)?.ld.track(EXPORT_FAILED_EVENT, context, { failures }, failures);
+      if (failures > 0) {
+        const sdk = await client;
+        sdk?.ld.track(EXPORT_FAILED_EVENT, context, { failures }, failures);
+        await sdk?.ld.flush();
+      }
     };
 
     // Sends ai-model-served and ai-model-mismatch for each model call in this run, like the backend does per call.

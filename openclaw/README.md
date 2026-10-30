@@ -185,18 +185,26 @@ Details:
   some minutes later (#30). Runs whose model calls all fail, and blocked runs, show under Traces only (#31).
 - **Provider.** The plugin's tracer provider isn't registered globally, so it doesn't clash with `diagnostics-otel` or
   another OpenTelemetry SDK. It uses `env.sh`'s `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_RESOURCE_ATTRIBUTES`
-  (`launchdarkly.project_id` set to the SDK key). For a non-production instance, set `LAUNCHDARKLY_OTLP_HTTP_ENDPOINT`
+  (`launchdarkly.project_id` set to the SDK key); `OTEL_SERVICE_NAME` replaces the default service name,
+  `openclaw-agentcontrol`. For a non-production instance, set `LAUNCHDARKLY_OTLP_HTTP_ENDPOINT`
   in the env file. Without it, `env.sh` sets `OTEL_SDK_DISABLED=true`, which turns tracing off, so the instance's SDK
   key never goes to the production collector.
 - **Failures.** Export batches that fail are sent as the `openclaw-trace-export-failed` metric event with the next run
   that finishes.
 
-`setup_config.py setup` creates the flag and metric, and turns tracing on for `helper` only:
+`setup_config.py setup` creates the flag and metric. When it creates the flag, it turns tracing on for `helper` only;
+an existing flag's targeting is left alone, and so is a rollout. To change it:
 - `python3 setup_config.py tracing all` traces every run;
 - `tracing off` traces none;
-- `tracing helper` goes back to the default.
+- `tracing helper` goes back to the default;
+- `tracing` on its own prints the current mode (`custom` for targeting set some other way).
 
-The `tracing` check in `run_checks.sh` uses these. `trace_load.sh` sends traffic for the flag's guardrails. Command-line
+`run_checks.sh` records the mode before it starts and puts it back afterwards. It uses `tracing` in two checks:
+- the `tracing` check;
+- the kill-switch check, which confirms that a blocked run is still exported.
+
+Both skip that part when the mode is `custom`. A blocked run's trace is finished in `before_agent_run`, since the run
+may end without `agent_end`. `trace_load.sh` sends traffic for the flag's guardrails. Command-line
 runs all share the context key `openclaw-local-operator`, so a percentage rollout of the flag puts every run in the same
 bucket. Roll out by `agentId` rule instead.
 

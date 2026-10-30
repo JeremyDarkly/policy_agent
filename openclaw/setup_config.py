@@ -9,6 +9,7 @@ Usage:
     python openclaw/setup_config.py skill openclaw-house-style v2   # publish a skill version and re-pin it
     python openclaw/setup_config.py reset                 # put every variation's instructions and skill pins back
     python openclaw/setup_config.py tracing helper | all | off   # who gets openclaw-agentcontrol-tracing
+    python openclaw/setup_config.py tracing               # print the current mode: helper, all, off or custom
 
 Settings come from the env file named by ENV_FILE_NAME (default `.env.staging-org`) at the repo root:
 LAUNCHDARKLY_ACCESS_TOKEN, LAUNCHDARKLY_PROJECT_KEY, LAUNCHDARKLY_ENVIRONMENT and, for a non-production instance,
@@ -66,7 +67,7 @@ LOCKED_DOWN_AGENTS = ["helper"]
 RULE_DESCRIPTION = "Locked-down OpenClaw agents"
 
 # Boolean flag the plugin evaluates per run, with the config's context: whether to export the run's trace. `setup`
-# creates it with tracing for TRACED_AGENTS only; `tracing` changes that.
+# creates it with tracing for TRACED_AGENTS only, and leaves an existing flag's targeting alone; `tracing` changes it.
 TRACING_FLAG = "openclaw-agentcontrol-tracing"
 TRACED_AGENTS = ["helper"]
 TRACING_RULE_DESCRIPTION = "Traced OpenClaw agents"
@@ -271,9 +272,11 @@ def ensure_targeting(serve: str | None = None) -> int:
     return len(instructions)
 
 
-def ensure_tracing_flag() -> dict[str, Any]:
+def ensure_tracing_flag() -> tuple[dict[str, Any], bool]:
+    """The tracing flag, and whether this call created it."""
     status, flag = ld_api("GET", f"/{TRACING_FLAG}?env={ENVIRONMENT}", base=FLAGS_API)
-    if status == 404:
+    created = status == 404
+    if created:
         check(*ld_api("POST", "", {
             "key": TRACING_FLAG,
             "name": "OpenClaw AgentControl tracing",
@@ -284,13 +287,40 @@ def ensure_tracing_flag() -> dict[str, Any]:
         }, base=FLAGS_API), f"create flag {TRACING_FLAG}")
         print(f"  created flag {TRACING_FLAG}")
         status, flag = ld_api("GET", f"/{TRACING_FLAG}?env={ENVIRONMENT}", base=FLAGS_API)
-    return check(status, flag, f"get flag {TRACING_FLAG}")
+    return check(status, flag, f"get flag {TRACING_FLAG}"), created
+
+
+def tracing_variations(flag: dict[str, Any]) -> tuple[str, str]:
+    """The IDs of the flag's true and false variations, whatever order they're in."""
+    by_value = {variation.get("value"): variation["_id"] for variation in flag["variations"]}
+    if True not in by_value or False not in by_value:
+        raise SystemExit(f"{TRACING_FLAG} needs a true and a false variation")
+    return by_value[True], by_value[False]
+
+
+def tracing_mode(flag: dict[str, Any]) -> str:
+    """`helper`, `all` or `off` when the flag's targeting is one `set_tracing` makes; `custom` otherwise."""
+    env = flag["environments"][ENVIRONMENT]
+    ids = [variation["_id"] for variation in flag["variations"]]
+    traced, untraced = tracing_variations(flag)
+    fallthrough = env.get("fallthrough", {}).get("variation")
+    rules = env.get("rules", [])
+    if not env.get("on"):
+        return "off"
+    if not rules and fallthrough is not None and ids[fallthrough] == traced:
+        return "all"
+    if (fallthrough is not None and ids[fallthrough] == untraced and len(rules) == 1
+            and rules[0].get("description") == TRACING_RULE_DESCRIPTION
+            and ids[rules[0].get("variation", -1)] == traced
+            and sorted(rules[0]["clauses"][0]["values"]) == sorted(TRACED_AGENTS)):
+        return "helper"
+    return "custom"
 
 
 def set_tracing(who: str) -> None:
     """`helper`: trace TRACED_AGENTS only (what `setup` and `reset` leave). `all`: trace every run. `off`: none."""
-    flag = ensure_tracing_flag()
-    traced, untraced = (variation["_id"] for variation in flag["variations"])
+    flag, _ = ensure_tracing_flag()
+    traced, untraced = tracing_variations(flag)
     env = flag["environments"][ENVIRONMENT]
     rules = [rule for rule in env.get("rules", []) if rule.get("description") == TRACING_RULE_DESCRIPTION]
     instructions: list[dict[str, Any]] = [{"kind": "removeRule", "ruleId": rule["_id"]} for rule in rules]
@@ -375,7 +405,8 @@ def main() -> int:
         ensure_variations(ensure_config(), tool_versions, skill_versions)
         print(f"  targeting in {ENVIRONMENT}: {ensure_targeting()} change(s)")
         ensure_export_metric()
-        set_tracing("helper")
+        if ensure_tracing_flag()[1]:
+            set_tracing("helper")
         status()
     elif command == "status":
         status()
@@ -389,10 +420,11 @@ def main() -> int:
         print(f"{key} from {folder} is pinned wherever {key} is used")
     elif command == "reset":
         ensure_variations(ensure_config(), ensure_tools(), ensure_skills(), quiet=True)
-        set_tracing("helper")
-        print("instructions, skill pins and tracing restored")
+        print("instructions and skill pins restored")
     elif command == "tracing" and len(sys.argv) == 3 and sys.argv[2] in ("helper", "all", "off"):
         set_tracing(sys.argv[2])
+    elif command == "tracing" and len(sys.argv) == 2:
+        print(tracing_mode(ensure_tracing_flag()[0]))
     else:
         print(__doc__)
         return 1

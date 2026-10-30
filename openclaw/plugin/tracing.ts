@@ -12,8 +12,8 @@
 // span, marked openclaw.usage.scope=run.
 //
 // The provider is never registered globally, so it can't clash with diagnostics-otel or another OpenTelemetry SDK.
-// It reads OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_RESOURCE_ATTRIBUTES (env.sh sets both), and OTEL_SDK_DISABLED=true
-// turns it off.
+// It reads OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_RESOURCE_ATTRIBUTES (env.sh sets both), OTEL_SERVICE_NAME overrides
+// the default service name, and OTEL_SDK_DISABLED=true turns it off.
 import { SpanKind, SpanStatusCode, context, trace, type Attributes, type Span } from "@opentelemetry/api";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { detectResources, envDetector, resourceFromAttributes } from "@opentelemetry/resources";
@@ -33,14 +33,16 @@ export type ConfigLink = {
   environmentId?: string;
 };
 
-type ModelCall = { span: Span; endTime?: number };
+type ModelCall = { span: Span; endTime?: number; failed?: boolean };
 
 export class RunTrace {
   readonly root: Span;
   private readonly tracer: ReturnType<BasicTracerProvider["getTracer"]>;
   private readonly info: RunInfo;
   private readonly calls: ModelCall[] = [];
+  // Keyed by toolCallId, or by `<toolName>#<n>` for calls without one, so same-named calls don't replace each other.
   private readonly tools = new Map<string, Span>();
+  private toolSeq = 0;
   private readonly timeout: NodeJS.Timeout;
   private finished = false;
 
@@ -117,6 +119,7 @@ export class RunTrace {
     open.endTime = call.endTime ?? Date.now();
     if (call.timeToFirstByteMs !== undefined) open.span.setAttribute("openclaw.ttfb_ms", call.timeToFirstByteMs);
     if (call.outcome === "error") {
+      open.failed = true;
       open.span.setAttribute("error.type", call.errorCategory ?? "error");
       open.span.setStatus({ code: SpanStatusCode.ERROR, message: call.errorCategory });
     }
@@ -129,7 +132,7 @@ export class RunTrace {
       ...(tool.toolCallId ? { "gen_ai.tool.call.id": tool.toolCallId } : {}),
       ...(tool.skill ? { "openclaw.skill": tool.skill } : {}),
     }, tool.startTime);
-    this.tools.set(tool.toolCallId ?? tool.toolName, span);
+    this.tools.set(tool.toolCallId ?? `${tool.toolName}#${this.toolSeq++}`, span);
   }
 
   toolBlocked(tool: { toolName: string; toolCallId?: string; skill?: string }): void {
@@ -144,9 +147,10 @@ export class RunTrace {
   }
 
   toolEnded(tool: { toolName: string; toolCallId?: string; error?: string; endTime?: number }): void {
-    const key = tool.toolCallId ?? tool.toolName;
-    const span = this.tools.get(key);
-    if (!span) return;
+    // Without an ID, the oldest open call of that tool is the one ending.
+    const key = tool.toolCallId ?? [...this.tools.keys()].find((k) => k.startsWith(`${tool.toolName}#`));
+    const span = key === undefined ? undefined : this.tools.get(key);
+    if (key === undefined || !span) return;
     this.tools.delete(key);
     if (tool.error) {
       span.setAttribute("error.type", "tool_error");
@@ -155,6 +159,7 @@ export class RunTrace {
     span.end(tool.endTime);
   }
 
+  // servedModels has one entry per model call that didn't fail, in order, as servedCalls() returns them.
   finish(result: {
     success: boolean;
     usage?: { input: number; output: number };
@@ -165,7 +170,7 @@ export class RunTrace {
     this.finished = true;
     clearTimeout(this.timeout);
     const endTime = result.endTime ?? Date.now();
-    this.calls.forEach((call, index) => {
+    this.calls.filter((call) => !call.failed).forEach((call, index) => {
       const served = result.servedModels?.[index];
       if (served) call.span.setAttribute("gen_ai.response.model", served);
     });
@@ -203,7 +208,8 @@ export class RunTracer {
       forceFlush: () => exporter.forceFlush?.() ?? Promise.resolve(),
     };
     this.provider = new BasicTracerProvider({
-      resource: detectResources({ detectors: [envDetector] }).merge(resourceFromAttributes({ "service.name": SERVICE_NAME })),
+      // The environment's attributes win, so OTEL_SERVICE_NAME can replace the default service name.
+      resource: resourceFromAttributes({ "service.name": SERVICE_NAME }).merge(detectResources({ detectors: [envDetector] })),
       spanProcessors: [new BatchSpanProcessor(reporting)],
     });
     this.tracer = this.provider.getTracer("ld-agentcontrol");
