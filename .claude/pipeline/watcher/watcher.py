@@ -40,9 +40,9 @@ GH_USER = os.environ.get("IDEAFACTORY_GH_USER", "JeremyDarkly")
 HOME = Path(os.environ.get("IDEAFACTORY_HOME", Path.home() / ".ideafactory"))
 # The main checkout (even when this script sits in a worktree). Run worktrees
 # are created under its .claude/worktrees/.
-CHECKOUT = Path(os.environ.get("IDEAFACTORY_CHECKOUT") or subprocess.run(
+CHECKOUT = Path(os.environ.get("IDEAFACTORY_CHECKOUT") or Path(subprocess.run(
     ["git", "-C", str(HERE), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-    check=True, capture_output=True, text=True).stdout.strip()).parent
+    check=True, capture_output=True, text=True).stdout.strip()).parent)
 BASE = os.environ.get("IDEAFACTORY_BASE", "origin/main")
 
 ENABLE_PROPOSALS = os.environ.get("IDEAFACTORY_PROPOSALS", "0") == "1"
