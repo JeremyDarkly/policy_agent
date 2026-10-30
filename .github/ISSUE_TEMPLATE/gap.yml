@@ -1,7 +1,7 @@
 name: Product gap
 description: Something LaunchDarkly, an SDK, the docs or an integration should do and doesn't, found while working on an idea.
 title: "Gap: "
-labels: [product-gap]
+labels: [product-gap, IdeaFactory]
 body:
   - type: dropdown
     id: area

@@ -122,10 +122,22 @@ def gh_json(*args):
     return json.loads(gh(*args) or "null")
 
 
+PIPELINE_LABEL = "IdeaFactory"
+_tagged = set()
+
+
+def tag(number):
+    """Every issue the watcher touches carries the pipeline label (once per poll)."""
+    if number not in _tagged:
+        gh("issue", "edit", str(number), "--repo", REPO, "--add-label", PIPELINE_LABEL)
+        _tagged.add(number)
+
+
 def comment(number, body, dry):
     if dry:
         log(f"[dry-run] comment on #{number}: {body.splitlines()[0]}")
         return
+    tag(number)
     gh("issue", "comment", str(number), "--repo", REPO, "--body", body)
 
 
@@ -133,7 +145,8 @@ def set_label(number, add, remove, dry):
     if dry:
         log(f"[dry-run] #{number}: +{add} -{remove}")
         return
-    args = ["issue", "edit", str(number), "--repo", REPO, "--add-label", add]
+    _tagged.add(number)
+    args = ["issue", "edit", str(number), "--repo", REPO, "--add-label", add, "--add-label", PIPELINE_LABEL]
     for name in remove:
         args += ["--remove-label", name]
     gh(*args)

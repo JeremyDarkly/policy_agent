@@ -86,7 +86,7 @@ If you are stopped by the budget, the last checkpoint is the proposal. Make each
 
 A product gap is something LaunchDarkly, its SDKs, docs or integrations should do and does not, or does differently from what the docs say. Examples from this repo: the AI SDK drops skill pins from `agentConfig()`; stored datasets can only be created in the UI; evaluations cannot be read back through the API.
 
-Record every gap you hit in the Gaps found section with: what you tried, what happened, the version and date, and the workaround if any. When the proposal is complete, file each gap as its own issue titled `Gap: <one line>`, labeled `product-gap` plus the product area (`agent-control`, `observability`, `evals`, `autopilot`, `sdk`), with the body from the Gaps found entry and a link back to this issue. Do not file a gap you did not reproduce yourself.
+Record every gap you hit in the Gaps found section with: what you tried, what happened, the version and date, and the workaround if any. When the proposal is complete, file each gap as its own issue titled `Gap: <one line>`, labeled `product-gap`, `IdeaFactory` and the product area (`agent-control`, `observability`, `evals`, `autopilot`, `sdk`), with the body from the Gaps found entry and a link back to this issue. Do not file a gap you did not reproduce yourself.
 
 ## 9. Scope and phasing
 

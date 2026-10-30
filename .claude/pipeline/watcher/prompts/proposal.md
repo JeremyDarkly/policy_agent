@@ -6,4 +6,4 @@ Do not commit or push anything. Spike code goes under `/tmp`. The repo is public
 
 Checkpoint into the issue body as the guidelines describe; the watcher enforces the wall-clock and spend limits and will stop you. Finish with the label change and comment in guidelines section 7, step 7. If you are blocked on a question, comment it, add `blocked`, and stop.
 
-`gh` is already authenticated as the pipeline account through `GH_TOKEN`.
+`gh` is already authenticated as the pipeline account through `GH_TOKEN`. Every issue you create or edit carries the `IdeaFactory` label; add it if it is missing.

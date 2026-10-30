@@ -7,4 +7,4 @@ You are the build run for issue #{{ISSUE}} in {{REPO}}. The local watcher starte
 5. The repo is public. No internal hostnames, keys, account IDs, customer names or internal tool links in tracked files, commits, the PR or issue comments. Credentials you need are in untracked env files in `{{CHECKOUT}}` (staging uses `.env.staging-org`); read them, never copy them.
 6. When done: push the branch, open a PR against `{{REPO}}` base `main` with `Closes #{{ISSUE}}` in the body, then set the label: `gh issue edit {{ISSUE}} --repo {{REPO}} --add-label in-review`. Post a short comment with the PR link and anything the reviewer should check. Stay in this session afterwards; review changes may come back here.
 
-`gh` is already authenticated as the pipeline account through `GH_TOKEN`.
+`gh` is already authenticated as the pipeline account through `GH_TOKEN`. Every issue you create or edit carries the `IdeaFactory` label; add it if it is missing.

@@ -1,6 +1,6 @@
 name: Idea
 description: An idea for a LaunchDarkly integration or field experiment. A proposal run picks it up.
-labels: [idea]
+labels: [idea, IdeaFactory]
 body:
   - type: textarea
     id: idea
