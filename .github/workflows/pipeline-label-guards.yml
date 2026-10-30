@@ -39,6 +39,10 @@ jobs:
               await github.rest.issues.createComment({ ...context.repo, issue_number: number, body });
             }
 
+            // Every issue in the pipeline carries IdeaFactory.
+            const PIPELINE = [...LIFECYCLE, 'blocked', 'spike', 'product-gap'];
+            if (labels().some(name => PIPELINE.includes(name))) await add('IdeaFactory');
+
             // --- opened: read the issue-form dropdowns and translate them into labels
             if (context.payload.action === 'opened') {
               const body = issue.body || '';

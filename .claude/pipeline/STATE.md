@@ -20,6 +20,7 @@ An idea is a GitHub issue. Its state is the single lifecycle label it carries. M
 | --- | --- | --- |
 | `spike` | Proposal run may execute code and probe staging | Slack poller from the `spike:` prefix, the issue template, or you |
 | `blocked` | A run stopped on a question; it resumes when you answer and remove the label | Proposal or build run |
+| `IdeaFactory` | The issue is in this pipeline; never removed | Issue templates, the guard workflow (on any pipeline label), the watcher, and runs on issues they file |
 | `product-gap` | This issue is a `Gap:` report, not an idea | Gap template or the proposal run |
 | `agent-control`, `observability`, `evals`, `autopilot`, `sdk` | Product area, mainly on gap issues | Gap template or the proposal run |
 
@@ -64,11 +65,12 @@ An idea is a GitHub issue. Its state is the single lifecycle label it carries. M
 - `declined` from any state removes the lifecycle label it replaces.
 - An idea filed through the issue template with "Spike allowed: yes" gets the `spike` label added.
 - A gap filed through the gap template gets its product-area label added from the dropdown.
+- An issue that carries any lifecycle label, `blocked`, `spike` or `product-gap` gets `IdeaFactory` added.
 
 ## Who touches what
 
 - **You**: `approved`, `declined`, removing `blocked`, adding `spike` after the fact.
 - **GitHub Actions**: guards above, declined cleanup. Never runs Claude Code.
-- **Local watcher**: `building`, `done`, run-started comments, heartbeats.
+- **Local watcher** ([`watcher/`](watcher/README.md)): launching runs, `building`, `done`, run-started comments, heartbeats, run budgets.
 - **Proposal run**: `proposal`, `blocked`, `product-gap` issues.
 - **Build run**: `in-review`, `blocked`, PR, task comments.
