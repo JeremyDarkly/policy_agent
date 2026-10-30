@@ -175,7 +175,8 @@ def run_workflow(
     evaluation_results_store: dict | None = None,
     brand_trackers_store: dict | None = None,
     evaluate_agent: str | None = None,
-    guardrail_enabled: bool = True
+    guardrail_enabled: bool = True,
+    online_judges: bool = True,
 ) -> dict:
     """Run the workflow with a user message.
 
@@ -187,6 +188,7 @@ def run_workflow(
         brand_trackers_store: Optional shared dict for storing brand voice trackers
         evaluate_agent: Optional agent to evaluate (stops workflow after this agent)
         guardrail_enabled: Whether to use guardrails (default True)
+        online_judges: Whether brand voice starts its background judges (default True)
 
     Returns:
         Final state after workflow execution
@@ -216,7 +218,8 @@ def run_workflow(
             evaluation_results_store,
             brand_trackers_store,
             evaluate_agent,
-            guardrail_enabled
+            guardrail_enabled,
+            online_judges,
         )
 
         workflow = create_workflow()

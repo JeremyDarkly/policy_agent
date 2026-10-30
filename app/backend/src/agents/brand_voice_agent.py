@@ -593,30 +593,15 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
         except Exception as e:
             print(f"  Failed to send cost metric: {e}")
         
-        # Handle both sync and async contexts
-        try:
-            # Try to get the current event loop
-            loop = asyncio.get_running_loop()
-            # If we have a running loop, use create_task
-            asyncio.create_task(
-                evaluate_brand_voice_async(
-                    original_query=original_query,
-                    account_context=account_context,
-                    brand_voice_output=final_response,
-                    user_context=user_context,
-                    brand_tracker=model_invoker,  # Pass full ModelInvoker (contains tracker + context)
-                    request_id=request_id,
-                    results_store=results_store
-                )
-            )
-        except RuntimeError:
-            # No running loop - we're in a sync context
-            # Run evaluation in a background thread to avoid blocking
-            import contextvars
-            import threading
-
-            def run_eval_in_thread():
-                asyncio.run(
+        # Callers that run their own judges (CI e2e evals) turn these off.
+        # Only the judge start is skipped: brand_cost_usd above is used below.
+        if state.get("online_judges", True):
+            # Handle both sync and async contexts
+            try:
+                # Try to get the current event loop
+                loop = asyncio.get_running_loop()
+                # If we have a running loop, use create_task
+                asyncio.create_task(
                     evaluate_brand_voice_async(
                         original_query=original_query,
                         account_context=account_context,
@@ -627,14 +612,34 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
                         results_store=results_store
                     )
                 )
+            except RuntimeError:
+                # No running loop - we're in a sync context
+                # Run evaluation in a background thread to avoid blocking
+                import contextvars
+                import threading
 
-            # Run in a copy of this context so the judges' spans join the request's
-            # trace (and keep its conversation ID) instead of starting new traces
-            eval_context = contextvars.copy_context()
-            thread = threading.Thread(target=eval_context.run, args=(run_eval_in_thread,), daemon=True)
-            thread.start()
+                def run_eval_in_thread():
+                    asyncio.run(
+                        evaluate_brand_voice_async(
+                            original_query=original_query,
+                            account_context=account_context,
+                            brand_voice_output=final_response,
+                            user_context=user_context,
+                            brand_tracker=model_invoker,  # Pass full ModelInvoker (contains tracker + context)
+                            request_id=request_id,
+                            results_store=results_store
+                        )
+                    )
 
-        print(f"  Background evaluation started (evaluating against account context) - request_id: {request_id[:8] if request_id else 'N/A'}...")
+                # Run in a copy of this context so the judges' spans join the request's
+                # trace (and keep its conversation ID) instead of starting new traces
+                eval_context = contextvars.copy_context()
+                thread = threading.Thread(target=eval_context.run, args=(run_eval_in_thread,), daemon=True)
+                thread.start()
+
+            print(f"  Background evaluation started (evaluating against account context) - request_id: {request_id[:8] if request_id else 'N/A'}...")
+        else:
+            print("  Background evaluation skipped (onlineJudges=false)")
     except Exception as e:
         # Never let evaluation errors affect the main flow
         print(f"  Failed to start background evaluation: {e}")
@@ -642,6 +647,8 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
     # Add debug info to agent_data (store full responses for hallucination debugging)
     brand_data = {
         "model": model_id,  # Track which model was used
+        # Variation LaunchDarkly served; the fallback's when the guardrail intervened
+        "variation": agent_data.get("fallback_variation", variation_name),
         "served_model": served_model_id,  # Model the API reported
         "response": final_response,  # Full response for evaluation (test suite expects this field)
         "original_specialist_response": specialist_response[:500] + "..." if len(specialist_response) > 500 else specialist_response,
