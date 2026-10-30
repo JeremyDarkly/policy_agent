@@ -2,7 +2,8 @@
 # Runs the checks in PLAN.md against real OpenClaw agents and the openclaw_agent AgentControl config.
 #
 #   ./run_checks.sh            all checks
-#   ./run_checks.sh baseline   one check: baseline, targeting, tools, live, skills, skillchange, servedmodel, killswitch
+#   ./run_checks.sh baseline   one check: baseline, targeting, tools, live, skills, skillchange, servedmodel, killswitch,
+#                              tracing
 #
 # OpenClaw runs against a throwaway state directory (.state/), never ~/.openclaw. Each run is a real model call.
 set -uo pipefail
@@ -47,13 +48,14 @@ EOF
     "$OPENCLAW" plugins install --link ./plugin --force --accept-capabilities > /dev/null 2>&1 \
       || { echo "plugin install failed"; exit 1; }
   fi
-  # Traces go to LaunchDarkly through OpenClaw's own exporter; env.sh sets the endpoint and project.
+  # Traces come from this plugin (tracing.ts), linked to the config. OpenClaw's diagnostics-otel stays installed with
+  # its trace export off, so each run is one trace; setting "traces": true brings back its unlinked trace as well.
   if [ ! -d "$STATE/extensions/diagnostics-otel" ]; then
     "$OPENCLAW" plugins install clawhub:@openclaw/diagnostics-otel > /dev/null 2>&1 \
       || { echo "diagnostics-otel install failed"; exit 1; }
   fi
   "$OPENCLAW" config set diagnostics '{"enabled": true, "otel": {"enabled": true, "protocol": "http/protobuf",
-    "serviceName": "openclaw-agentcontrol", "traces": true, "metrics": false, "logs": false}}' --strict-json \
+    "serviceName": "openclaw-agentcontrol", "traces": false, "metrics": false, "logs": false}}' --strict-json \
     > /dev/null 2>&1 || { echo "diagnostics config failed"; exit 1; }
 }
 
@@ -76,7 +78,7 @@ run_agent() {
 
 # field <name>: reads a value from the last run. reply, model, tools (comma-separated tool calls), tool_failures,
 # blocked_tools, offered_tools, blocked_run, variation, skills_loaded, blocked_skills (skills as key@version),
-# served_models (served model:source:mismatch).
+# served_models (served model:source:mismatch), trace_id (empty when the run wasn't traced).
 field() {
   python3 - "$1" "$STATE/last.json" "$LOG" <<'EOF'
 import json, sys
@@ -103,6 +105,7 @@ values = {
         f'{m["served"]}:{m["source"]}:{"mismatch" if m["mismatch"] else "match"}'
         for r in log if r["event"] == "finished" for m in r.get("servedModels", [])
     ),
+    "trace_id": next((r["traceId"] for r in log if r["event"] == "trace_exported"), ""),
 }
 print(values[name])
 EOF
@@ -250,8 +253,27 @@ check_killswitch() {
   python3 setup_config.py on > /dev/null
 }
 
+check_tracing() {
+  echo "9. Tracing: openclaw-agentcontrol-tracing decides which runs are exported as linked traces"
+  python3 setup_config.py tracing helper > /dev/null
+  run_agent helper "Say hello in five words."
+  local trace_id
+  trace_id=$(field trace_id)
+  [ -n "$trace_id" ] && pass "helper's run was traced: $trace_id" || fail "helper's run wasn't traced"
+  run_agent main "Say hello in five words."
+  [ -z "$(field trace_id)" ] && pass "main's run wasn't traced" || fail "main's run was traced: $(field trace_id)"
+  python3 setup_config.py tracing all > /dev/null
+  if retry_until '[ -n "$(field trace_id)" ]' "Use the exec tool to run: ls"; then
+    pass "after turning tracing on for all, main's run was traced: $(field trace_id)"
+  else
+    fail "main's run still isn't traced after turning tracing on for all"
+  fi
+  python3 setup_config.py tracing helper > /dev/null
+  echo "  Check the traces on the openclaw_agent Monitoring tab. They show up there some minutes after Traces."
+}
+
 prepare
-for check in "${@:-baseline targeting tools live skills skillchange servedmodel killswitch}"; do
+for check in "${@:-baseline targeting tools live skills skillchange servedmodel killswitch tracing}"; do
   for name in $check; do "check_$name"; done
 done
 echo
