@@ -35,6 +35,16 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
+# install.sh writes the settings it puts in the launchd plist to settings.env
+# next to the installed copy, so running that copy by hand uses the same
+# settings as the job. Variables already in the environment win.
+SETTINGS_FILE = HERE / "settings.env"
+if SETTINGS_FILE.exists():
+    for line in SETTINGS_FILE.read_text().splitlines():
+        name, sep, value = line.partition("=")
+        if sep and name and not name.startswith("#"):
+            os.environ.setdefault(name, value)
+
 REPO = os.environ.get("IDEAFACTORY_REPO", "JeremyDarkly/policy_agent")
 GH_USER = os.environ.get("IDEAFACTORY_GH_USER", "JeremyDarkly")
 HOME = Path(os.environ.get("IDEAFACTORY_HOME", Path.home() / ".ideafactory"))
