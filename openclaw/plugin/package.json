@@ -10,9 +10,9 @@
     ]
   },
   "dependencies": {
-    "@launchdarkly/ai-server": "0.4.0",
+    "@launchdarkly/ai-server": "1.0.0",
     "@launchdarkly/node-server-sdk": "^9.14.4",
-    "@launchdarkly/server-sdk-ai": "^2.0.13",
+    "@launchdarkly/server-sdk-ai": "^2.0.16",
     "@opentelemetry/api": "1.9.1",
     "@opentelemetry/exporter-trace-otlp-proto": "0.219.0",
     "@opentelemetry/resources": "2.8.0",

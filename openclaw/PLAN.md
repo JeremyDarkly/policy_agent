@@ -75,6 +75,9 @@ Then confirm that tokens, duration and success appear on the config's Monitoring
 All five checks pass with OpenClaw 2026.10.3 and `@launchdarkly/server-sdk-ai` 2.0.13. The config's metrics show
 every run, split by variation, with tokens, duration, time to first token and success.
 
+On 2026-10-31, after the move to `@launchdarkly/ai-server` 1.0.0 and `@launchdarkly/server-sdk-ai` 2.0.16, all nine
+checks in `run_checks.sh` pass, including skills, skill change, kill switch and tracing.
+
 What the build settled:
 
 - **Model names.** LaunchDarkly's provider name in lower case plus its model name gives OpenClaw's reference, such as
