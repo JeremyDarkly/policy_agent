@@ -21,7 +21,7 @@ CHECKOUT="$(dirname "$(git -C "$SRC" rev-parse --path-format=absolute --git-comm
 
 if [[ "${1:-}" == "uninstall" ]]; then
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-  rm -f "$PLIST"
+  rm -f "$PLIST" "$IDEAFACTORY_HOME/bin/settings.env"
   echo "Removed $LABEL. State and logs are still in $IDEAFACTORY_HOME."
   exit 0
 fi
@@ -32,13 +32,18 @@ cp "$SRC/watcher.py" "$IDEAFACTORY_HOME/bin/"
 cp -R "$SRC/prompts" "$IDEAFACTORY_HOME/bin/"
 
 env_entries=""
+# The same settings go to settings.env, which watcher.py reads when run by hand.
+settings="IDEAFACTORY_HOME=$IDEAFACTORY_HOME"$'\n'"IDEAFACTORY_CHECKOUT=$CHECKOUT"$'\n'
 for name in IDEAFACTORY_REPO IDEAFACTORY_GH_USER IDEAFACTORY_BASE IDEAFACTORY_PROPOSALS \
             IDEAFACTORY_MAX_LIVE IDEAFACTORY_BUDGET_USD IDEAFACTORY_WALL_HOURS \
-            IDEAFACTORY_HEARTBEAT_HOURS IDEAFACTORY_PERMISSION_MODE IDEAFACTORY_MODEL CLAUDE_BIN; do
+            IDEAFACTORY_BUILD_WALL_HOURS IDEAFACTORY_HEARTBEAT_HOURS \
+            IDEAFACTORY_PERMISSION_MODE IDEAFACTORY_MODEL CLAUDE_BIN; do
   if [[ -n "${!name:-}" ]]; then
     env_entries+="    <key>$name</key><string>${!name}</string>"$'\n'
+    settings+="$name=${!name}"$'\n'
   fi
 done
+printf '%s' "$settings" > "$IDEAFACTORY_HOME/bin/settings.env"
 
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
