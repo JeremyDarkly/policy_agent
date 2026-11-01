@@ -143,6 +143,7 @@ def get_model_invoker(
     skip_span_annotation: bool = False,
     default_config: Optional[Any] = None,
     override_guardrail_enabled: Optional[bool] = None,
+    evaluated: Optional[Tuple[dict[str, Any], Any, Any]] = None,
 ) -> Tuple[ModelInvoker, dict[str, Any]]:
     """Get a ModelInvoker with tracking and full config (including messages) from LaunchDarkly.
 
@@ -152,23 +153,30 @@ def get_model_invoker(
         skip_span_annotation: If True, skip all span annotation (for background threads like judges)
         default_config: Default AIConfig to use if LaunchDarkly is unavailable or flag doesn't exist
         override_guardrail_enabled: If provided, override guardrail setting (True=enable, False=disable, None=use config)
+        evaluated: An already-evaluated (config, tracker, ld_context) from
+            ``get_ld_client().get_ai_config``. When given, the AI Config is not
+            evaluated again, so a caller that inspects the config first (the
+            triage node checks for a TypeSafe variation) evaluates it once.
 
     Returns:
         Tuple of (ModelInvoker instance with tracking, full config dict including messages)
     """
-    ld_client = get_ld_client()
-    # Get config once from LaunchDarkly (now returns context too)
-    # Convert AIConfig to dict if provided
-    default_config_dict = None
-    if default_config:
-        # default_config may be a plain dict (already in the shape get_ai_config
-        # expects) or an SDK AIConfig object that needs converting.
-        if isinstance(default_config, dict):
-            default_config_dict = default_config
-        else:
-            default_config_dict = ld_client._ai_config_to_dict(default_config)
+    if evaluated is not None:
+        config, tracker, ld_context = evaluated
+    else:
+        ld_client = get_ld_client()
+        # Get config once from LaunchDarkly (now returns context too)
+        # Convert AIConfig to dict if provided
+        default_config_dict = None
+        if default_config:
+            # default_config may be a plain dict (already in the shape get_ai_config
+            # expects) or an SDK AIConfig object that needs converting.
+            if isinstance(default_config, dict):
+                default_config_dict = default_config
+            else:
+                default_config_dict = ld_client._ai_config_to_dict(default_config)
 
-    config, tracker, ld_context = ld_client.get_ai_config(config_key, context, default_config_dict)
+        config, tracker, ld_context = ld_client.get_ai_config(config_key, context, default_config_dict)
 
     # Create LLM directly from the config (don't call get_llm_from_config which would retrieve again)
     provider = config.get("provider") or "bedrock"

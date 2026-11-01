@@ -181,6 +181,8 @@ def calculate_model_cost(model_id: str, input_tokens: int, output_tokens: int) -
         "sonnet-4": {"input": 0.003, "output": 0.015},
         "llama4-maverick": {"input": 0.00024, "output": 0.00097},
         "nova-pro": {"input": 0.0008, "output": 0.0032},
+        # TypeSafe Jev: the model catalog's costPerInputToken (4.2e-08); output is not billed
+        "jev": {"input": 0.000042, "output": 0.0},
     }
 
     # Determine model type from model_id
@@ -195,6 +197,8 @@ def calculate_model_cost(model_id: str, input_tokens: int, output_tokens: int) -
         rates = pricing["llama4-maverick"]
     elif "nova-pro" in model_lower:
         rates = pricing["nova-pro"]
+    elif "jev" in model_lower:
+        rates = pricing["jev"]
     else:
         # Unknown model, return 0
         print(f"  Unknown model for cost calculation: {model_id}")
