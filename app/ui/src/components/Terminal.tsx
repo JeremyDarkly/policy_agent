@@ -86,8 +86,9 @@ function shortenModel(id?: string): string {
   if (!id) return '';
   // us.anthropic.claude-haiku-4-5-20251001-v1:0  →  claude-haiku-4-5
   // meta.llama4-maverick-...                      →  llama4-maverick
+  // jev-1.14.0 (TypeSafe Jev)                      →  jev-1.14.0
   const m = id.match(
-    /(claude-[a-z0-9-]+?(?:-\d-\d)?|llama[\d.\-a-z]*?(?:-[a-z]+)?|nova-[a-z]+|gpt-[\d.\-a-z]+|mistral-[a-z0-9-]+)/i
+    /(claude-[a-z0-9-]+?(?:-\d-\d)?|llama[\d.\-a-z]*?(?:-[a-z]+)?|nova-[a-z]+|gpt-[\d.\-a-z]+|mistral-[a-z0-9-]+|jev-[\d.]*\d)/i
   );
   let name = m ? m[1] : id.split(/[.:/]/).pop() || id;
   name = name.replace(/-\d{8}.*$/, '').replace(/-v\d+(:\d+)?$/i, '');
@@ -110,6 +111,8 @@ function fmtTokens(input?: number, output?: number): string {
 
 function fmtCost(cents?: number): string {
   if (cents == null) return '';
+  // Jev triage costs ~0.0024¢, which 2 decimals would show as 0.00¢
+  if (cents > 0 && cents < 0.01) return `${cents.toFixed(4)}¢`;
   if (cents < 1) return `${cents.toFixed(2)}¢`;
   if (cents < 100) return `${cents.toFixed(1)}¢`;
   return `$${(cents / 100).toFixed(2)}`;

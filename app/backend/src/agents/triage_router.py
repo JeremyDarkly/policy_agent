@@ -282,7 +282,7 @@ def triage_node(state: AgentState) -> dict[str, Any]:
         print(
             f"  Triage agent cost: {triage_cost_cents:.4f}¢ (${triage_cost_usd:.6f}) "
             f"[in={tokens['input']}, out={tokens['output']}, "
-            f"model={model_id.split(':')[0].split('.')[-1]}]"
+            f"model={model_id if 'jev' in model_id.lower() else model_id.split(':')[0].split('.')[-1]}]"
         )
         print(f"  Triage agent duration: {duration_ms}ms")
     except Exception as e:
