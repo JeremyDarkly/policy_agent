@@ -158,6 +158,19 @@ def test_request_is_built_from_the_variation(monkeypatch, tracker, events):
     assert requests[0].headers["Authorization"] == "Bearer test-key"
 
 
+def test_criteria_are_sent_in_criteria_order(monkeypatch, events):
+    sorted_criteria = dict(sorted(CRITERIA.items()))  # as LaunchDarkly stores them
+    custom = {**JEV_CONFIG["model"]["custom"], "criteria": sorted_criteria, "criteria_order": list(CRITERIA)}
+    config = {**JEV_CONFIG, "model": {**JEV_CONFIG["model"], "custom": custom}}
+    monkeypatch.setattr(triage_router, "_evaluate_triage_config", lambda uc: (config, NoOpTracker(), object()))
+    requests = mock_http(monkeypatch, answer_with("account_question", 0.95))
+    run()
+    import json
+
+    sent = json.loads(requests[0].content)["questions"]["route"]["criteria"]
+    assert list(sent) == list(CRITERIA)
+
+
 def test_low_confidence_reroutes_to_scheduler(monkeypatch, tracker, events):
     mock_http(monkeypatch, answer_with("account_question", 0.65))
     result = run()

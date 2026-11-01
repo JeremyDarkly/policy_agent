@@ -55,6 +55,10 @@ def _jev_triage(config: dict[str, Any], query: str, user_context: dict[str, Any]
     criteria = custom.get("criteria")
     if not isinstance(criteria, dict) or not criteria:
         raise ValueError("Jev variation has no model.custom.criteria")
+    # LaunchDarkly stores JSON objects with sorted keys, so the variation lists
+    # the option order separately. Jev leans toward the first option.
+    order = [k for k in (custom.get("criteria_order") or []) if k in criteria]
+    criteria = {k: criteria[k] for k in [*order, *(k for k in criteria if k not in order)]}
     domain = str(user_context.get("domain", "") or "")
     response = system_one(
         model=model_config.get("name", ""),
