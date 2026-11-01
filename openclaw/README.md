@@ -220,7 +220,8 @@ Found on 2026-10-13 while building and testing this, and on 2026-10-14 while add
 - `@launchdarkly/ai-server` 0.4.0, for its experimental skills module only
 - the LaunchDarkly REST API with `LD-API-Version: beta`
 
-Recheck these after upgrading any of them.
+The SDK gaps were rechecked on 2026-10-31 after upgrading to `@launchdarkly/ai-server` 1.0.0 and
+`@launchdarkly/server-sdk-ai` 2.0.16. Each one says what changed. Recheck these after upgrading any of them.
 
 ### LaunchDarkly AI SDK
 
@@ -229,12 +230,17 @@ Recheck these after upgrading any of them.
   - Workaround: when a config comes back disabled, the plugin calls the base SDK's `variationDetail()` and treats
     an `ERROR` reason as "LaunchDarkly unavailable".
   - This is the only place the plugin goes outside the AI SDK. It sends one extra evaluation event when it runs.
+  - Still the case in `server-sdk-ai` 2.0.16. `ai-server` 1.0.0 doesn't close it either: its `inspectConfig()`
+    returns `{ enabled: false, config: null, meta: null }` for a bad key, a network failure and a disabled config
+    alike.
 - **Metrics have to be recorded by hand when the app doesn't make the model call.** `trackMetricsOf` wraps a call
   the app makes itself. OpenClaw makes the calls here.
   - Workaround: the plugin adds up the usage from OpenClaw's `llm_output` hook and calls `trackTokens`,
     `trackDuration` and the other track methods itself.
   - OpenClaw reports cached prompt tokens separately, and the plugin counts them as input. Before that fix, a run
     showed 358 input tokens against a total of 27,888.
+  - Still the case in 1.0.0. `@launchdarkly/ai-server` records metrics only for calls its own handlers make, and
+    has no public tracker for a call made elsewhere, so the plugin keeps `server-sdk-ai`'s tracker for this.
 
 ### LaunchDarkly skills
 
@@ -244,13 +250,24 @@ Recheck these after upgrading any of them.
     `skillRefs()`.
   - This is a second step outside the AI SDK, after the missing-config check. It sends one more evaluation event
     per run.
-- **Skill content needs a second, experimental SDK.** Only `@launchdarkly/ai-server/experimental` can fetch skills
-  (`FDv2SkillStore`, `getSkillResult`). Its docs call it experimental, so the plugin pins it to exactly 0.4.0.
-  - It opens its own connection to LaunchDarkly, alongside the main SDK's.
+  - Still the case in `server-sdk-ai` 2.0.16. `ai-server` 1.0.0 can read the pins without the base SDK
+    (`inspectConfig()` then `skillRefs()`), and `configSkills()` follows a config's pins as they change. The plugin
+    still needs `server-sdk-ai` for the tracker, and the raw evaluation also gives the trace its variation index, so
+    it keeps the raw `variationDetail()`.
+- **Skill content needs a second SDK.** Only `@launchdarkly/ai-server` can fetch skills (`LaunchDarklySkillStore`,
+  `getSkillResult`).
+  - **Closed in 1.0.0:** skills are no longer experimental. They're exported from the package root, and their names
+    change only in a major release. The plugin now pins `@launchdarkly/ai-server` 1.0.0 and imports from the root.
+    `FDv2SkillStore` was renamed `LaunchDarklySkillStore`; the old name remains as a deprecated alias. Up to 0.5.0
+    it was only in `@launchdarkly/ai-server/experimental`, which the plugin pinned to exactly 0.4.0.
+  - It's still a second SDK alongside `server-sdk-ai`, and it opens its own connection to LaunchDarkly, alongside
+    the main SDK's.
   - Its `mode` takes `"stream"` or `"poll"`. It throws on `"streaming"` or `"polling"`.
   - Delivery worked in both modes on the non-production instance, unlike flag streaming (see below).
 - **Skill use isn't recorded on the tracker.** The 2.0.13 tracker has no skill events, so skill loads appear only in
   the plugin's decision log, not in LaunchDarkly's metrics.
+  - Still the case in 2.0.16 and in `ai-server` 1.0.0, whose docs say skills emit no LaunchDarkly telemetry. The one
+    exception is `configSkills()`, which sends a single SDK usage event.
 
 ### LaunchDarkly REST API
 

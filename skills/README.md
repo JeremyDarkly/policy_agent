@@ -61,6 +61,8 @@ the skills as well. Do that after a rehearsal, so the live demo publishes v1, v2
 
 ## SDK status
 
-Skill content is read over the REST API (`SKILL_SOURCE = "auto"` falls back to it). The released server SDK already
-carries each variation's pinned `skills` references in its payload, which is what the notebook reads. The SDK's own
-skills API (`get_skill`, `write_skills`, `watch_skills`) isn't released yet. Once it is, set `SKILL_SOURCE = "sdk"`.
+The notebook pins `launchdarkly-ai-server` 1.0.0, which has the skills API (`LaunchDarklySkillStore`, `get_skill`,
+`write_skills`, `watch_skills`) in the package root. With `SKILL_SOURCE = "auto"`, skill content comes from the SDK's
+skill store, and the notebook falls back to the REST API when that store doesn't answer within 10 seconds. Set
+`SKILL_SOURCE = "sdk"` to fail instead of falling back. The pinned `skills` references are read from the served
+variation in the server SDK's payload.

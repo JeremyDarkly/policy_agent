@@ -41,7 +41,7 @@ Runs use `--permission-mode auto`.
 .claude/pipeline/watcher/install.sh
 ```
 
-This copies `watcher.py` and `prompts/` to `~/.ideafactory/bin`, so the job does not depend on which branch the checkout is on. Run it again after changing either. Settings are environment variables; export any of these before running `install.sh` and they are written into the plist:
+This copies `watcher.py` and `prompts/` to `~/.ideafactory/bin`, so the job does not depend on which branch the checkout is on. Run it again after changing either. Settings are environment variables; export any of these before running `install.sh` and they are written into the plist and into `~/.ideafactory/bin/settings.env`. The installed `watcher.py` reads `settings.env` when you run it by hand, so the commands below use the same settings as the job; a variable set in your shell overrides it. Every install rewrites both files, so export the settings you want each time you reinstall:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |

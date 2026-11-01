@@ -41,15 +41,17 @@ from ldclient.config import Config
 from launchdarkly_ai_langchain_agents import create_langchain_agents_handler
 from launchdarkly_ai_langchain_messages import create_langchain_messages_handler
 from launchdarkly_ai_server.judge_scoring import numeric_score, parse_judge_response
-from launchdarkly_ai_server import ProviderHandler, create_handler, shutdown
-from launchdarkly_ai_server.experimental.evaluations import (
+from launchdarkly_ai_server import (
     AIConfig,
     DatasetRow,
     EvalTool,
     EvaluationsError,
     Judge,
+    ProviderHandler,
     Scorer,
+    create_handler,
     init_evaluations,
+    shutdown,
 )
 
 EVALS_DIR = Path(__file__).resolve().parent

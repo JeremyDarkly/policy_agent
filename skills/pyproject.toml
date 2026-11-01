@@ -4,8 +4,8 @@ version = "0.1.0"
 description = "Agent Skills demo for the ToggleBank agents: author, attach, resolve and evaluate skills with LaunchDarkly"
 requires-python = ">=3.12"
 dependencies = [
-  "launchdarkly-ai-server @ git+https://github.com/launchdarkly/python-ai-sdk.git@main#subdirectory=packages/client",
-  "launchdarkly-ai-openai-messages @ git+https://github.com/launchdarkly/python-ai-sdk.git@main#subdirectory=packages/openai-messages",
+  "launchdarkly-ai-server==1.0.0",
+  "launchdarkly-ai-openai-messages==1.0.0",
   "launchdarkly-server-sdk>=9.0",
   "python-dotenv>=1.0",
 ]

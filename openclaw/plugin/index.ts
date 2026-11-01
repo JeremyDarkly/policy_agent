@@ -13,11 +13,11 @@
 import { appendFileSync } from "node:fs";
 
 import {
-  FDv2SkillStore,
+  LaunchDarklySkillStore,
   getSkillResult,
   setSkillStore,
   skillRefs,
-} from "@launchdarkly/ai-server/experimental";
+} from "@launchdarkly/ai-server";
 import { init, type LDClient, type LDContext, type LDEvaluationDetail } from "@launchdarkly/node-server-sdk";
 import { initAi, type LDAIAgentConfig, type LDAIClient, type LDAIConfigTracker } from "@launchdarkly/server-sdk-ai";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
@@ -153,7 +153,7 @@ export default definePluginEntry({
   register(api) {
     const settings = readSettings(api.pluginConfig);
     const runs = new Map<string, Promise<RunState>>();
-    let client: Promise<{ ld: LDClient; ai: LDAIClient; skills?: FDv2SkillStore } | undefined> | undefined;
+    let client: Promise<{ ld: LDClient; ai: LDAIClient; skills?: LaunchDarklySkillStore } | undefined> | undefined;
     // Set by the SDK on each evaluation. Linking a trace works without it, but LaunchDarkly's hooks send it.
     let environmentId: string | undefined;
 
@@ -196,9 +196,9 @@ export default definePluginEntry({
           api.logger.warn(`ld-agentcontrol: LaunchDarkly did not initialize: ${String(error)}`);
           return undefined;
         }
-        // Skill content comes from a separate store in the newer AI SDK's experimental module. A store that doesn't
-        // answer leaves runs without skills; the config itself still applies.
-        let skills: FDv2SkillStore | undefined = new FDv2SkillStore(sdkKey, {
+        // Skill content comes from a separate store in the newer AI SDK, @launchdarkly/ai-server. A store that
+        // doesn't answer leaves runs without skills; the config itself still applies.
+        let skills: LaunchDarklySkillStore | undefined = new LaunchDarklySkillStore(sdkKey, {
           mode: baseUri === undefined ? "stream" : "poll",
           baseUri,
           streamUri: process.env.LAUNCHDARKLY_STREAM_URI || undefined,
@@ -217,7 +217,7 @@ export default definePluginEntry({
 
     // The AI SDK's config object leaves out a variation's skill pins, so they're read from the raw variation.
     const pinnedSkills = async (
-      sdk: { skills?: FDv2SkillStore },
+      sdk: { skills?: LaunchDarklySkillStore },
       raw: LDEvaluationDetail["value"] | undefined,
       ctx: HookContext,
     ): Promise<PinnedSkill[]> => {

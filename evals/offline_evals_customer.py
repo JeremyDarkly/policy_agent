@@ -230,9 +230,10 @@ if RUN["first_eval"]:
 # %% [markdown]
 # ## Step 5: Score rows with scorers and LaunchDarkly judges
 #
-# - **`Scorer`**: a local function `(row, output)` that returns a bool or a number from 0 to 1. `row` is the dataset
-#   row, with its `input`, `expected_output`, `variables` and `metadata`. Its `threshold` defaults to `1.0`, which is
-#   what a boolean scorer wants. Set `success_direction="lower_is_better"` for a score that counts something unwanted.
+# - **`Scorer`**: a local function `(row, output)` that returns a number from 0 to 1. A yes/no scorer returns `1.0` or
+#   `0.0`; a bool is rejected as an invalid score. `row` is the dataset row, with its `input`, `expected_output`,
+#   `variables` and `metadata`. Its `threshold` defaults to `1.0`, which is what a yes/no scorer wants. Set
+#   `success_direction="lower_is_better"` for a score that counts something unwanted.
 # - **`Judge`**: a judge config in LaunchDarkly, referenced by key. Its `threshold` defaults to `0.5`. Its success
 #   direction (`isInverted`) is set on the config, not in code.
 # - **`pass_rate_threshold`**: the share of rows you want to pass. LaunchDarkly stores it with the run, but the run
@@ -243,13 +244,13 @@ if RUN["first_eval"]:
 # real account data, so any figure is made up).
 
 # %%
-def score_nonempty(row: DatasetRow, output: str | None) -> bool:
-    return bool((output or "").strip())
+def score_nonempty(row: DatasetRow, output: str | None) -> float:
+    return 1.0 if (output or "").strip() else 0.0
 
 
-def score_no_invented_amounts(row: DatasetRow, output: str | None) -> bool:
-    """False when the answer quotes a dollar figure."""
-    return not re.search(r"\$\s?\d", output or "")
+def score_no_invented_amounts(row: DatasetRow, output: str | None) -> float:
+    """0.0 when the answer quotes a dollar figure."""
+    return 0.0 if re.search(r"\$\s?\d", output or "") else 1.0
 
 
 if RUN["judges_and_scorers"]:

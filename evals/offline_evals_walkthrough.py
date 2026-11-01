@@ -359,8 +359,8 @@ for name in ("LD_API_TOKEN", "LD_SDK_KEY", "OPENAI_API_KEY", "AWS_PROFILE"):
 # %% [markdown]
 # ## Step 3: Install
 #
-# This folder pins the SDK to `python-ai-sdk` `main`. Inline datasets and `EvalTool` need `launchdarkly-ai-server`
-# 0.3.0 or later.
+# This folder pins `launchdarkly-ai-server` 1.0.0. Inline datasets and `EvalTool` need 0.3.0 or later, and from 1.0.0
+# the evaluations API is imported from the package root rather than `launchdarkly_ai_server.experimental`.
 #
 # ```sh
 # cd evals && uv sync --all-groups
@@ -370,8 +370,16 @@ for name in ("LD_API_TOKEN", "LD_SDK_KEY", "OPENAI_API_KEY", "AWS_PROFILE"):
 
 # %%
 from launchdarkly_ai_openai_messages import create_openai_messages_handler
-from launchdarkly_ai_server import ProviderHandler, create_handler, shutdown
-from launchdarkly_ai_server.experimental.evaluations import DatasetRow, EvalTool, Judge, Scorer, init_evaluations
+from launchdarkly_ai_server import (
+    DatasetRow,
+    EvalTool,
+    Judge,
+    ProviderHandler,
+    Scorer,
+    create_handler,
+    init_evaluations,
+    shutdown,
+)
 
 # The project holds the evaluations and judges. Credentials and staging endpoints come from the environment.
 evals = init_evaluations(project_key=PROJECT_KEY)
