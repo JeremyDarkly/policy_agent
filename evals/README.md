@@ -134,6 +134,56 @@ $RUN --users 800                                                              # 
 
 While the experiment runs, every `triage_agent` evaluation is randomized, including chats in the UI.
 
+### Jev triage
+
+`jev-choice` is a fifth `triage_agent` variation that routes with Jev, TypeSafe's decision model, instead of an LLM.
+It is on model config `TypeSafe.jev-1.14.0`, pinned rather than `jev-latest` so the model can't change during a
+rollout. When it is served, `triage_node` asks Jev one `choice` question over HTTP
+(`app/backend/src/utils/typesafe_client.py`) and maps the answer onto the same `query_type` and `confidence_score`
+the LLM path produces. The question is the variation's content, edited in LaunchDarkly:
+
+| Variation field | Use |
+|---|---|
+| `instructions` | The question's instructions |
+| `model.custom.criteria` | One description per route; the keys are the `query_type` strings |
+| `model.custom.criteria_order` | The order the options are sent in. LaunchDarkly stores `criteria` with sorted keys, and Jev leans toward the first option, so `schedule_agent` (the safe direction) goes first |
+| `model.custom.choice_confidence_min` | Below this, a non-general query escalates to `scheduler_specialist` (0.7, as on the LLM path) |
+
+The backend needs `TYPESAFE_API_KEY`. Any Jev failure (no key, timeout, 4xx/5xx, a response missing a field)
+escalates the query to `scheduler_specialist` and sends `triage-error` = 1. Every triage call, LLM or Jev, sends
+`triage-error`, so the `triage-error-rate` metric is a rate.
+
+No experiment is used: `jev-choice` is not an arm of `triage-routing-cost-vs-accuracy`, and the scripts below don't
+create or start one. It is shown and released in three steps.
+
+```sh
+python3 evals/setup_jev_variation.py --env-file .env.staging-org     # variation + triage-error-rate; no targeting change
+RUN="uv run --no-project --with-requirements app/backend/requirements.txt python evals/run_triage_experiment.py --env-file .env.staging-org"
+$RUN --pilot --variations default,haiku-current-prompt,jev-choice --show-misses   # 1. offline side by side, no events
+```
+
+On 2026-10-31 that pilot gave:
+
+| Variation | Correct | Hard rows | Cost per query | p50 |
+|---|---|---|---|---|
+| `default` (Sonnet 5) | 47/48 | 28/29 | 0.4783 ¢ | 3,856 ms |
+| `haiku-current-prompt` | 48/48 | 29/29 | 0.1945 ¢ | 2,561 ms |
+| `jev-choice` | 48/48 | 29/29 | 0.0024 ¢ | 80 ms |
+
+2. **Live demo.** In `triage_agent`'s targeting for `test`, add an individual target that serves `jev-choice` to the
+   demo user's context key (`<name>-commercial-plan`). Chats as that user show `jev-1.14.0` in the agent-flow panel;
+   everyone else keeps the default rule's LLM. Remove the target afterwards: it is the "off" state, and a leftover
+   target keeps the demo user on Jev in later demos.
+3. **Guarded rollout.** Move the `test` default rule from `haiku-current-prompt` to `jev-choice` as a guarded
+   rollout with automatic rollback. Use these guardrails: `triage-routing-accuracy`, `triage-cost-cents`,
+   `triage-latency-ms`, `triage-escalation-rate` and `triage-error-rate`. Drive it with `$RUN --users 1000`. The
+   non-pilot mode only needs `triage_agent` to be evaluated for each user, not an experiment. To show a rollback, run
+   `$RUN --users 1000 --fault` during a second rollout. `--fault` uses a bad `TYPESAFE_API_KEY`, so every Jev call
+   fails and `triage-error-rate` goes to 100% on `jev-choice`.
+
+`ci_eval.py` doesn't evaluate `jev-choice`. The eval runner generates through LangChain and drops `model.custom`, so
+`ci_targets.toml` lists it in `exclude_variations`.
+
 ## CI evals
 
 `ci_eval.py` evaluates AI Config variations directly: the AI SDK reads each variation's model and prompt from

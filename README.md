@@ -205,7 +205,7 @@ LangGraph and does not read it at runtime.
 
 | Component | AI Config key | Mode | Model | Purpose |
 |---|---|---|---|---|
-| Triage | `triage_agent` | agent | Claude Sonnet 5 | Classify intent, route to a specialist |
+| Triage | `triage_agent` | agent | Claude Sonnet 5; `jev-choice` uses TypeSafe Jev, a decision model, in place of an LLM ([evals/README.md](evals/README.md#jev-triage)) | Classify intent, route to a specialist |
 | Accounts & Products | `account_agent` | agent | Llama 3.1 70B | Account types, balances, fees, interest, product terms |
 | Branch & ATM | `branch_agent` | agent | Claude Haiku 4.5 | Find nearby branches and ATMs, their services and hours |
 | Scheduler | `scheduler_agent` | agent | Amazon Nova Pro | Books time with a banker, requests callbacks |

@@ -35,6 +35,8 @@ services:
       # API Keys (if using OpenAI/Anthropic directly)
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # TypeSafe Jev, for triage_agent's jev-choice variation
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
       # (PYTHONUNBUFFERED / PYTHONDONTWRITEBYTECODE are set in the Dockerfile)
 
     volumes:

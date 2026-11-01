@@ -385,6 +385,11 @@ def select_variations(
     for key in target.get("variations", []):
         if key not in {k for k, _ in selected}:
             selected.append((key, "listed"))
+    excluded = [k for k, _ in selected if k in set(target.get("exclude_variations", []))]
+    if excluded:
+        selected = [(k, source) for k, source in selected if k not in excluded]
+        names = ", ".join(f"`{k}`" for k in excluded)
+        notes.append(f"Not evaluated: {names}, listed in `exclude_variations` in ci_targets.toml.")
 
     # The AI Config targeting API leaves out the variation a rule serves, so read
     # rules from the flag the AI Config is stored as. This only feeds the note below.
@@ -393,7 +398,7 @@ def select_variations(
     except EvaluationsError:
         others = targeted_variations(targeting, environment)
         notes.append("Couldn't read targeting rules, so variations only rules serve may be missing below.")
-    uncovered = sorted(others - {k for k, _ in selected})
+    uncovered = sorted(others - {k for k, _ in selected} - set(excluded))
     if uncovered:
         names = ", ".join(f"`{k}`" for k in uncovered)
         notes.append(f"Targeting rules or individual targets also serve {names}, which no test context reaches. "
