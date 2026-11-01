@@ -40,6 +40,7 @@ from datetime import datetime
 # Import LLM-related modules AFTER observability setup
 from src.graph.workflow import run_workflow
 from src.utils.user_profile import create_user_profile
+from src.utils.chat_trace import build_trace
 from src.utils.aws_token_monitor import AWSTokenMonitor
 from ldai.tracker import FeedbackKind
 
@@ -316,6 +317,11 @@ class ChatRequest(BaseModel):
     # Groups this request's spans with the rest of the chat in LaunchDarkly's
     # Conversations view; when omitted, each request is its own conversation.
     conversationId: Optional[str] = None
+    # For CI end-to-end evals. includeTrace adds `trace` (each agent's
+    # variation, model and output) to the response; onlineJudges=false skips
+    # brand voice's background judges. Both default to today's behavior.
+    includeTrace: Optional[bool] = False
+    onlineJudges: Optional[bool] = True
 
 
 class ChatResponse(BaseModel):
@@ -324,6 +330,7 @@ class ChatResponse(BaseModel):
     agentFlow: list[Dict[str, Any]] = []
     metrics: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    trace: Optional[Dict[str, Any]] = None
 
 
 class FeedbackRequest(BaseModel):
@@ -378,6 +385,7 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
             evaluation_results_store=EVALUATION_RESULTS,
             brand_trackers_store=BRAND_TRACKERS,
             guardrail_enabled=request.guardrailEnabled,
+            online_judges=request.onlineJudges is not False,
         )
 
         total_duration = int((time.time() - start_time) * 1000)  # ms
@@ -506,7 +514,11 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         )
 
         return ChatResponse(
-            response=final_response, requestId=request_id, agentFlow=agent_flow, metrics=metrics
+            response=final_response,
+            requestId=request_id,
+            agentFlow=agent_flow,
+            metrics=metrics,
+            trace=build_trace(result) if request.includeTrace else None,
         )
 
     except Exception as e:

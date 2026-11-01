@@ -208,6 +208,7 @@ def triage_node(state: AgentState) -> dict[str, Any]:
             **state.get("agent_data", {}),
             "triage_router": {
                 "model": model_id,  # Track which model was used
+                "variation": ld_config.get("_variation"),  # Variation LaunchDarkly served
                 "tokens": tokens,
                 "ttft_ms": ttft_ms,  # Time to first token from Bedrock streaming
                 "duration_ms": duration_ms,  # Total time to generate response

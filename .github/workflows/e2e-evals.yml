@@ -1,0 +1,192 @@
+# Advisory end-to-end LaunchDarkly evals: starts the backend in the runner and
+# sends every dataset row through /api/chat with `ci_eval.py --e2e`, so the
+# real graph (triage, a specialist, brand voice) answers it. Reports in the job
+# summary and on PRs. Never blocks a merge. See evals/CI_EVALS.md.
+#
+# The config-level evals (evals.yml) evaluate each AI Config variation on its
+# own; this one checks routing, handoffs and what the app really serves. PRs
+# and pushes to main use the quick dataset; the nightly run uses the full one.
+# Every run on main keeps its results as the e2e-results-quick or
+# e2e-results-full artifact, and every run compares with the latest one.
+name: LaunchDarkly end-to-end evals
+
+on:
+  pull_request:
+    paths:
+      - app/backend/**
+      - "!app/backend/tests/**"
+      - evals/ci_eval.py
+      - evals/ci_targets.toml
+      - evals/pyproject.toml
+      - evals/uv.lock
+      - .github/workflows/e2e-evals.yml
+  push:
+    branches: [main]
+    paths:
+      - app/backend/**
+      - "!app/backend/tests/**"
+      - evals/ci_eval.py
+      - evals/ci_targets.toml
+      - evals/pyproject.toml
+      - evals/uv.lock
+      - .github/workflows/e2e-evals.yml
+  schedule:
+    - cron: "30 9 * * *"  # nightly full run, 09:30 UTC, after the config-level run
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Use the full dataset instead of the quick one
+        type: boolean
+        default: false
+
+concurrency:
+  # Per event too, so a push to main doesn't cancel the nightly run.
+  group: e2e-evals-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-evals:
+    # Pull requests from forks don't get secrets or an AWS token.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write       # AWS sign-in through OIDC
+      actions: read         # download the latest main results
+      pull-requests: write  # PR comment
+    env:
+      LD_PROJECT_KEY: ${{ secrets.LD_PROJECT_KEY }}
+      LD_API_TOKEN: ${{ secrets.LD_API_TOKEN }}
+      LD_SDK_KEY: ${{ secrets.LD_SDK_KEY }}
+      LD_API_BASE_URI: ${{ secrets.LD_API_BASE_URI }}
+      LD_UI_BASE_URI: ${{ secrets.LD_UI_BASE_URI }}
+      LD_BASE_URI: ${{ secrets.LD_BASE_URI }}
+      LD_STREAM_URI: ${{ secrets.LD_STREAM_URI }}
+      LD_EVENTS_URI: ${{ secrets.LD_EVENTS_URI }}
+      LD_ENVIRONMENT: ${{ secrets.LD_ENVIRONMENT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: app/backend/requirements.txt
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: evals/uv.lock
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: policy-agent-ci-e2e-evals-${{ github.run_id }}
+
+      - name: Install
+        run: |
+          pip install -r app/backend/requirements.txt
+          cd evals && uv sync --locked
+
+      # Not docker compose: it mounts ~/.aws and defaults AWS_PROFILE. The
+      # backend uses the session credentials the AWS step put in the env, and
+      # the same LaunchDarkly environment as the config-level evals.
+      - name: Start the backend
+        working-directory: app/backend
+        env:
+          LAUNCHDARKLY_ENABLED: "true"
+          LAUNCHDARKLY_SDK_KEY: ${{ secrets.LD_SDK_KEY }}
+          LAUNCHDARKLY_PROJECT_KEY: ${{ secrets.LD_PROJECT_KEY }}
+          LAUNCHDARKLY_ENVIRONMENT: ${{ secrets.LD_ENVIRONMENT }}
+          LAUNCHDARKLY_BASE_URI: ${{ secrets.LD_BASE_URI }}
+          LAUNCHDARKLY_STREAM_URI: ${{ secrets.LD_STREAM_URI }}
+          LAUNCHDARKLY_EVENTS_URI: ${{ secrets.LD_EVENTS_URI }}
+          LAUNCHDARKLY_OTLP_ENDPOINT: ${{ secrets.LAUNCHDARKLY_OTLP_ENDPOINT }}
+          LAUNCHDARKLY_OBSERVABILITY_BACKEND_URL: ${{ secrets.LAUNCHDARKLY_OBSERVABILITY_BACKEND_URL }}
+          LLM_PROVIDER: bedrock
+          AWS_REGION: us-east-1
+          DEMO_USER_NAME: CI Customer
+        run: |
+          nohup python server.py > "$GITHUB_WORKSPACE/backend.log" 2>&1 &
+          for _ in $(seq 60); do
+            if curl -sf http://localhost:8000/health > /dev/null; then echo "backend is up"; exit 0; fi
+            sleep 1
+          done
+          echo "::error::setup error: the backend didn't answer /health in 60 s"
+          exit 1
+
+      - name: Download the latest main results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p baseline results
+          # Quick and full results come from different runs on main, so each
+          # is the newest unexpired artifact of its name from a main run.
+          for mode in quick full; do
+            id=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=e2e-results-$mode&per_page=50" \
+              --jq '[.artifacts[] | select(.expired | not) | select(.workflow_run.head_branch == "main")][0].id // empty')
+            if [ -n "$id" ]; then
+              gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > "baseline/$mode.zip"
+              unzip -o -q "baseline/$mode.zip" -d baseline && rm "baseline/$mode.zip"
+            else
+              echo "No $mode results from main yet"
+            fi
+          done
+
+      - name: Run end-to-end evals
+        working-directory: evals
+        env:
+          FULL: ${{ inputs.full }}
+          PR: ${{ github.event.pull_request.number }}
+          POLICY_AGENT_URL: http://localhost:8000
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = schedule ] || [ "$FULL" = true ]; then mode=full; else mode=quick; fi
+          label="${PR:+pr-$PR}"
+          label="${label:-${GITHUB_REF_NAME//\//-}}-${GITHUB_SHA::7}"
+          flag=""; [ "$mode" = quick ] && flag=--quick
+          uv run python ci_eval.py --e2e $flag \
+            --label "$label" --no-run-links --summary-file ../results/summary.md \
+            --json-out "../results/e2e-$mode.json" --baseline "../baseline/e2e-$mode.json"
+
+      # The log isn't uploaded as an artifact: it has the LaunchDarkly and
+      # observability hostnames, and artifacts in a public repo aren't masked.
+      # The job log masks secret values.
+      - name: Show the backend log tail
+        if: failure() && hashFiles('backend.log') != ''
+        run: tail -n 200 backend.log
+
+      - name: Write the job summary
+        if: always() && hashFiles('results/summary.md') != ''
+        run: cat results/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the PR
+        if: always() && github.event_name == 'pull_request' && hashFiles('results/summary.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          marker="<!-- launchdarkly-e2e-evals -->"
+          body="$(printf '%s\n' "$marker"; cat results/summary.md)"
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+            --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | tail -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" >/dev/null
+          else
+            gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "$body"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('results/e2e-quick.json') != ''
+        with:
+          name: e2e-results-quick
+          path: results/e2e-quick.json
+          retention-days: 90
+
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('results/e2e-full.json') != ''
+        with:
+          name: e2e-results-full
+          path: results/e2e-full.json
+          retention-days: 90
