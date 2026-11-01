@@ -1008,20 +1008,28 @@ wheels = [
 
 [[package]]
 name = "launchdarkly-ai-openai-messages"
-version = "0.2.3"
-source = { git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Fopenai-messages&rev=main#4f1e9abd2b83f1a4b1221267c3f21a3b84d1cbc5" }
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "launchdarkly-ai-server" },
     { name = "openai" },
     { name = "opentelemetry-api" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/fb/35/d8e3629dffca2da72cee45b8f356b2711e2696ac7c8c7d0f64bc09b917e2/launchdarkly_ai_openai_messages-1.0.0.tar.gz", hash = "sha256:c79916735853ac86c5297174ba5d0249ad4462eeeccdbad6354c450a53c2b71e", size = 42336, upload-time = "2026-10-30T21:40:35.135Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/57/99/5836156659aa434877bd8b4c7440193d00255be79e331c81f3cae628ca61/launchdarkly_ai_openai_messages-1.0.0-py3-none-any.whl", hash = "sha256:f5f2cdf6a694a232fe357af8f97ee5337cd320bfefafbc0496eb963f41ea9c7c", size = 17918, upload-time = "2026-10-30T21:40:34.178Z" },
+]
 
 [[package]]
 name = "launchdarkly-ai-server"
-version = "0.2.4"
-source = { git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Fclient&rev=main#4f1e9abd2b83f1a4b1221267c3f21a3b84d1cbc5" }
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "opentelemetry-api" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/34/36/f195554b78a7a5133a0e357c86e1d1ca86abbe993d287bdbe24b1c4d50e6/launchdarkly_ai_server-1.0.0.tar.gz", hash = "sha256:96aee683d5c7ec735e255d647c3d308e7df170a0c47472682458e98b7e6955d6", size = 499538, upload-time = "2026-10-30T21:41:08.044Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/d9/b510a3dd300f78223ba3820dc50959e4ade77737f119d4ea7151daa8d32b/launchdarkly_ai_server-1.0.0-py3-none-any.whl", hash = "sha256:b4d69daeab54f59ab78740d52d2164b2ffaa51022c88a99e35ccd9af51852537", size = 219765, upload-time = "2026-10-30T21:41:06.92Z" },
 ]
 
 [[package]]
@@ -1394,8 +1402,8 @@ notebook = [
 
 [package.metadata]
 requires-dist = [
-    { name = "launchdarkly-ai-openai-messages", git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Fopenai-messages&rev=main" },
-    { name = "launchdarkly-ai-server", git = "https://github.com/launchdarkly/python-ai-sdk.git?subdirectory=packages%2Fclient&rev=main" },
+    { name = "launchdarkly-ai-openai-messages", specifier = "==1.0.0" },
+    { name = "launchdarkly-ai-server", specifier = "==1.0.0" },
     { name = "launchdarkly-server-sdk", specifier = ">=9.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
 ]

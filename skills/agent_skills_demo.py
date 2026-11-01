@@ -42,8 +42,8 @@
 # - **`RUN`** turns each act's eval on or off. Acts 1–3 always run, because later acts depend on them.
 # - **`QUICK`** uses the 2-row dataset `skills_demo_dataset_quick` (one dispute row, one control row).
 # - **`CREATE_MISSING_ASSETS`** lets the notebook create the `load_skill` tool and the dispute judge when missing.
-# - **`SKILL_SOURCE`**: `"rest"` reads skills over the REST API, `"sdk"` uses the experimental SDK, and `"auto"` uses
-#   the SDK when it can be imported and falls back to REST otherwise.
+# - **`SKILL_SOURCE`**: `"rest"` reads skills over the REST API, `"sdk"` uses the SDK's skill store, and `"auto"` uses
+#   the SDK when its skill delivery answers and falls back to REST otherwise.
 
 # %%
 ENV_FILE_NAME = ".env.staging-org"
@@ -450,17 +450,12 @@ for user_key, result in ((SKILLED_USER, skilled), (OTHER_USER, served(AGENT, OTH
 
 # %%
 def sdk_skills():
-    """The experimental SDK skills module, or None when it isn't installed or the store gets no payload."""
+    """The SDK's skills API, or None when the store gets no payload."""
     if SKILL_SOURCE == "rest":
         return None
-    try:
-        from launchdarkly_ai_server.experimental import skills as sdk
-    except ImportError:
-        if SKILL_SOURCE == "sdk":
-            raise SystemExit("SKILL_SOURCE='sdk' but launchdarkly_ai_server.experimental.skills isn't installed")
-        print("skills via REST: the SDK's experimental skills module isn't installed yet")
-        return None
-    store = sdk.FDv2SkillStore(os.environ["LD_SDK_KEY"], stream_uri=os.getenv("LD_STREAM_URI")).start()
+    import launchdarkly_ai_server as sdk
+
+    store = sdk.LaunchDarklySkillStore(os.environ["LD_SDK_KEY"], stream_uri=os.getenv("LD_STREAM_URI")).start()
     if not store.wait_for_skills(timeout=10):
         if SKILL_SOURCE == "sdk":
             raise SystemExit(f"skill delivery didn't answer: {store.failed or 'timed out'}")
