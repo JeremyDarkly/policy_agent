@@ -5,6 +5,8 @@
 #   (Library > Datasets > New dataset) with that key. --quick uses quick_dataset.
 # scorers: names of local scorers defined in ci_eval.py (SCORERS).
 # judges: keys of LaunchDarkly judge configs to run on every row.
+# exclude_variations: variation keys never evaluated, even when targeting or a
+#   test context serves them (for variations the eval runner can't call).
 #
 # Tools: the backend doesn't give the model the tools attached to these
 # variations, so ci_eval.py runs every target with no tools, as production does.
@@ -56,6 +58,12 @@ dataset = "triage_routing_dataset"
 quick_dataset = "triage_routing_dataset_quick"
 scorers = ["routed-to-expected-specialist"]
 judges = []
+# jev-choice routes with Jev (TypeSafe's decision model) over its own HTTP API,
+# not an LLM. The AI SDK's eval runner generates through LangChain and drops
+# model.custom, where the variation keeps its Jev question, so it can't run it.
+# Compare it with run_triage_experiment.py --pilot instead. Excluded even when
+# targeting serves it (the demo target, or a guarded rollout of the default rule).
+exclude_variations = ["jev-choice"]
 
 # The specialist and brand voice datasets are built by build_specialist_datasets.py
 # into ci_datasets/. Judges read the row's variables; ground_truth is a template
