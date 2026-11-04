@@ -195,6 +195,12 @@ class FormatTest(unittest.TestCase):
         # The cost table comes after the main table and before the per-config detail.
         self.assertLess(report.index("| AI Config | Variation | Served to"), report.index("#### Cost and speed"))
 
+    def test_unpriced_judges_never_read_as_zero(self):
+        r = result(calls=[generation(10, 1), judge(500, 50)], price=SONNET, judge_prices={"ci-judge-accuracy": None})
+        report = "\n".join(ci_eval.cost_table([r]))
+        self.assertIn("Judge cost: no price (1 judge calls had no price or usage).", report)
+        self.assertNotIn("Judges cost 0", report)
+
     def test_cost_table_leaves_out_errors_and_skips(self):
         errored = TargetResult(config="brand_agent", variation="default", dataset="d", error="boom")
         skipped = TargetResult(config="branch_agent", variation="–", dataset="d", skipped="nothing")

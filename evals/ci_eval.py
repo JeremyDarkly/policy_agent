@@ -785,7 +785,9 @@ def cost_table(results: list[TargetResult], concurrency: int = 4) -> list[str]:
     judge_calls = sum(r.cost["judge_calls"] for r in ran)
     unpriced = sum(r.cost["judge_calls_unpriced"] for r in ran)
     summary = []
-    if judge_calls:
+    if judge_calls and unpriced == judge_calls:
+        summary.append(f"Judge cost: no price ({judge_calls} judge calls had no price or usage).")
+    elif judge_calls:
         judged = f"Judges cost {cents(sum(r.cost['judge_cents'] for r in ran))} this run"
         summary.append(judged + (f" ({unpriced} of {judge_calls} judge calls had no price or usage)." if unpriced
                                  else "."))
