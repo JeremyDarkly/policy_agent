@@ -13,6 +13,14 @@ variations before spending experiment traffic.
 The non-pilot mode needs no experiment: it only needs triage_agent to be
 evaluated for each user, so it also drives a guarded rollout's guardrails.
 
+--turns-per-user N makes each simulated user ask N questions in a row, as
+the `commercial` demo plan (override with --plan). The backend's spend ledger
+adds each triage call's cost to the user's `running_spend_cents`, so a rule
+like the spend rule from scripts/setup_spend_rule.py switches the user to the
+cheaper variation partway through, and both sides of the rule get
+routing-accuracy events. At about 0.48 cents per Sonnet 5 triage call, 8 or
+more turns cross a 3 cent threshold.
+
 A variation on a TypeSafe model config (jev-choice) routes with Jev instead of
 an LLM and needs TYPESAFE_API_KEY. --fault replaces that key with a bad one for
 the run, so every Jev call fails, escalates and sends triage-error = 1: use it
@@ -23,6 +31,8 @@ Usage (from the repo root; needs AWS credentials for Bedrock):
         python evals/run_triage_experiment.py --env-file .env.staging-org --pilot
     uv run --no-project --with-requirements app/backend/requirements.txt \\
         python evals/run_triage_experiment.py --env-file .env.staging-org --users 600
+    uv run --no-project --with-requirements app/backend/requirements.txt \\
+        python evals/run_triage_experiment.py --env-file .env.staging-org --users 50 --turns-per-user 10
     uv run --no-project --with-requirements app/backend/requirements.txt \\
         python evals/run_triage_experiment.py --env-file .env.staging-org --pilot \\
         --variations default,haiku-current-prompt,jev-choice --show-misses
@@ -130,11 +140,13 @@ def pin_variation(triage_router, variation: dict, model_config: dict) -> None:
     triage_router.get_model_invoker = fake_get_model_invoker
 
 
-def run_one(triage_router, row: dict, user_key: str) -> dict:
+def run_one(triage_router, row: dict, user_key: str, plan: str | None = None, turn: int = 1) -> dict:
     from langchain_core.messages import HumanMessage
+    from src.utils import spend_ledger
     from src.utils.user_profile import create_user_profile
 
-    profile = create_user_profile(name="Replay Customer", user_key=user_key, domain="togglebank")
+    profile = create_user_profile(name="Replay Customer", user_key=user_key, domain="togglebank", plan_override=plan)
+    spend_before = spend_ledger.get(user_key)
     state = {"messages": [HumanMessage(content=row["input"])], "user_context": profile, "agent_data": {}}
     for attempt in range(4):
         try:
@@ -148,6 +160,8 @@ def run_one(triage_router, row: dict, user_key: str) -> dict:
     expected = row["metadata"]["expected_specialist"]
     return {
         "user_key": user_key,
+        "turn": turn,
+        "spend_before_cents": round(spend_before, 4),
         "variation": getattr(_served, "variation", ""),
         "ld_context": getattr(_served, "ld_context", None),
         "input": row["input"],
@@ -161,6 +175,26 @@ def run_one(triage_router, row: dict, user_key: str) -> dict:
         "model": data["model"],
         "confidence": data["confidence"],
     }
+
+
+def run_user(triage_router, rows: list[dict], user_key: str, plan: str | None) -> list[dict]:
+    """One simulated user asking `rows` in order, so their running spend builds up."""
+    return [run_one(triage_router, row, user_key, plan, turn) for turn, row in enumerate(rows, 1)]
+
+
+def summarize_turns(results: list[dict]) -> None:
+    """Which variation each turn number was served, to show where the spend rule switches."""
+    by_turn: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    spend: dict[int, list[float]] = defaultdict(list)
+    for r in results:
+        if "error" in r:
+            continue
+        by_turn[r["turn"]][r["variation"]] += 1
+        spend[r["turn"]].append(r["spend_before_cents"])
+    print("\nturn  spend before (avg ¢)  variations served")
+    for turn in sorted(by_turn):
+        served = ", ".join(f"{v} {n}" for v, n in sorted(by_turn[turn].items()))
+        print(f"{turn:>4}  {sum(spend[turn]) / len(spend[turn]):>20.2f}  {served}")
 
 
 def summarize(results: list[dict]) -> None:
@@ -203,6 +237,9 @@ def main() -> None:
     parser.add_argument("--variations", help="comma-separated variation keys for --pilot (default: all)")
     parser.add_argument("--users", type=int, default=600, help="simulated users for an experiment run")
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--turns-per-user", type=int, default=1,
+                        help="questions each simulated user asks in a row (builds up running_spend_cents)")
+    parser.add_argument("--plan", help="the users' plan attribute (default: commercial when --turns-per-user > 1)")
     parser.add_argument("--run-id", default=time.strftime("%m%d%H%M"), help="prefix that keeps user keys unique")
     parser.add_argument("--out", help="write per-call results as JSONL here")
     parser.add_argument("--show-misses", action="store_true")
@@ -217,6 +254,7 @@ def main() -> None:
     os.environ["LAUNCHDARKLY_ENABLED"] = "true"
     rows = [json.loads(line) for line in DATASET.read_text().splitlines() if line.strip()]
     init_ld(offline=args.pilot)
+    plan = args.plan or ("commercial" if args.turns_per_user > 1 else None)
 
     import ldclient
     import src.graph  # noqa: F401  (import before src.agents, as the server does, to avoid a cycle)
@@ -249,30 +287,33 @@ def main() -> None:
         capture_served_variation(triage_router)
         client = ldclient.get()
         rng = random.Random(args.run_id)
-        order = [rows[i % len(rows)] for i in range(args.users)]
+        turns = max(1, args.turns_per_user)
+        order = [rows[i % len(rows)] for i in range(args.users * turns)]
         rng.shuffle(order)
-        print(f"Sending {args.users} users (run {args.run_id}) through triage...", file=sys.stderr)
+        print(f"Sending {args.users} users x {turns} turns (run {args.run_id}, plan {plan}) through triage...",
+              file=sys.stderr)
         done = 0
         with ThreadPoolExecutor(args.workers) as pool:
             futures = [
-                pool.submit(run_one, triage_router, row, f"triage-replay-{args.run_id}-{i}")
-                for i, row in enumerate(order)
+                pool.submit(run_user, triage_router, order[i * turns:(i + 1) * turns],
+                            f"triage-replay-{args.run_id}-{i}", plan)
+                for i in range(args.users)
             ]
             for future in as_completed(futures):
-                r = future.result()
-                if "error" not in r:
-                    if r["variation"] in ("", "unknown", "default-fallback"):
-                        quiet.__exit__(None, None, None)
-                        sys.exit(f"Triage was served '{r['variation']}', not a real variation; stopping.")
-                    client.track(
-                        "triage-routed-correctly",
-                        r["ld_context"],
-                        metric_value=1.0 if r["correct"] else 0.0,
-                    )
-                results.append(r)
+                for r in future.result():
+                    if "error" not in r:
+                        if r["variation"] in ("", "unknown", "default-fallback"):
+                            quiet.__exit__(None, None, None)
+                            sys.exit(f"Triage was served '{r['variation']}', not a real variation; stopping.")
+                        client.track(
+                            "triage-routed-correctly",
+                            r["ld_context"],
+                            metric_value=1.0 if r["correct"] else 0.0,
+                        )
+                    results.append(r)
                 done += 1
-                if done % 50 == 0:
-                    print(f"  {done}/{args.users}", file=sys.stderr)
+                if done % 10 == 0:
+                    print(f"  {done}/{args.users} users", file=sys.stderr)
         client.flush()
         time.sleep(2)
 
@@ -280,6 +321,8 @@ def main() -> None:
     for r in results:
         r.pop("ld_context", None)
     summarize(results)
+    if args.turns_per_user > 1 and not args.pilot:
+        summarize_turns(results)
     if args.show_misses:
         print("\nMisses:")
         for r in sorted(results, key=lambda r: (r.get("variation", ""), r["input"])):
