@@ -209,7 +209,16 @@ on `good` and `incoh`, and coherence on `good` and `halluc`. The labels were wri
 The pilot runs each row as a simulated user through the backend's own code: `BrandVoiceEvaluator` for the LLM judges
 and `jev_judge` for Jev, on whatever `ai-judge-jev` serves that user. On 2026-11-03 it gave:
 
-JEV_PILOT_TABLE
+| Judge | Accuracy correct | Planted inaccuracies missed | Accurate replies failed | Coherence correct | Bad writing missed | Good writing failed | p50 latency | Cost per reply |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| LLM judges (Claude Sonnet 5 on Bedrock), thresholds 0.8 / 0.7 | 39/48 | 0 | 9 | 30/48 | 0 | 18 | 4,060 ms / 4,718 ms | 0.922 ¢ (both) |
+| Jev `jev-1.14.0`, as the app decides (`accuracy` and `hallucination`; `coherence` and `tone`) | 41/48 | 0 | 7 | 43/48 | 0 | 5 | 108 ms | 0.0040 ¢ |
+| Jev, `accuracy` alone; `coherence` alone | 41/48 | 0 | 7 | 41/48 | 3 | 4 | same call | same call |
+| Jev, `hallucination` alone; `tone` alone | 45/48 | 0 | 3 | 46/48 | 0 | 2 | same call | same call |
+
+`answers_question` passed on all 12 `good` replies. Jev and the LLM judges disagreed on 23 of 48 replies (accuracy or
+coherence), mostly where an LLM judge failed a good reply. That is the baseline for `jev-judge-disagreement`, which
+counts a reply once if either verdict differs. `coherence` alone passed three short, rude replies that `tone` caught.
 
 The thresholds are today's (accuracy 0.8, coherence 0.7, noul 0.5). Both judges catch every planted failure; they
 differ in how many good replies they fail. 48 rows on two profiles is a small set, and the replies are more clear-cut
