@@ -87,7 +87,8 @@ def capture_served_variation(triage_router) -> None:
 def pin_variation(triage_router, variation: dict, model_config: dict) -> None:
     """Make triage_node use one variation, bypassing LaunchDarkly targeting."""
     from src.utils.launchdarkly_config import ModelInvoker, NoOpTracker
-    from src.utils.llm_config import _create_llm_for_provider
+    from src.utils.llm_providers import build_chat_model
+    from src.utils.openai_compatible import normalize_provider
 
     params = model_config.get("params") or {}
     config = {
@@ -109,12 +110,7 @@ def pin_variation(triage_router, variation: dict, model_config: dict) -> None:
         return  # Jev is called over HTTP; there is no LLM to build
 
     def fake_get_model_invoker(config_key, context=None, **_):
-        llm = _create_llm_for_provider(
-            config["provider"].lower(),
-            model_config["id"],
-            params.get("temperature"),
-            params.get("max_tokens", 2000),
-        )
+        llm = build_chat_model(config["provider"], model_config["id"], params, custom or {})
         invoker = ModelInvoker(
             llm,
             NoOpTracker(),
@@ -122,7 +118,7 @@ def pin_variation(triage_router, variation: dict, model_config: dict) -> None:
             is_agent_config=True,
             skip_span_annotation=True,
             variation_key=variation["key"],
-            provider="bedrock",
+            provider=normalize_provider(config["provider"]),
         )
         _served.variation = variation["key"]
         return invoker, config
