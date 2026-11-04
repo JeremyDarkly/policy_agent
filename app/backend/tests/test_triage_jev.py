@@ -308,3 +308,14 @@ def test_llm_path_evaluates_once_and_sends_triage_error(monkeypatch, events, con
     assert seen["evaluated"][0] is llm_config
     assert result["next_agent"] == node
     assert ("triage-error", error) in events
+
+
+def test_triage_cost_is_added_to_the_spend_ledger(monkeypatch, tracker, events):
+    from src.utils import spend_ledger
+
+    spend_ledger.reset("u1")
+    mock_http(monkeypatch, answer_with("account_question", 0.95))
+    run()
+    run()
+    assert spend_ledger.get("u1") == pytest.approx(2 * dict(events)["triage-cost-cents"])
+    spend_ledger.reset("u1")
