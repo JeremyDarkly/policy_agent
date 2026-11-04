@@ -128,6 +128,30 @@ resource "launchdarkly_model_config" "openrouter_mistral_large_4_high" {
   tags = ["managed-by-terraform"]
 }
 
+# A self-hosted model through vLLM's OpenAI-compatible server (README, "vLLM").
+# Not applied: there is no GPU host for it yet. The backend reads the server's
+# URL from VLLM_BASE_URL, or from the env var custom_parameters.base_url_env
+# names, so a second server needs only another env var. model_id must equal the
+# name vLLM serves the model under.
+#
+# resource "launchdarkly_model_config" "vllm_qwen_2_5_0_5b" {
+#   project_key    = var.project_key
+#   key            = "vllm-qwen-2-5-0-5b"
+#   name           = "Qwen 2.5 0.5B Instruct (vLLM)"
+#   model_id       = "Qwen/Qwen2.5-0.5B-Instruct"
+#   model_provider = "vLLM"
+#
+#   params = jsonencode({
+#     temperature = 0.1
+#     max_tokens  = 1000
+#   })
+#   custom_parameters = jsonencode({
+#     base_url_env = "VLLM_BASE_URL"
+#   })
+#
+#   tags = ["managed-by-terraform"]
+# }
+
 # Keyed map of the model configs above, consumed by outputs.tf.
 locals {
   model_config_resources = {

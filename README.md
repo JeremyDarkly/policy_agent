@@ -83,6 +83,9 @@ variable substitution and also bind-mounts it into the backend container.
 | `LLM_PROVIDER` | no | backend | Provider fallback. Default `bedrock` |
 | `LLM_MODEL` | no | backend | Model fallback used only if an AI Config carries no model. Default `claude-3-5-sonnet` |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | no | backend | Only if you point the agents at those providers directly |
+| `OPENROUTER_API_KEY` | no | backend + evals | Only for variations whose model config's provider is `OpenRouter` (`triage_agent`'s `mistral-large-4-*`) |
+| `OPENROUTER_BASE_URL` | no | backend + evals | Default `https://openrouter.ai/api/v1` |
+| `VLLM_BASE_URL` / `VLLM_API_KEY` | no | backend + evals | Only for variations with provider `vLLM`; see [Open-weight models](#open-weight-models-through-openai-compatible-endpoints) |
 
 `.env` is gitignored. Don't commit it.
 
@@ -106,12 +109,12 @@ docker compose run --rm terraform output     # show managed keys and IDs
 | Resource | Count | File |
 |---|---|---|
 | AI Configs (5 agents + 4 judges) | 9 | `ai_configs_resources.tf` |
-| AI Config variations (`default`, published) | 9 | `ai_configs_resources.tf` |
-| Reusable model configs | 6 | `model_configs.tf` |
+| AI Config variations (`default`, published, plus `triage_agent`'s `mistral-large-4-low` and `-high`) | 11 | `ai_configs_resources.tf` |
+| Reusable model configs | 8 | `model_configs.tf` |
 | AI tool definitions | 20 | `tools.tf` |
 | AI agent graph (`banking_agent_graph`) | 1 | `agent_graph.tf` |
 
-41 resources total. Each config is created with a single `Default` variation, and
+45 resources total. Each config is created with a single `Default` variation, and
 LaunchDarkly auto-adds a "disabled" variation ahead of it — so variation index 0 is
 `disabled` and index 1 is `Default`.
 
@@ -355,8 +358,105 @@ have. Model configs are reusable resources referenced by variation via
 | `claude-haiku-4-5-brand-voice` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | `temperature=0.9`, `max_tokens=10000` |
 | `claude-sonnet-4` | `us.anthropic.claude-sonnet-4-20250514-v1:0` | `temperature=0.1` |
 
+Two more model configs use provider `OpenRouter`, not Bedrock, so `TF_VAR_model_override`
+leaves them alone. See [Open-weight models](#open-weight-models-through-openai-compatible-endpoints).
+
+| Model config key | Model id | Params | Price per 1M tokens (in / out) |
+|---|---|---|---|
+| `openrouter-mistral-large-4-low` | `mistralai/mistral-large-4-0` | `reasoning_effort=low`, `max_tokens=4000` | $0.70 / $2.10 |
+| `openrouter-mistral-large-4-high` | `mistralai/mistral-large-4-0` | `reasoning_effort=high`, `max_tokens=4000` | $0.70 / $2.10 |
+
 Every model config is a ForceNew resource in the provider — editing one replaces it
 rather than updating in place.
+
+## Open-weight models through OpenAI-compatible endpoints
+
+A variation can serve any model behind an OpenAI-compatible endpoint: its model
+config names the provider, and the backend and `evals/ci_eval.py` pick the endpoint
+from that name. The table is in `app/backend/src/utils/openai_compatible.py`:
+
+| Provider (model config) | Base URL env (default) | API key env |
+|---|---|---|
+| `OpenRouter` | `OPENROUTER_BASE_URL` (`https://openrouter.ai/api/v1`) | `OPENROUTER_API_KEY` (required) |
+| `vLLM` | `VLLM_BASE_URL` (no default; required) | `VLLM_API_KEY` (optional) |
+
+URLs and keys stay in env vars, never in LaunchDarkly. A model config's custom
+parameters can name other env vars, `base_url_env` and `api_key_env`, to point
+variations at more than one server. The app reads them; the AI SDK's eval runner
+does not pass custom parameters to a handler, so `ci_eval.py` always uses the
+provider's default env vars (#46).
+
+Model parameters forwarded to the endpoint: `temperature`, `top_p`, `max_tokens`,
+`reasoning_effort`, `stop`, `seed`. For OpenRouter, a nested
+`reasoning: {effort: ...}` goes into the request body as well. Any other key is
+logged once as a warning and dropped. All provider branches live in one factory,
+`build_chat_model` in `app/backend/src/utils/llm_providers.py`.
+
+### Mistral Large 4 on `triage_agent`
+
+`triage_agent` has two extra variations, `mistral-large-4-low` and
+`mistral-large-4-high`. They have the same prompt and tools as `default` and differ
+only in their model config's `reasoning_effort`. They are demo-only: no default rule
+serves them. To show them, add `OPENROUTER_API_KEY` to `.env`, then target a demo
+user to each variation in the `triage_agent` Targeting tab.
+
+Measured on 2026-11-04 in staging, on the 48-row `triage_routing_dataset`:
+
+| Variation | `ci_eval.py` rows passed | Tokens/row in, out | Cost/row | App path: routed correctly, median triage latency |
+|---|---|---|---|---|
+| `default` (Claude Sonnet 5, Bedrock) | 48/48 | 963, 162 | $0.0035 (at $2 / $10 per 1M; not on the model config) | 48/48, 3.2 s |
+| `mistral-large-4-low` | 48/48 | 618, 505 | $0.0015 | 48/48, 5.0 s |
+| `mistral-large-4-high` | 48/48 | 618, 488 | $0.0015 | 46/48, 5.6 s |
+
+The app-path column is `evals/run_triage_experiment.py --pilot`. It goes through
+`triage_node` and the backend factory, including JSON mode. Models are not
+deterministic, so High's two misses there are within run-to-run noise.
+
+- **Cost.** Mistral costs about 40% of what Claude Sonnet 5 costs per triage call.
+  LaunchDarkly's AI Config metrics show $0 cost even for priced models (#48).
+  `ci_eval.py` therefore computes cost per row from token counts and the prices on
+  the variation's model config, and the app sends `triage-cost-cents` from its own
+  price table (`calculate_model_cost` in `brand_voice_agent.py`). The Bedrock model
+  configs have no prices, so the eval shows "–" for `default`.
+- **Latency.** Through OpenRouter, the median is 1.5–1.8× Bedrock's, with a long tail (p90
+  13.6–17.6 s in the #44 spike). Triage runs before every specialist, so this delays
+  every reply. Watch `triage-latency-ms` and the AI Config's duration in a rollout.
+- **Reasoning mode.** Routing is too easy to separate Low from High. Low was good
+  enough on every routing row, and High bought nothing.
+- **Data leaves AWS.** OpenRouter forwards prompts to Mistral. Use demo data only.
+
+### Guarded rollout of `mistral-large-4-low`
+
+The guardrails already exist as metrics, sent by `triage_router.py` on every triage
+call:
+
+| Metric | Event | Regression |
+|---|---|---|
+| `triage-error-rate` | `triage-error` (1 when the answer was unusable) | above 1%, or above `default` |
+| `triage-latency-ms` | `triage-duration-ms` | p90 above 10 s |
+| `triage-escalation-rate` | `triage-escalated` (unparseable or low confidence falls back to a human) | above 2× `default` |
+| `triage-cost-cents` | `triage-cost-cents` | above `default` |
+
+In the `triage_agent` Targeting tab for `test`, start a guarded rollout of
+`mistral-large-4-low` at 10% on the default rule, with those four metrics as
+guardrails. Then give it traffic from new random customers through the running app:
+
+```bash
+python evals/load_triage.py --requests 300 --workers 4
+```
+
+### vLLM (documented, not verified)
+
+The same factory serves a self-hosted model through vLLM. This recipe has not been
+run end to end: the spike for #44 had no GPU host, and vLLM's CPU image on a Mac
+returned HTTP 500 on every completion. Use a GPU host.
+
+1. On the GPU host, serve a model with vLLM's OpenAI-compatible server:
+   `vllm serve Qwen/Qwen2.5-0.5B-Instruct --port 8000` (add `--api-key <key>` to
+   require a key, and `--reasoning-parser <parser>` for a reasoning model).
+2. In `.env`: `VLLM_BASE_URL=http://<host>:8000/v1`, and `VLLM_API_KEY` if you set one.
+3. Create a model config with provider `vLLM` and model id equal to the served model
+   name. `model_configs.tf` has a commented example. Point a variation at it.
 
 ## Development
 
