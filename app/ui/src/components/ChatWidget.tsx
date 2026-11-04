@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import { useDemoUser } from "@/lib/demoUser";
+import { refreshRunningSpend, resetRunningSpend, setRunningSpend, useRunningSpend } from "@/lib/runningSpend";
 import "./ChatWidget.css";
 
 interface Message {
@@ -35,6 +36,8 @@ interface ChatResponse {
     agent_count: number;
     rag_enabled: boolean;
     total_duration_ms?: number;
+    // The user's running model spend after this turn (the running_spend_cents attribute)
+    runningSpendCents?: number;
     accuracy_score?: number;
     accuracy_reasoning?: string;
     accuracy_issues?: string[];
@@ -56,6 +59,10 @@ interface ChatWidgetProps {
 
 const ChatWidget = ({ isOpen, onClose, initialQuery }: ChatWidgetProps) => {
   const { user: demoUser } = useDemoUser();
+  const runningSpend = useRunningSpend(demoUser.userKey);
+  useEffect(() => {
+    refreshRunningSpend(demoUser.userKey);
+  }, [demoUser.userKey]);
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "0",
@@ -259,6 +266,9 @@ const ChatWidget = ({ isOpen, onClose, initialQuery }: ChatWidgetProps) => {
       );
 
       setLastMetrics(data.metrics || null);
+      if (typeof data.metrics?.runningSpendCents === "number") {
+        setRunningSpend(demoUser.userKey, data.metrics.runningSpendCents);
+      }
       setLastAgentFlow(data.agentFlow);
       setLastRequestId(data.requestId);
 
@@ -428,6 +438,9 @@ const ChatWidget = ({ isOpen, onClose, initialQuery }: ChatWidgetProps) => {
               onClick={() => setShowMetrics(!showMetrics)}
             >
               {showMetrics ? "\u25BC" : "\u25B6"} Response Metrics
+              {runningSpend !== undefined && (
+                <span className="cw-running-spend"> · Running spend: {runningSpend.toFixed(2)}¢</span>
+              )}
             </button>
             {showMetrics && (
               <div className="cw-metrics-content">
@@ -455,6 +468,22 @@ const ChatWidget = ({ isOpen, onClose, initialQuery }: ChatWidgetProps) => {
                       <span className="cw-metric-label">Total Duration:</span>
                       <span className="cw-metric-value">
                         {lastMetrics.total_duration_ms}ms
+                      </span>
+                    </div>
+                  )}
+                  {runningSpend !== undefined && (
+                    <div className="cw-metric-row">
+                      <span className="cw-metric-label">Running Spend:</span>
+                      <span className="cw-metric-value">
+                        {runningSpend.toFixed(2)}¢{" "}
+                        <button
+                          type="button"
+                          className="cw-spend-reset"
+                          title="Set this user's running spend back to 0"
+                          onClick={() => resetRunningSpend(demoUser.userKey).catch(console.error)}
+                        >
+                          Reset
+                        </button>
                       </span>
                     </div>
                   )}

@@ -1,6 +1,7 @@
 import { Search, Menu, X, ChevronDown, Check } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useDemoUser, DEMO_USERS, type DemoUserId } from "@/lib/demoUser";
+import { resetRunningSpend, useRunningSpend } from "@/lib/runningSpend";
 
 const NAV = [
   "Personal",
@@ -16,6 +17,7 @@ const BarclaysHeader = () => {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
   const { user, setUser } = useDemoUser();
+  const runningSpend = useRunningSpend(user.userKey);
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 8);
@@ -180,6 +182,19 @@ const BarclaysHeader = () => {
                 })}
                 <div className="px-3 py-2 text-[10px] text-muted-foreground border-t border-border font-mono">
                   user_key: {user.userKey}
+                </div>
+                <div className="flex items-center justify-between px-3 py-2 text-[11px] text-muted-foreground border-t border-border">
+                  <span className="font-mono">
+                    running_spend_cents: {(runningSpend ?? 0).toFixed(2)}
+                  </span>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => resetRunningSpend(user.userKey).catch(console.error)}
+                    className="px-2 py-1 rounded-md text-foreground/70 hover:text-foreground hover:bg-foreground/[0.04] transition-colors"
+                  >
+                    Reset spend
+                  </button>
                 </div>
               </div>
             )}
