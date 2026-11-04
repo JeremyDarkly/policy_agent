@@ -50,6 +50,11 @@ const JEV_QUESTION_LABELS: Record<string, string> = {
   tone: "Tone",
 };
 
+const jevQuestionRank = (name: string): number => {
+  const i = Object.keys(JEV_QUESTION_LABELS).indexOf(name);
+  return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+};
+
 interface ChatResponse {
   response: string;
   requestId: string;
@@ -664,8 +669,13 @@ const ChatWidget = ({ isOpen, onClose, initialQuery }: ChatWidgetProps) => {
                             </span>
                           </div>
                         ) : (
-                          Object.entries(lastMetrics.jev.results).map(
-                            ([name, r]) => (
+                          // LaunchDarkly serves the questions with sorted keys; list known ones in a fixed order
+                          Object.entries(lastMetrics.jev.results)
+                            .sort(
+                              ([a], [b]) =>
+                                jevQuestionRank(a) - jevQuestionRank(b)
+                            )
+                            .map(([name, r]) => (
                               <div className="cw-metric-row" key={name}>
                                 <span className="cw-metric-label">
                                   {JEV_QUESTION_LABELS[name] ?? name}:
@@ -680,8 +690,7 @@ const ChatWidget = ({ isOpen, onClose, initialQuery }: ChatWidgetProps) => {
                                     : `${(r.score * 100).toFixed(1)}%`}
                                 </span>
                               </div>
-                            )
-                          )
+                            ))
                         )}
                       </div>
                     )}
