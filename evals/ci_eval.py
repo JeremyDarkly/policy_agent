@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import importlib.util
 import json
 import os
 import re
@@ -51,6 +52,38 @@ from launchdarkly_ai_server import (
 )
 
 EVALS_DIR = Path(__file__).resolve().parent
+OPENAI_COMPATIBLE_PATH = EVALS_DIR.parent / "app/backend/src/utils/openai_compatible.py"
+
+
+def load_openai_compatible() -> Any:
+    """The backend's OpenAI-compatible provider table, loaded by path so evals don't import the backend app.
+
+    It needs only the standard library and langchain-openai.
+    """
+    spec = importlib.util.spec_from_file_location("openai_compatible", OPENAI_COMPATIBLE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # dataclasses look the module up while it loads
+    spec.loader.exec_module(module)
+    return module
+
+
+openai_compatible = load_openai_compatible()
+
+
+def eval_handlers() -> list[ProviderHandler]:
+    """The handlers for a run: OpenAI-compatible providers (OpenRouter, vLLM) get a model factory that reads their
+    base URL and key from env vars by provider name; every other provider gets the SDK's default model.
+
+    A wildcard handler scoped to a provider list wins over an unscoped one, so the order doesn't matter.
+    """
+    names = list(openai_compatible.PROVIDER_NAMES)
+    factory = openai_compatible.eval_model_factory
+    return [
+        create_langchain_agents_handler(factory, providers=names),
+        create_langchain_messages_handler(factory, providers=names),
+        create_langchain_agents_handler(),
+        create_langchain_messages_handler(),
+    ]
 
 # The app's .env uses LAUNCHDARKLY_* names; the AI SDK reads LD_* names.
 ENV_MAP = {
@@ -104,6 +137,23 @@ class TargetResult:
     baseline_passed: int | None = None
     newly_failing: list[ScoredRow] = field(default_factory=list)
     now_passing: list[ScoredRow] = field(default_factory=list)
+    # Token usage over the generation calls that reported it (judge calls are not counted).
+    usage_rows: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    # USD per token from the variation's model config; None when it has no prices.
+    cost_per_input_token: float | None = None
+    cost_per_output_token: float | None = None
+
+    def per_row(self) -> tuple[float, float, float | None] | None:
+        """(input tokens, output tokens, cost in USD) per generation row, or None without usage."""
+        if not self.usage_rows:
+            return None
+        tokens_in = self.input_tokens / self.usage_rows
+        tokens_out = self.output_tokens / self.usage_rows
+        if self.cost_per_input_token is None or self.cost_per_output_token is None:
+            return tokens_in, tokens_out, None
+        return tokens_in, tokens_out, tokens_in * self.cost_per_input_token + tokens_out * self.cost_per_output_token
 
 
 # --- Scorers -----------------------------------------------------------------
@@ -211,6 +261,20 @@ def ld_get(path: str) -> Any:
         raise EvaluationsError(f"LaunchDarkly API GET {path} failed with {error.code}: {body}") from None
 
 
+def model_prices(project_key: str, config: str, variation: str) -> tuple[float | None, float | None]:
+    """The variation's model config prices in USD per token, (None, None) if it has none.
+
+    LaunchDarkly's AI Config metrics report $0 cost even for priced models, so the eval computes cost itself.
+    """
+    found = ld_get(f"projects/{project_key}/ai-configs/{config}/variations/{variation}")
+    items = found.get("items") or [found]
+    model_config_key = items[0].get("modelConfigKey")
+    if not model_config_key:
+        return None, None
+    model_config = ld_get(f"projects/{project_key}/ai-configs/model-configs/{model_config_key}")
+    return model_config.get("costPerInputToken"), model_config.get("costPerOutputToken")
+
+
 def judge_lookup(evals: Any, target: dict[str, Any]) -> dict[str, JudgeInfo]:
     """evaluationMetricKey -> judge, since a judge call's config carries only the metric key."""
     lookup = {}
@@ -237,6 +301,12 @@ def recording_handler(
             if message not in result.row_errors and len(result.row_errors) < MAX_ROW_ERRORS:
                 result.row_errors.append(message)
             raise
+        if not config.get("evaluationMetricKey"):  # a generation call, not a judge call
+            usage = output.get("usage") if isinstance(output, dict) else None
+            if usage and (usage.get("input_tokens") or usage.get("output_tokens")):
+                result.usage_rows += 1
+                result.input_tokens += usage.get("input_tokens") or 0
+                result.output_tokens += usage.get("output_tokens") or 0
         judge = judges.get(config.get("evaluationMetricKey", ""))
         if judge is not None and variables and "formatting_instructions" in variables:
             try:
@@ -507,6 +577,11 @@ async def run_target(
     result.key = f"ci-{args.label}-{config}-{variation}-{stamp}".lower()
     try:
         judges = judge_lookup(evals, target)
+        try:
+            result.cost_per_input_token, result.cost_per_output_token = model_prices(
+                evals.project_key, config, variation)
+        except EvaluationsError as error:
+            print(f"  no prices for {config}/{variation}: {error}", flush=True)
         run = await evals.run(
             key=result.key,
             dataset=dataset,
@@ -514,10 +589,7 @@ async def run_target(
             generation=generation_for(target),
             # The agents are agent-mode AI Configs (instructions) and the judges are
             # messages-mode ones; the SDK picks the handler by the config's mode.
-            handlers=[
-                recording_handler(handler, result, judges)
-                for handler in (create_langchain_agents_handler(), create_langchain_messages_handler())
-            ],
+            handlers=[recording_handler(handler, result, judges) for handler in eval_handlers()],
             tools=[],
             criteria=criteria_for(target),
             concurrency=args.concurrency,
@@ -579,21 +651,31 @@ def details(summary: str, rows: list[ScoredRow], got: str = "Got") -> list[str]:
     return ["", f"<details><summary>{summary}</summary>", "", *rows_table(rows, got), "", "</details>"]
 
 
+def usage_cells(r: TargetResult) -> tuple[str, str]:
+    """Tokens per row (input, output) and cost per row, or dashes when unknown."""
+    per_row = r.per_row()
+    if per_row is None:
+        return "–", "–"
+    tokens_in, tokens_out, cost = per_row
+    return f"{tokens_in:,.0f}, {tokens_out:,.0f}", "–" if cost is None else f"${cost:.4f}"
+
+
 def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bool | None = None) -> str:
     links = not getattr(args, "no_run_links", False)
     mode = "quick" if args.quick else "full"
     lines = [
         f"### LaunchDarkly evals ({mode}, advisory)",
         "",
-        "| AI Config | Variation | Served to | Dataset | Rows passed | vs `main` | Verdict | Run |",
-        "|---|---|---|---|---|---|---|---|",
+        "| AI Config | Variation | Served to | Dataset | Rows passed | vs `main` | Tokens/row in, out | Cost/row | Verdict "
+        "| Run |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
         variation = f"`{r.variation}`" + (f" ({r.source})" if r.source else "")
         served_to = ", ".join(f"{c['name']} ({c['reason']})" for c in r.contexts) or "–"
         if r.error or r.skipped:
             verdict = "error" if r.error else "skipped"
-            lines.append(f"| `{r.config}` | {variation} | {served_to} | `{r.dataset}` | – | – | {verdict} | – |")
+            lines.append(f"| `{r.config}` | {variation} | {served_to} | `{r.dataset}` | – | – | – | – | {verdict} | – |")
             continue
         s = r.summary
         counts = f"{s['passed']}/{s['total']}" + (f" ({s['error']} errors)" if s["error"] else "")
@@ -605,14 +687,17 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
             delta = "no change" if change == 0 else f"{change:+d} (was {r.baseline_passed})"
         verdict = "passed" if r.passed else "failed"
         run = f"[open]({r.url})" if links else f"`{r.key}`"
+        tokens, cost = usage_cells(r)
         lines.append(
-            f"| `{r.config}` | {variation} | {served_to} | `{r.dataset}` | {counts} | {delta} | {verdict} | {run} |"
+            f"| `{r.config}` | {variation} | {served_to} | `{r.dataset}` | {counts} | {delta} | {tokens} | {cost} "
+            f"| {verdict} | {run} |"
         )
     if any(r.source for r in results):
         lines += ["", "*served*: what the default rule serves in the environment. *context*: what LaunchDarkly "
                   "serves a test context from `[contexts]` in ci_targets.toml. *listed*: from `variations` in "
                   "ci_targets.toml. *chosen*: from `--variation`. *Served to*: the test contexts LaunchDarkly "
-                  "serves the variation to, and why."]
+                  "serves the variation to, and why. *Tokens/row* and *Cost/row*: means over the generation calls, without judge "
+                  "calls; cost uses the prices on the variation's model config, \"–\" when it has none."]
     if not links:
         lines += ["", "Find a run in LaunchDarkly under **Evaluations** by the name in the Run column."]
     if compared is False:

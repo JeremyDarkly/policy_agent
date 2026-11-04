@@ -2164,6 +2164,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "langchain-aws" },
+    { name = "langchain-openai" },
     { name = "launchdarkly-ai-langchain-agents" },
     { name = "launchdarkly-ai-langchain-messages" },
     { name = "launchdarkly-ai-openai-messages" },
@@ -2185,6 +2186,7 @@ notebook = [
 [package.metadata]
 requires-dist = [
     { name = "langchain-aws", specifier = ">=1.0" },
+    { name = "langchain-openai", specifier = ">=1.7" },
     { name = "launchdarkly-ai-langchain-agents", specifier = "==1.0.0" },
     { name = "launchdarkly-ai-langchain-messages", specifier = "==1.0.0" },
     { name = "launchdarkly-ai-openai-messages", specifier = "==1.0.0" },

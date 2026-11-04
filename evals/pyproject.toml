@@ -9,6 +9,8 @@ dependencies = [
   "launchdarkly-ai-langchain-messages==1.0.0",
   "launchdarkly-ai-langchain-agents==1.0.0",
   "langchain-aws>=1.0",
+  # OpenAI-compatible providers (OpenRouter, vLLM) through ci_eval.py's model factory
+  "langchain-openai>=1.7",
   "launchdarkly-server-sdk>=9.0",
   "python-dotenv>=1.0",
   "launchdarkly-ai-python>=1.0.0",
