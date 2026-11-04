@@ -324,7 +324,8 @@ def recording_handler(
                 )
         return output
 
-    return ProviderHandler(recorded, provides_for=inner.provides_for, capture_content=inner.capture_content)
+    return ProviderHandler(recorded, provides_for=inner.provides_for, capture_content=inner.capture_content,
+                           providers=inner.providers)
 
 
 
