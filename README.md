@@ -192,7 +192,8 @@ customer-facing answer. Judges then score that answer asynchronously.
                         ┌────────▼────────┐
                         │ ONLINE JUDGES   │
                         │ accuracy +      │
-                        │ coherence       │
+                        │ coherence,      │
+                        │ and/or Jev      │
                         │ → LaunchDarkly  │
                         └─────────────────┘
 ```
@@ -224,6 +225,33 @@ auto-generated metric. They run in background threads on every response.
 |---|---|---|---|
 | Accuracy | `ai-judge-accuracy` | `$ld:ai:judge:accuracy` | 0.8 |
 | Coherence | `ai-judge-coherence` | `$ld:ai:judge:coherence` | 0.7 |
+| Jev (five classifications in one request) | `ai-judge-jev` | `$ld:ai:judge:jev-accuracy`, `jev-hallucination-free`, `jev-answers-question`, `jev-coherence`, `jev-tone-ok` | Per question, in the variation (below) |
+
+`ai-judge-jev` grades the same reply with Jev, TypeSafe's decision model, instead of an LLM. One request answers
+five questions, and each answer is sent as its own metric on the `brand_agent` tracker. The served variation
+decides what runs, with no redeploy:
+
+| Variation | Behavior |
+|---|---|
+| `disabled` (default rule) | Jev is not called. The two LLM judges run as above. |
+| `jev-alongside` | Jev runs as well as the LLM judges. The chat panel shows both, and `jev-judge-disagreement` records whether their pass/fail verdicts differ. |
+| `jev-only` | Jev replaces the LLM judges. Accuracy passes when Jev's `accuracy` and `hallucination` pass; coherence passes when `coherence` and `tone` pass. |
+
+| Question | Type | Value sent | Passes when | Metric |
+|---|---|---|---|---|
+| `accuracy` | score, 3 levels | score / 2 | ≥ 0.8 | `jev-accuracy` |
+| `hallucination` | noul | 1 − noul | noul < 0.5 | `jev-hallucination-free` |
+| `answers_question` | noul | noul | ≥ 0.5 | `jev-answers-question` |
+| `coherence` | score, 3 levels | score / 2 | ≥ 0.7 | `jev-coherence` |
+| `tone` | choice | probability of `warm_professional` | choice is `warm_professional` | `jev-tone-ok` |
+
+The questions, thresholds and metric keys live in the variations' `model.custom.questions`, so they are edited in
+LaunchDarkly. A judge AI Config holds one `evaluationMetricKey`, so the other four metric keys are kept there too
+(#57). The Jev path has its own guardrail metrics: `jev-judge-error-rate`, `jev-judge-cost-cents`,
+`jev-judge-disagreement`, and latency from the `ai-judge-jev` tracker's duration. A Jev failure never blocks a chat:
+it sends `jev-judge-error` = 1, and the LLM judges still run unless `jev-only` is served. The backend needs
+`TYPESAFE_API_KEY`. Setup, the labeled pilot and the demo steps are in
+[evals/README.md](evals/README.md#jev-judge).
 
 ### Served model
 
@@ -315,7 +343,7 @@ policy_agent/
 │   │       │                          # branch_specialist, scheduler_specialist,
 │   │       │                          # brand_voice_agent
 │   │       ├── graph/                 # workflow.py (StateGraph), state.py
-│   │       ├── evaluation/            # judge.py, agent_evaluator.py (G-Eval)
+│   │       ├── evaluation/            # judge.py, jev_judge.py, agent_evaluator.py (G-Eval)
 │   │       ├── tools/                 # calendar.py (appointment slots/booking)
 │   │       └── utils/                 # LD client, observability, Bedrock invoker,
 │   │                                  # model config resolution, user profiles,
