@@ -25,82 +25,77 @@ resource "launchdarkly_ai_config" "triage_agent" {
   ]
 }
 
-resource "launchdarkly_ai_config_variation" "triage_agent" {
-  project_key      = var.project_key
-  config_key       = launchdarkly_ai_config.triage_agent.key
-  key              = "default"
-  name             = "Default"
-  model_config_key = launchdarkly_model_config.claude_sonnet_5.key
-  state            = "published"
+# triage_agent's prompt and tools, shared by its variations so the model is the
+# only difference between them.
+locals {
+  triage_instructions = chomp(<<-EOT
+      You are an expert triage agent for {{domain}}, a bank's customer support.
 
-  instructions = chomp(<<-EOT
-    You are an expert triage agent for {{domain}}, a bank's customer support.
+      Your task is to analyze customer queries and provide a JSON classification response that starts immediately with the category classification.
 
-    Your task is to analyze customer queries and provide a JSON classification response that starts immediately with the category classification.
+      CLASSIFICATION CATEGORIES:
+      Classify into exactly ONE category. Use the exact lowercase value shown in parentheses.
 
-    CLASSIFICATION CATEGORIES:
-    Classify into exactly ONE category. Use the exact lowercase value shown in parentheses.
+      1. account_question (account_question)
+         - Account balances, account types, and statements
+         - Fees, interest rates, and product terms
+         - Cards (debit/credit), transactions, transfers, and payments
+         - Loans, mortgages, and other product details
+         - Anything answerable from the customer's account and products
 
-    1. account_question (account_question)
-       - Account balances, account types, and statements
-       - Fees, interest rates, and product terms
-       - Cards (debit/credit), transactions, transfers, and payments
-       - Loans, mortgages, and other product details
-       - Anything answerable from the customer's account and products
+      2. branch_lookup (branch_lookup)
+         - Finding nearby branches or ATMs
+         - Branch/ATM hours, locations, and services
+         - In-person or self-service banking questions
 
-    2. branch_lookup (branch_lookup)
-       - Finding nearby branches or ATMs
-       - Branch/ATM hours, locations, and services
-       - In-person or self-service banking questions
+      3. schedule_agent (schedule_agent)
+         - Explicit requests to speak with a human banker
+         - Fraud reports, disputes, or unauthorized-transaction concerns
+         - Complex, sensitive, or multi-part requests needing human judgment
+         - Requests requiring account changes, applications, or identity verification
 
-    3. schedule_agent (schedule_agent)
-       - Explicit requests to speak with a human banker
-       - Fraud reports, disputes, or unauthorized-transaction concerns
-       - Complex, sensitive, or multi-part requests needing human judgment
-       - Requests requiring account changes, applications, or identity verification
+      4. general_question (general_question)
+         - General informational questions about {{domain}}
+         - Simple questions that don't require specialist input
+         - Questions that don't clearly fit another category
 
-    4. general_question (general_question)
-       - General informational questions about {{domain}}
-       - Simple questions that don't require specialist input
-       - Questions that don't clearly fit another category
+      CLASSIFICATION RULES:
+      - Balance, fee, rate, card, transaction, and product questions = account_question
+      - Branch or ATM location/hours questions = branch_lookup
+      - Fraud, disputes, or "talk to someone" = schedule_agent
+      - When in doubt between categories, choose the most specific match
 
-    CLASSIFICATION RULES:
-    - Balance, fee, rate, card, transaction, and product questions = account_question
-    - Branch or ATM location/hours questions = branch_lookup
-    - Fraud, disputes, or "talk to someone" = schedule_agent
-    - When in doubt between categories, choose the most specific match
+      CONFIDENCE SCORING:
+      - 0.9-1.0: Very clear, single-category query
+      - 0.7-0.89: Clear query with minor ambiguity
+      - 0.5-0.69: Moderate ambiguity, best-effort classification
+      - 0.0-0.49: High ambiguity, default to schedule_agent
 
-    CONFIDENCE SCORING:
-    - 0.9-1.0: Very clear, single-category query
-    - 0.7-0.89: Clear query with minor ambiguity
-    - 0.5-0.69: Moderate ambiguity, best-effort classification
-    - 0.0-0.49: High ambiguity, default to schedule_agent
+      ESCALATION CRITERIA:
+      Set escalation_needed = true if:
+      - Confidence score < 0.7
+      - Query contains multiple unrelated questions
+      - Customer expresses frustration or urgency
+      - Sensitive topics (fraud, disputes, complaints)
+      - Explicit request to speak with a human
 
-    ESCALATION CRITERIA:
-    Set escalation_needed = true if:
-    - Confidence score < 0.7
-    - Query contains multiple unrelated questions
-    - Customer expresses frustration or urgency
-    - Sensitive topics (fraud, disputes, complaints)
-    - Explicit request to speak with a human
+      RESPONSE FORMAT:
+      Respond with ONLY valid JSON (no markdown, no preamble, no explanation). The JSON must be the complete response and start immediately:
 
-    RESPONSE FORMAT:
-    Respond with ONLY valid JSON (no markdown, no preamble, no explanation). The JSON must be the complete response and start immediately:
-
-    {
-        "query_type": "account_question|branch_lookup|schedule_agent|general_question",
-        "confidence_score": 0.95,
-        "extracted_context": {
-            "relevant_details": "key information from query",
-            "urgency": "normal|high|urgent"
-        },
-        "escalation_needed": false,
-        "reasoning": "Brief explanation of classification choice"
-    }
-  EOT
+      {
+          "query_type": "account_question|branch_lookup|schedule_agent|general_question",
+          "confidence_score": 0.95,
+          "extracted_context": {
+              "relevant_details": "key information from query",
+              "urgency": "normal|high|urgent"
+          },
+          "escalation_needed": false,
+          "reasoning": "Brief explanation of classification choice"
+      }
+    EOT
   )
 
-  tool_keys = [
+  triage_tool_keys = [
     launchdarkly_ai_tool.analyze_sentiment_aws_comprehend.key,
     launchdarkly_ai_tool.assess_urgency_level.key,
     launchdarkly_ai_tool.classify_query_intent_aws_comprehend.key,
@@ -110,6 +105,45 @@ resource "launchdarkly_ai_config_variation" "triage_agent" {
     launchdarkly_ai_tool.translate_text_aws_translate.key,
   ]
 }
+
+resource "launchdarkly_ai_config_variation" "triage_agent" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.triage_agent.key
+  key              = "default"
+  name             = "Default"
+  model_config_key = launchdarkly_model_config.claude_sonnet_5.key
+  state            = "published"
+
+  instructions = local.triage_instructions
+
+  tool_keys = local.triage_tool_keys
+}
+
+# Mistral Large 4 through OpenRouter, differing only in reasoning_effort (the
+# model config). Demo-only: targeting serves them to individual demo users and
+# never by default. They need OPENROUTER_API_KEY in the backend's environment.
+resource "launchdarkly_ai_config_variation" "triage_agent_mistral_large_4_low" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.triage_agent.key
+  key              = "mistral-large-4-low"
+  name             = "Mistral Large 4 (Low reasoning)"
+  model_config_key = launchdarkly_model_config.openrouter_mistral_large_4_low.key
+  state            = "published"
+  instructions     = local.triage_instructions
+  tool_keys        = local.triage_tool_keys
+}
+
+resource "launchdarkly_ai_config_variation" "triage_agent_mistral_large_4_high" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.triage_agent.key
+  key              = "mistral-large-4-high"
+  name             = "Mistral Large 4 (High reasoning)"
+  model_config_key = launchdarkly_model_config.openrouter_mistral_large_4_high.key
+  state            = "published"
+  instructions     = local.triage_instructions
+  tool_keys        = local.triage_tool_keys
+}
+
 
 resource "launchdarkly_ai_config" "account_agent" {
   project_key = var.project_key
@@ -556,10 +590,10 @@ resource "launchdarkly_ai_config" "ai_judge_coherence" {
 }
 
 resource "launchdarkly_ai_config_variation" "ai_judge_coherence" {
-  project_key      = var.project_key
-  config_key       = launchdarkly_ai_config.ai_judge_coherence.key
-  key              = "default"
-  name             = "Default"
+  project_key = var.project_key
+  config_key  = launchdarkly_ai_config.ai_judge_coherence.key
+  key         = "default"
+  name        = "Default"
   # Was claude_sonnet_4, which Bedrock has retired ("This model version has
   # reached the end of its life").
   model_config_key = launchdarkly_model_config.claude_sonnet_5.key
@@ -715,10 +749,10 @@ resource "launchdarkly_ai_config" "ci_judge_coherence" {
 }
 
 resource "launchdarkly_ai_config_variation" "ci_judge_coherence" {
-  project_key      = var.project_key
-  config_key       = launchdarkly_ai_config.ci_judge_coherence.key
-  key              = "default"
-  name             = "Default"
+  project_key = var.project_key
+  config_key  = launchdarkly_ai_config.ci_judge_coherence.key
+  key         = "default"
+  name        = "Default"
   # Not claude_sonnet_4: Bedrock has retired it (see ai_judge_coherence).
   model_config_key = launchdarkly_model_config.claude_sonnet_5.key
   state            = "published"

@@ -87,6 +87,47 @@ resource "launchdarkly_model_config" "claude_sonnet_4" {
   tags = ["managed-by-terraform"]
 }
 
+# Mistral Large 4 through OpenRouter, one model config per reasoning mode, so
+# the mode shows in the model picker. Provider "OpenRouter" is not in
+# LaunchDarkly's catalog; the backend and ci_eval.py map it to
+# OPENROUTER_BASE_URL / OPENROUTER_API_KEY (utils/openai_compatible.py).
+# var.model_override does not apply: it names a Bedrock model.
+# Prices are OpenRouter's standard rate on 2026-10-31: $0.70 / $2.10 per million
+# tokens. LaunchDarkly saves them once; a price change needs a new model config.
+resource "launchdarkly_model_config" "openrouter_mistral_large_4_low" {
+  project_key           = var.project_key
+  key                   = "openrouter-mistral-large-4-low"
+  name                  = "Mistral Large 4, Low reasoning (OpenRouter)"
+  model_id              = "mistralai/mistral-large-4-0"
+  model_provider        = "OpenRouter"
+  cost_per_input_token  = 0.0000007
+  cost_per_output_token = 0.0000021
+
+  params = jsonencode({
+    reasoning_effort = "low"
+    max_tokens       = 4000
+  })
+
+  tags = ["managed-by-terraform"]
+}
+
+resource "launchdarkly_model_config" "openrouter_mistral_large_4_high" {
+  project_key           = var.project_key
+  key                   = "openrouter-mistral-large-4-high"
+  name                  = "Mistral Large 4, High reasoning (OpenRouter)"
+  model_id              = "mistralai/mistral-large-4-0"
+  model_provider        = "OpenRouter"
+  cost_per_input_token  = 0.0000007
+  cost_per_output_token = 0.0000021
+
+  params = jsonencode({
+    reasoning_effort = "high"
+    max_tokens       = 4000
+  })
+
+  tags = ["managed-by-terraform"]
+}
+
 # Keyed map of the model configs above, consumed by outputs.tf.
 locals {
   model_config_resources = {
@@ -97,6 +138,8 @@ locals {
       launchdarkly_model_config.nova_pro,
       launchdarkly_model_config.claude_haiku_4_5_brand_voice,
       launchdarkly_model_config.claude_sonnet_4,
+      launchdarkly_model_config.openrouter_mistral_large_4_low,
+      launchdarkly_model_config.openrouter_mistral_large_4_high,
     ] : r.key => r
   }
 }
