@@ -23,7 +23,9 @@ import dataclasses
 import json
 import os
 import re
+import statistics
 import sys
+import time
 import tomllib
 import urllib.error
 import urllib.request
@@ -74,6 +76,19 @@ class ScoredRow:
 
 
 @dataclass
+class Call:
+    """One handler call: a row's generation or one judge's score of a row."""
+
+    kind: str  # "generation" or "judge"
+    judge: str = ""  # the judge's AI Config key, for judge calls
+    input_tokens: int = 0
+    output_tokens: int = 0
+    latency_ms: int = 0
+    # False when the handler returned no usage, or zero tokens.
+    has_usage: bool = False
+
+
+@dataclass
 class TargetResult:
     config: str
     variation: str
@@ -99,9 +114,15 @@ class TargetResult:
     # Distinct errors raised while generating or judging rows. The SDK counts
     # those rows as errors but doesn't say why.
     row_errors: list[str] = field(default_factory=list)
+    # Every successful handler call, recorded by recording_handler. Summed into
+    # cost after the run and left out of --json-out.
+    calls: list[Call] = field(default_factory=list)
+    # Tokens, latency and cost per row, from aggregate_cost.
+    cost: dict[str, Any] = field(default_factory=dict)
     # Set by compare_with_baseline when a baseline result for the same
     # config, variation and dataset exists.
     baseline_passed: int | None = None
+    baseline_cents_per_row: float | None = None
     newly_failing: list[ScoredRow] = field(default_factory=list)
     now_passing: list[ScoredRow] = field(default_factory=list)
 
@@ -187,6 +208,8 @@ def row_label(row_input: str) -> str:
 class JudgeInfo:
     key: str
     threshold: float
+    # The model config the judge's variations use, or "" when they use several or none.
+    model_config_key: str = ""
 
 
 def ld_get(path: str) -> Any:
@@ -217,8 +240,64 @@ def judge_lookup(evals: Any, target: dict[str, Any]) -> dict[str, JudgeInfo]:
     for entry in target.get("judges", []):
         judge = judge_for(entry)
         config = ld_get(f"projects/{evals.project_key}/ai-configs/{judge.key}")
-        lookup[config["evaluationMetricKey"]] = JudgeInfo(judge.key, judge.threshold)
+        keys = {v.get("modelConfigKey") for v in config.get("variations") or []}
+        model_config_key = keys.pop() if len(keys) == 1 and None not in keys else ""
+        lookup[config["evaluationMetricKey"]] = JudgeInfo(judge.key, judge.threshold, model_config_key or "")
     return lookup
+
+
+# --- Prices ------------------------------------------------------------------
+# The eval runner doesn't price rows (#60), so cost is computed here from the
+# token prices on each LaunchDarkly model config.
+
+
+@dataclass
+class Price:
+    """A model config's name and token prices, in dollars per token."""
+
+    model: str
+    input: float | None
+    output: float | None
+
+    @property
+    def priced(self) -> bool:
+        return self.input is not None and self.output is not None
+
+    def dollars(self, call: Call) -> float:
+        return call.input_tokens * (self.input or 0.0) + call.output_tokens * (self.output or 0.0)
+
+
+# (model config key, version) -> Price, for one run of ci_eval.py.
+_prices: dict[tuple[str, int | None], Price] = {}
+
+
+def model_config_price(project_key: str, key: str, version: int | None = None) -> Price:
+    """The name and prices of one model config. A missing price is None, never 0."""
+    if (key, version) not in _prices:
+        query = f"?version={version}" if isinstance(version, int) else ""
+        config = ld_get(f"projects/{project_key}/ai-configs/model-configs/{key}{query}")
+        prices = [config.get("costPerInputToken"), config.get("costPerOutputToken")]
+        _prices[(key, version)] = Price(
+            model=config.get("name") or key,
+            input=float(prices[0]) if isinstance(prices[0], (int, float)) else None,
+            output=float(prices[1]) if isinstance(prices[1], (int, float)) else None,
+        )
+    return _prices[(key, version)]
+
+
+def variation_price(project_key: str, config: str, variation: str) -> Price | None:
+    """The price of the model config the variation's latest version links, as the eval runner reads it.
+
+    None when the variation links no model config.
+    """
+    versions = ld_get(f"projects/{project_key}/ai-configs/{config}/variations/{variation}").get("items") or []
+    if not versions:
+        return None
+    latest = max(versions, key=lambda item: item.get("version", 0))
+    key = latest.get("modelConfigKey")
+    if not key:
+        return None
+    return model_config_price(project_key, key, latest.get("modelConfigVersion"))
 
 
 def recording_handler(
@@ -230,6 +309,7 @@ def recording_handler(
     """
 
     async def recorded(config, user_input=None, tool_handlers=None, variables=None, history=None):
+        started = time.perf_counter()
         try:
             output = await inner(config, user_input, tool_handlers, variables, history)
         except Exception as error:
@@ -238,6 +318,7 @@ def recording_handler(
                 result.row_errors.append(message)
             raise
         judge = judges.get(config.get("evaluationMetricKey", ""))
+        result.calls.append(make_call(judge, output, round((time.perf_counter() - started) * 1000)))
         if judge is not None and variables and "formatting_instructions" in variables:
             try:
                 raw, reason = parse_judge_response(output.get("output", output.get("response")))
@@ -255,6 +336,61 @@ def recording_handler(
         return output
 
     return ProviderHandler(recorded, provides_for=inner.provides_for, capture_content=inner.capture_content)
+
+
+def make_call(judge: JudgeInfo | None, output: Any, latency_ms: int) -> Call:
+    """A Call from a handler's return value; the LangChain handlers return usage as input/output_tokens."""
+    usage = output.get("usage") if isinstance(output, dict) else None
+    usage = usage if isinstance(usage, dict) else {}
+    tokens = [usage.get("input_tokens"), usage.get("output_tokens")]
+    tokens = [t if isinstance(t, int) and t > 0 else 0 for t in tokens]
+    return Call(
+        kind="judge" if judge is not None else "generation",
+        judge=judge.key if judge is not None else "",
+        input_tokens=tokens[0],
+        output_tokens=tokens[1],
+        latency_ms=latency_ms,
+        has_usage=sum(tokens) > 0,
+    )
+
+
+def aggregate_cost(
+    calls: list[Call], price: Price | None, judge_prices: dict[str, Price | None]
+) -> dict[str, Any]:
+    """Tokens, latency and cost per row from a run's calls.
+
+    The SDK makes one generation call per row, so generation averages are per
+    row. Rows that errored made no successful call and are left out. Cost is
+    None when the model config has no price, so it never reads as $0.
+    """
+    generations = [c for c in calls if c.kind == "generation"]
+    used = [c for c in generations if c.has_usage]
+    priced = price is not None and price.priced
+
+    def mean(values: list[float]) -> float | None:
+        return statistics.fmean(values) if values else None
+
+    judge_cents, judge_unpriced = 0.0, 0
+    for call in (c for c in calls if c.kind == "judge"):
+        judge_price = judge_prices.get(call.judge)
+        if judge_price is not None and judge_price.priced and call.has_usage:
+            judge_cents += judge_price.dollars(call) * 100
+        else:
+            judge_unpriced += 1
+    return {
+        "model": price.model if price is not None else "",
+        "price": "model-config" if priced else "none",
+        "rows": len(generations),
+        "rows_priced": len(used) if priced else 0,
+        "rows_without_usage": len(generations) - len(used),
+        "cents_per_row": mean([price.dollars(c) * 100 for c in used]) if priced else None,
+        "input_tokens_per_row": mean([c.input_tokens for c in used]),
+        "output_tokens_per_row": mean([c.output_tokens for c in used]),
+        "latency_ms_p50": statistics.median([c.latency_ms for c in generations]) if generations else None,
+        "judge_calls": sum(1 for c in calls if c.kind == "judge"),
+        "judge_cents": judge_cents,
+        "judge_calls_unpriced": judge_unpriced,
+    }
 
 
 
@@ -507,6 +643,11 @@ async def run_target(
     result.key = f"ci-{args.label}-{config}-{variation}-{stamp}".lower()
     try:
         judges = judge_lookup(evals, target)
+        price = variation_price(evals.project_key, config, variation)
+        judge_prices = {
+            j.key: model_config_price(evals.project_key, j.model_config_key) if j.model_config_key else None
+            for j in judges.values()
+        }
         run = await evals.run(
             key=result.key,
             dataset=dataset,
@@ -537,6 +678,8 @@ async def run_target(
         "failed": s.failed_rows,
         "error": s.error_rows,
     }
+    result.cost = aggregate_cost(result.calls, price, judge_prices)
+    result.calls = []
     return result
 
 
@@ -558,6 +701,8 @@ def compare_with_baseline(results: list[TargetResult], path: Path) -> bool:
         if r.error or b is None:
             continue
         r.baseline_passed = b["summary"]["passed"]
+        # Baselines written before cost was reported have no cost.
+        r.baseline_cents_per_row = (b.get("cost") or {}).get("cents_per_row")
         # Keyed by input and criterion: one row can fail several judges.
         before = {(m["input"], m["expected"]): ScoredRow(**m) for m in b["misses"]}
         after = {(m.input, m.expected): m for m in r.misses}
@@ -577,6 +722,74 @@ def rows_table(rows: list[ScoredRow], got: str) -> list[str]:
 
 def details(summary: str, rows: list[ScoredRow], got: str = "Got") -> list[str]:
     return ["", f"<details><summary>{summary}</summary>", "", *rows_table(rows, got), "", "</details>"]
+
+
+def cents(value: float) -> str:
+    """Cents to two significant figures: 0.42¢, 3.1¢, 12¢."""
+    if value >= 10:
+        return f"{value:,.0f}¢"
+    return f"{float(f'{value:.2g}'):g}¢"
+
+
+def cost_change(r: TargetResult) -> str:
+    """The relative change in cost per row from the baseline, or "–"."""
+    now, before = r.cost.get("cents_per_row"), r.baseline_cents_per_row
+    if now is None or not before:
+        return "–"
+    change = now / before - 1
+    return "no change" if round(change, 2) == 0 else f"{change:+.0%}"
+
+
+def latency(ms: float | None) -> str:
+    if ms is None:
+        return "–"
+    return f"{ms / 1000:.1f} s" if ms >= 1000 else f"{ms:.0f} ms"
+
+
+def cost_table(results: list[TargetResult], concurrency: int = 4) -> list[str]:
+    """The "Cost and speed per row" table, the judge cost line and the notes under it."""
+    ran = [r for r in results if r.cost and not r.error and not r.skipped]
+    if not ran:
+        return []
+    lines = [
+        "",
+        "#### Cost and speed per row",
+        "",
+        "| AI Config | Variation | Model | Pass rate | Cost per row | vs `main` | Tokens in / out | p50 latency |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    notes = []
+    for r in ran:
+        c, s = r.cost, r.summary
+        rate = f"{s['passed']}/{s['total']}" + (f" ({s['passed'] / s['total']:.0%})" if s["total"] else "")
+        cost = "no price" if c["cents_per_row"] is None else cents(c["cents_per_row"])
+        tokens = (
+            "–"
+            if c["input_tokens_per_row"] is None
+            else f"{c['input_tokens_per_row']:,.0f} / {c['output_tokens_per_row']:,.0f}"
+        )
+        model = cell(c["model"]) or "–"
+        lines.append(
+            f"| `{r.config}` | `{r.variation}` | {model} | {rate} | {cost} | {cost_change(r)} | {tokens} "
+            f"| {latency(c['latency_ms_p50'])} |"
+        )
+        if c["rows_without_usage"]:
+            notes.append(f"`{r.config}`/`{r.variation}`: {c['rows_without_usage']} of {c['rows']} rows returned "
+                         "no token usage, so its tokens and cost leave them out.")
+        if c["price"] == "none":
+            notes.append(f"`{r.config}`/`{r.variation}`: its model config has no token prices, so cost isn't shown.")
+    judge_calls = sum(r.cost["judge_calls"] for r in ran)
+    unpriced = sum(r.cost["judge_calls_unpriced"] for r in ran)
+    summary = []
+    if judge_calls:
+        judged = f"Judges cost {cents(sum(r.cost['judge_cents'] for r in ran))} this run"
+        summary.append(judged + (f" ({unpriced} of {judge_calls} judge calls had no price or usage)." if unpriced
+                                 else "."))
+    summary.append("Cost is generation only, from the model config's token prices. "
+                   f"Latency is per call in CI, at concurrency {concurrency}.")
+    lines += ["", " ".join(summary)]
+    lines += [line for note in notes for line in ("", note)]
+    return lines
 
 
 def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bool | None = None) -> str:
@@ -617,6 +830,7 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
         lines += ["", "Find a run in LaunchDarkly under **Evaluations** by the name in the Run column."]
     if compared is False:
         lines += ["", "No `main` result to compare with yet."]
+    lines += cost_table(results, getattr(args, "concurrency", 4))
     for r in results:
         for note in r.notes:
             lines += ["", f"**{r.config}**: {note}"]
@@ -633,6 +847,13 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
         if r.misses:
             lines += details(f"{r.config}: {len(r.misses)} failing", r.misses)
     return "\n".join(lines) + "\n"
+
+
+def json_result(result: TargetResult) -> dict[str, Any]:
+    """A result for --json-out, without the per-call detail."""
+    data = dataclasses.asdict(result)
+    del data["calls"]
+    return data
 
 
 def start_ld_client(project_key: str, environment: str) -> Any:
@@ -727,7 +948,7 @@ async def main() -> int:
     if args.json_out:
         Path(args.json_out).write_text(
             json.dumps(
-                [dataclasses.asdict(r) | ({"url": ""} if args.no_run_links else {}) for r in results],
+                [json_result(r) | ({"url": ""} if args.no_run_links else {}) for r in results],
                 indent=2,
             )
         )
