@@ -419,15 +419,9 @@ resource "launchdarkly_ai_config" "brand_agent" {
   ]
 }
 
-resource "launchdarkly_ai_config_variation" "brand_agent" {
-  project_key      = var.project_key
-  config_key       = launchdarkly_ai_config.brand_agent.key
-  key              = "default"
-  name             = "Default"
-  model_config_key = launchdarkly_model_config.claude_haiku_4_5_brand_voice.key
-  state            = "published"
-
-  instructions = chomp(<<-EOT
+# brand_agent's prompt and tools, shared by its variations.
+locals {
+  brand_instructions = chomp(<<-EOT
       Answer all questions in English.
 
       You are {{domain}}'s brand voice specialist, responsible for transforming specialist responses into polished, customer-facing communications.
@@ -474,12 +468,49 @@ resource "launchdarkly_ai_config_variation" "brand_agent" {
     EOT
   )
 
-  tool_keys = [
+  brand_tool_keys = [
     launchdarkly_ai_tool.analyze_sentiment_aws_comprehend.key,
     launchdarkly_ai_tool.apply_brand_guidelines.key,
     launchdarkly_ai_tool.check_accessibility_requirements.key,
     launchdarkly_ai_tool.translate_text_aws_translate.key,
   ]
+}
+
+resource "launchdarkly_ai_config_variation" "brand_agent" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.brand_agent.key
+  key              = "default"
+  name             = "Default"
+  model_config_key = launchdarkly_model_config.claude_haiku_4_5_brand_voice.key
+  state            = "published"
+
+  instructions = local.brand_instructions
+
+  tool_keys = local.brand_tool_keys
+}
+
+# Mistral Large 4 through OpenRouter, Low and High reasoning, for comparing the
+# modes with the brand judges (ci_eval.py). Not served by any rule.
+resource "launchdarkly_ai_config_variation" "brand_agent_mistral_large_4_low" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.brand_agent.key
+  key              = "mistral-large-4-low"
+  name             = "Mistral Large 4 (Low reasoning)"
+  model_config_key = launchdarkly_model_config.openrouter_mistral_large_4_low.key
+  state            = "published"
+  instructions     = local.brand_instructions
+  tool_keys        = local.brand_tool_keys
+}
+
+resource "launchdarkly_ai_config_variation" "brand_agent_mistral_large_4_high" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.brand_agent.key
+  key              = "mistral-large-4-high"
+  name             = "Mistral Large 4 (High reasoning)"
+  model_config_key = launchdarkly_model_config.openrouter_mistral_large_4_high.key
+  state            = "published"
+  instructions     = local.brand_instructions
+  tool_keys        = local.brand_tool_keys
 }
 
 resource "launchdarkly_ai_config" "ai_judge_accuracy" {
