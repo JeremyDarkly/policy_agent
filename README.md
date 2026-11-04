@@ -409,8 +409,8 @@ Measured on 2026-11-04 in staging, on the 48-row `triage_routing_dataset`:
 | `mistral-large-4-high` | 48/48 | 618, 488 | $0.0015 | 46/48, 5.6 s |
 
 The app-path column is `evals/run_triage_experiment.py --pilot`. It goes through
-`triage_node` and the backend factory, including JSON mode. Models are not
-deterministic, so High's two misses there are within run-to-run noise.
+`triage_node` and the backend factory, including JSON mode. Each figure is from a
+single run. High's two misses on the app path did not happen in its `ci_eval.py` run.
 
 - **Cost.** Mistral costs about 40% of what Claude Sonnet 5 costs per triage call.
   LaunchDarkly's AI Config metrics show $0 cost even for priced models (#48).
