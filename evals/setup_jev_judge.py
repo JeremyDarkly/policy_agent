@@ -21,7 +21,8 @@ Creates, if they don't already exist:
 - metrics for the five classifications and for the judge path's guardrails
   (`jev-judge-error-rate`, `jev-judge-cost-cents`, `jev-judge-disagreement`)
 
-Targeting: a new AI Config serves the first variation created on its default
+Targeting: one rule serves `jev-alongside` to contexts with `judge_pilot` =
+true, which only run_judge_pilot.py sets. A new AI Config serves the first variation created on its default
 rule, so the script points the default rule at `disabled` when it creates the
 config (or when you pass --reset-default), and otherwise only reports it. It
 changes only the environment in LAUNCHDARKLY_ENVIRONMENT (default `test`).
@@ -288,6 +289,44 @@ def serve_disabled_by_default(api: Api) -> None:
     print(f"  default rule in {api.env}: set to disabled")
 
 
+PILOT_ATTRIBUTE = "judge_pilot"
+
+
+def ensure_pilot_rule(api: Api) -> None:
+    """A rule serving jev-alongside to contexts with judge_pilot = true.
+
+    Only run_judge_pilot.py sets that attribute, so the rule reaches no real
+    user. It lets the pilot's simulated users go through ai-judge-jev's
+    targeting, as a chat does, while the default rule stays on disabled.
+    """
+    targeting = _targeting(api)
+    env = targeting["environments"][api.env]
+    for rule in env.get("rules") or []:
+        if any(c.get("attribute") == PILOT_ATTRIBUTE for c in rule.get("clauses") or []):
+            print(f"  rule {PILOT_ATTRIBUTE} = true: exists")
+            return
+    keys = _variation_keys(targeting)
+    api.must(
+        "PATCH",
+        f"/api/v2/projects/{api.project}/ai-configs/{CONFIG_KEY}/targeting",
+        {
+            "environmentKey": api.env,
+            "instructions": [
+                {
+                    "kind": "addRule",
+                    "description": "run_judge_pilot.py's simulated users",
+                    "clauses": [
+                        {"contextKind": "user", "attribute": PILOT_ATTRIBUTE, "op": "in", "values": [True], "negate": False}
+                    ],
+                    "variationId": targeting["variations"][keys.index("jev-alongside")]["_id"],
+                }
+            ],
+        },
+        content_type="application/json; domain-model=launchdarkly.semanticpatch",
+    )
+    print(f"  rule {PILOT_ATTRIBUTE} = true -> jev-alongside: created")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--env-file", default=".env", help="env file with LAUNCHDARKLY_* settings")
@@ -302,6 +341,7 @@ def main() -> None:
     ensure_variations(api, args.update)
     if created or "--reset-default" in sys.argv:
         serve_disabled_by_default(api)
+    ensure_pilot_rule(api)
     ensure_metrics(api, METRICS, tags=TAGS)
     on, served = default_rule(api)
     print(f"  default rule in {api.env} serves: {served} (targeting {'on' if on else 'off'})")

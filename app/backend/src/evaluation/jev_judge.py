@@ -184,7 +184,7 @@ def failed_result(judge: JevJudge, error: Optional[str]) -> dict[str, Any]:
     }
 
 
-def _call_jev(
+def call_jev(
     judge: JevJudge,
     original_query: str,
     account_context: str,
@@ -229,7 +229,7 @@ async def run_jev_judge(
     user_context: dict[str, Any],
 ) -> dict[str, Any]:
     """Ask Jev every question in one request. Never raises; `error` is set on failure."""
-    return await asyncio.to_thread(_call_jev, judge, original_query, account_context, response, user_context)
+    return await asyncio.to_thread(call_jev, judge, original_query, account_context, response, user_context)
 
 
 def reason_for(name: str, result: dict[str, Any], model: str) -> str:
