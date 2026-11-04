@@ -14,8 +14,21 @@ from ldclient.config import Config
 from ldai.client import LDAIClient, ModelConfig, ProviderConfig, LDMessage
 from ldai.models import AIConfig, AICompletionConfig, AICompletionConfigDefault
 
+from . import spend_ledger
+
 # Load environment variables
 load_dotenv()
+
+
+def with_running_spend(context: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Return a copy of `context` with the user's ledger total as `running_spend_cents`.
+
+    The value is a float: a targeting rule's numeric operators (`>=`) do not
+    match a string.
+    """
+    merged = dict(context or {})
+    merged[spend_ledger.ATTRIBUTE] = float(spend_ledger.get(spend_ledger.user_key_of(merged)))
+    return merged
 
 
 class LaunchDarklyClient:
@@ -83,8 +96,12 @@ class LaunchDarklyClient:
         if not self.ai_client:
             raise RuntimeError("LaunchDarkly client is not initialized. Check your SDK key.")
 
+        # Every evaluation carries the user's running spend, read now so a
+        # config evaluated later in the same request sees the calls before it.
+        context = with_running_spend(context)
+
         # Create LaunchDarkly context
-        ld_context = self._create_context(context or {})
+        ld_context = self._create_context(context)
 
         # Default configuration - convert dict to AIConfig if needed
         if default_config:
