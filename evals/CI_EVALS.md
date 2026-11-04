@@ -58,8 +58,8 @@ Manual runs take three optional inputs:
    - **Compares with `main`.** It matches rows to the downloaded results and lists the ones that newly fail and the
      ones that now pass.
 5. **Reports the results:**
-   - **Job summary:** a table per config and variation with rows passed, the comparison with `main`, and a verdict,
-     followed by the failing rows with the judge's score and reason.
+   - **Job summary:** a table per config and variation with rows passed, the comparison with `main`, and a verdict.
+     Under it, a **Cost and speed per row** table (see below), then the failing rows with the judge's score and reason.
    - **PR comment:** the same summary in one comment, which later runs update in place.
    - **Results artifact:** the `eval-results-quick` or `eval-results-full` JSON, kept for 90 days. The artifacts from
      runs on `main` are what later runs compare with.
@@ -69,6 +69,36 @@ fail the eval show as "failed" in the summary but leave the job green.
 
 The repository is public, so the workflow passes `--no-run-links`. The summary gives each LaunchDarkly evaluation run
 by name instead of linking to it. Find a run in LaunchDarkly under **Evaluations** by that name.
+
+### Cost and speed per row
+
+The second table in the summary has one row per evaluated variation:
+
+| Column | What it shows |
+|---|---|
+| Model | The name of the model config the variation links |
+| Pass rate | Rows passed out of rows, as in the first table |
+| Cost per row | Average generation cost of one row, in cents. "no price" when the model config has no token prices |
+| vs `main` | The relative change in cost per row from the `main` result, for example `-64%`. "–" when `main` has no cost yet |
+| Tokens in / out | Average input and output tokens per row |
+| p50 latency | Median time of one generation call |
+
+A line under the table gives what the judges cost for the whole run, which is what the CI run spent beyond generation.
+
+Where the figures come from:
+
+- **Tokens and latency.** The AI SDK's `run()` returns row counts only (#60), so `recording_handler` in `ci_eval.py`
+  reads the token usage each LangChain handler returns and times each call. Rows that errored are left out. Rows
+  whose handler returned no usage are counted in a note under the table.
+- **Prices.** Before each run, `ci_eval.py` reads the model config the variation's latest version links, and the
+  judges' model configs, and uses their `costPerInputToken` and `costPerOutputToken`. The prices are set in
+  `infrastructure/launchdarkly/model_configs.tf`. A model config created outside Terraform without prices shows
+  "no price", never $0.
+- **Latency** includes Bedrock throttling and retries, at `--concurrency` (4 by default) on a shared runner. Use it to
+  compare variations within one run, not as a serving estimate. Quick datasets have 3 rows for the specialists, so
+  read cost and latency changes from the nightly full run.
+
+Cost, like the pass rate, is advisory: it never changes the verdict or fails the job.
 
 ### How the variations are chosen
 
@@ -190,5 +220,8 @@ Local runs use your own AWS credentials and LaunchDarkly token, and count toward
 - **"Not authorized to perform sts:AssumeRoleWithWebIdentity"**: the role's trust policy doesn't match the OIDC
   subject. See **OIDC trust policy** above.
 - **A dataset shows as empty after upload**: a row is too long for the upload screen (about 4,096 characters).
+- **"no price" in the cost table**: the variation's model config has no token prices. Add
+  `cost_per_input_token` and `cost_per_output_token` to it in `infrastructure/launchdarkly/model_configs.tf`, or set
+  them in the LaunchDarkly UI for model configs Terraform doesn't manage.
 - **Generation errors on a row**: the summary lists them under row errors. A model can reject a parameter combination
   that the backend never sends. Use `drop_parameters` in `ci_targets.toml` to leave those parameters out.

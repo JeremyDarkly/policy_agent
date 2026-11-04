@@ -108,6 +108,10 @@ jobs:
             fi
           done
 
+      - name: Unit tests
+        working-directory: evals
+        run: uv run python -m unittest test_ci_eval
+
       - name: Run evals
         working-directory: evals
         env:

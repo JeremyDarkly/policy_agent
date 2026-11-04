@@ -213,7 +213,7 @@ class PriceTest(unittest.TestCase):
                 {"version": 1, "modelConfigKey": "old"},
                 {"version": 2, "modelConfigKey": "claude-sonnet-5", "modelConfigVersion": 1},
             ]},
-            "projects/p/ai-configs/model-configs/claude-sonnet-5?version=1": {
+            "projects/p/ai-configs/model-configs/claude-sonnet-5": {
                 "name": "Claude Sonnet 5", "costPerInputToken": 2e-06, "costPerOutputToken": 1e-05},
         }
         with mock.patch.object(ci_eval, "ld_get", side_effect=responses.__getitem__) as get:

@@ -267,22 +267,26 @@ class Price:
         return call.input_tokens * (self.input or 0.0) + call.output_tokens * (self.output or 0.0)
 
 
-# (model config key, version) -> Price, for one run of ci_eval.py.
-_prices: dict[tuple[str, int | None], Price] = {}
+# Model config key -> Price, for one run of ci_eval.py.
+_prices: dict[str, Price] = {}
 
 
-def model_config_price(project_key: str, key: str, version: int | None = None) -> Price:
-    """The name and prices of one model config. A missing price is None, never 0."""
-    if (key, version) not in _prices:
-        query = f"?version={version}" if isinstance(version, int) else ""
-        config = ld_get(f"projects/{project_key}/ai-configs/model-configs/{key}{query}")
+def model_config_price(project_key: str, key: str) -> Price:
+    """The name and prices of the latest version of a model config. A missing price is None, never 0.
+
+    Variations pin a model config version, but setting prices creates a new
+    version, and the model ID can't change between versions (it's ForceNew in
+    Terraform). So the latest version's prices are the model's current prices.
+    """
+    if key not in _prices:
+        config = ld_get(f"projects/{project_key}/ai-configs/model-configs/{key}")
         prices = [config.get("costPerInputToken"), config.get("costPerOutputToken")]
-        _prices[(key, version)] = Price(
+        _prices[key] = Price(
             model=config.get("name") or key,
             input=float(prices[0]) if isinstance(prices[0], (int, float)) else None,
             output=float(prices[1]) if isinstance(prices[1], (int, float)) else None,
         )
-    return _prices[(key, version)]
+    return _prices[key]
 
 
 def variation_price(project_key: str, config: str, variation: str) -> Price | None:
@@ -297,7 +301,7 @@ def variation_price(project_key: str, config: str, variation: str) -> Price | No
     key = latest.get("modelConfigKey")
     if not key:
         return None
-    return model_config_price(project_key, key, latest.get("modelConfigVersion"))
+    return model_config_price(project_key, key)
 
 
 def recording_handler(

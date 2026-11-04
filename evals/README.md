@@ -17,6 +17,7 @@ Evaluations run from code with the LaunchDarkly Python AI SDK against the stagin
 | `triage_routing_dataset_quick.jsonl` | 12 of those rows, 3 per specialist; stored dataset key `triage_routing_dataset_quick` |
 | `triage_prompts/tuned.md` | The tuned triage prompt the challenger variations use |
 | `ci_eval.py` | Script for CI: evaluates AI Config variations against stored datasets, without the app, and writes a Markdown summary |
+| `test_ci_eval.py` | Unit tests for `ci_eval.py`'s cost, token and latency reporting, with fake handlers |
 | `ci_targets.toml` | The datasets, scorers and judges `ci_eval.py` uses for each AI Config |
 | `CI_EVALS.md` | How the LaunchDarkly evals GitHub Action works: triggers, what a run does, setup and troubleshooting |
 | `build_specialist_datasets.py` | Script: builds the CI datasets for the account, branch, scheduler and brand voice agents in `ci_datasets/` |
@@ -214,6 +215,13 @@ the SDK's offline variables (`response_to_evaluate`, `message_history`, `ground_
 `infrastructure/launchdarkly/ai_configs_resources.tf`. In `ci_targets.toml`, a judge entry can set a `threshold` and a
 `ground_truth` template rendered with the row's variables. `drop_parameters` leaves out model parameters the backend
 doesn't send either.
+
+**Cost, tokens and latency.** Under the pass-rate table, the summary has a **Cost and speed per row** table: the
+model, pass rate, average cost per row in cents, the change in cost from `main`, average tokens in and out, and median
+latency per row, with one line for what the judges cost. `ci_eval.py` counts tokens and times calls in its handler
+wrapper, because the SDK's run result has row counts only, and prices them with the token prices on each variation's
+model config (set in `infrastructure/launchdarkly/model_configs.tf`). See `CI_EVALS.md`, "Cost and speed per row".
+`test_ci_eval.py` tests this without LaunchDarkly or Bedrock: `uv run python -m unittest test_ci_eval`.
 
 `.github/workflows/evals.yml` runs `ci_eval.py` in GitHub Actions on PRs, pushes to `main`, nightly and by hand.
 [CI_EVALS.md](CI_EVALS.md) describes what triggers it, what a run does, the quick and full datasets, and the
