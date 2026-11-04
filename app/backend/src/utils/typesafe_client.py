@@ -1,9 +1,12 @@
 """Minimal client for TypeSafe's Jev decision model (`POST /v1/systemone`).
 
 Direct HTTP over one `httpx.Client` per process, not `typesafe-sdk`. Only the
-response fields the triage node uses are read, and a missing one raises, so a
+response fields the callers use are read, and a missing one raises, so a
 change in the API's shape lands on the caller's error path instead of passing
 silently.
+
+Used by triage (`triage_agent`'s `jev-choice` variation) and by the Jev judge
+(`ai-judge-jev`).
 """
 
 from __future__ import annotations
@@ -16,6 +19,8 @@ import httpx
 
 API_URL = os.getenv("TYPESAFE_API_URL", "https://api.typesafe.ai/v1/systemone")
 DEFAULT_TIMEOUT_S = 1.0
+# Provider name the AI Config model catalog uses for Jev models.
+JEV_PROVIDER = "typesafe"
 
 _client: Optional[httpx.Client] = None
 _client_lock = threading.Lock()
@@ -23,6 +28,12 @@ _client_lock = threading.Lock()
 
 class TypeSafeError(RuntimeError):
     """Jev could not answer: no key, timeout, a non-2xx response or an unexpected body."""
+
+
+def is_jev_config(config: dict[str, Any]) -> bool:
+    """True when the served variation is on a TypeSafe (Jev) model config."""
+    provider = str(config.get("provider") or "")
+    return provider.split(":")[0].strip().lower() == JEV_PROVIDER
 
 
 def _http() -> httpx.Client:
@@ -53,8 +64,9 @@ def system_one(
 
     Retries once on a timeout or a 5xx. Raises TypeSafeError on a missing
     `TYPESAFE_API_KEY`, any other failure, or a response without `model`,
-    `usage` and, for every question, `choice` (choice questions), `confidence`
-    and `probabilities`.
+    `usage` and, for every question, the fields its type returns: `noul` for a
+    noul question; `confidence` and `probabilities` for the others, plus
+    `choice` for a choice question and `score` for a score question.
     """
     key = api_key or os.getenv("TYPESAFE_API_KEY")
     if not key:
@@ -86,8 +98,15 @@ def system_one(
     _require(data, "model")
     _require(data, "usage", "input_tokens")
     for name, question in questions.items():
-        if question.get("type") == "choice":
+        kind = question.get("type")
+        if kind == "noul":
+            # A noul answer is a single probability, with no confidence or probabilities.
+            _require(data, "answers", name, "noul")
+            continue
+        if kind == "choice":
             _require(data, "answers", name, "choice")
+        elif kind == "score":
+            _require(data, "answers", name, "score")
         _require(data, "answers", name, "confidence")
         _require(data, "answers", name, "probabilities")
     return data
