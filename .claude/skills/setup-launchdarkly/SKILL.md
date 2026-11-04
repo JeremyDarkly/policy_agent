@@ -26,6 +26,7 @@ do **not** need your own KBs unless you want to swap in different data.
 | `brand_agent` | completion | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | rewrites in brand voice |
 | `ai-judge-accuracy` | agent | `us.amazon.nova-pro-v1:0` | G-Eval accuracy judge |
 | `ai-judge-coherence` | agent | `us.anthropic.claude-sonnet-4-20250514-v1:0` | G-Eval coherence judge |
+| `ai-judge-jev` (optional) | judge | `TypeSafe.jev-1.14.0` | Jev judge: five classifications per reply; default rule serves `disabled`. Created by `evals/setup_jev_judge.py` (step 3b), with its eight metrics |
 
 All prompts keep the `{{domain}}` template variable, so the same configs power
 ToggleHealth, ToggleBank, and ToggleCell.
@@ -59,6 +60,16 @@ re-run. A freshly-created AI Config is enabled with its single variation served 
 default in every environment, so no targeting step is needed.
 
 To target a project other than `LAUNCHDARKLY_PROJECT_KEY`, pass `--project <key>`.
+
+### 3b. (Optional) Add the Jev judge
+Only needed to demo Jev as a judge. It needs `TYPESAFE_API_KEY` in the backend's env.
+```bash
+python3 evals/setup_jev_judge.py --env-file .env
+```
+It creates `ai-judge-jev`, its `jev-alongside` and `jev-only` variations and eight
+metrics, and points the default rule at `disabled`. Unlike the configs above, this
+one must not serve its first variation by default, or every chat would call Jev.
+See the README's Judges section for what each variation does.
 
 ### 4. Verify
 - In the LaunchDarkly UI, open **AI Configs** in your project and confirm the seven keys above are present and enabled.
