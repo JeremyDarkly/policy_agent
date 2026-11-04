@@ -110,8 +110,13 @@ docker compose run --rm terraform output     # show managed keys and IDs
 | Reusable model configs | 6 | `model_configs.tf` |
 | AI tool definitions | 20 | `tools.tf` |
 | AI agent graph (`banking_agent_graph`) | 1 | `agent_graph.tf` |
+| Jev judge AI Config (`ai-judge-jev`) and its metrics | 1 + 8 | `jev_judge.tf` |
 
-41 resources total. Each config is created with a single `Default` variation, and
+50 resources total. `ai-judge-jev`'s two variations (`jev-alongside`, `jev-only`) are not in Terraform: they need
+model config `TypeSafe.jev-1.14.0` plus questions in `model.custom`, and the provider (3.1.5) takes either a model
+config key or an inline model, with no custom parameters. Run `python3 evals/setup_jev_judge.py` after `terraform
+apply` to create them. In a project where that script already created the config and metrics, `jev_judge.tf` lists
+the `terraform import` commands. Each config is created with a single `Default` variation, and
 LaunchDarkly auto-adds a "disabled" variation ahead of it — so variation index 0 is
 `disabled` and index 1 is `Default`.
 

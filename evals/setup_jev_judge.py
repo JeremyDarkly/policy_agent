@@ -16,6 +16,11 @@ drift apart. A judge config holds one `evaluationMetricKey`
 metric keys in `model.custom.questions[*].metric_key`, and the backend sends
 each with `track_judge_result` (see #57 for why).
 
+Terraform (`infrastructure/launchdarkly/jev_judge.tf`) defines the AI Config and
+the metrics too, but not the variations: provider 3.1.5 can't set a model config
+and `model.custom` on one variation. So after `terraform apply`, run this script
+for the variations; it leaves an existing config and metrics as they are.
+
 Creates, if they don't already exist:
 - the AI Config and the two variations, on model config `TypeSafe.jev-1.14.0`
 - metrics for the five classifications and for the judge path's guardrails
