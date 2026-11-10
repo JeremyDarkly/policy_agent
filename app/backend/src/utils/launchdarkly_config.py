@@ -16,6 +16,8 @@ from ldai.client import LDAIClient, ModelConfig, ProviderConfig, LDMessage
 from ldai.models import AIConfig, AICompletionConfig, AICompletionConfigDefault
 from ldai.tracker import TokenUsage
 
+from .served_model import CONTENT_FILTER_MESSAGE, is_content_filtered
+
 # Load environment variables
 load_dotenv()
 
@@ -530,6 +532,7 @@ class ModelInvoker:
         skip_span_annotation: bool = False,
         variation_key: str = "",
         provider: str = "",
+        expected_model: str = "",
     ):
         """Initialize model invoker.
 
@@ -541,7 +544,9 @@ class ModelInvoker:
             user_context: LaunchDarkly user context (for span annotation)
             skip_span_annotation: If True, skip all span annotation (for background threads)
             variation_key: The served variation's key (sent with the served-model events)
-            provider: Provider name (bedrock, openai, anthropic)
+            provider: Provider name (bedrock, openai, anthropic, azure ai foundry)
+            expected_model: The model the served one is checked against, when the request's model ID isn't a model
+                (an Azure AI Foundry deployment name; from the model config's ``baseModel``). Empty: the request's.
         """
         self.model = model
         self.tracker = tracker
@@ -551,6 +556,7 @@ class ModelInvoker:
         self.skip_span_annotation = skip_span_annotation
         self.variation_key = variation_key
         self.provider = provider
+        self.expected_model = expected_model
 
     def _annotate_current_span(self) -> None:
         """Set ld.ai_config.key on the current span (the agent's node span).
@@ -586,7 +592,13 @@ class ModelInvoker:
 
             # Track the LLM call
             result = self.tracker.track_duration_of(lambda: self.model.invoke(messages))
-            
+
+            # Azure withholds a filtered response and says so in finish_reason; count it as an error, not a reply
+            metadata = getattr(result, "response_metadata", None)
+            if is_content_filtered(metadata):
+                self.report_content_filtered(metadata)
+                raise ValueError(CONTENT_FILTER_MESSAGE)
+
             # Track success (no arguments)
             self.tracker.track_success()
             
@@ -713,30 +725,50 @@ class ModelInvoker:
             
             raise
 
+    def _served_event_data(self, metadata: Optional[dict]) -> dict:
+        """Keyword args for the served-model events: the expected model, the served one and the deployment."""
+        from .served_model import requested_model_id, served_model
+
+        sent = requested_model_id(self.model)
+        requested = self.expected_model or sent
+        served, source = served_model(metadata, requested)
+        return {
+            "config_key": self.config_key,
+            "variation_key": self.variation_key,
+            "provider": self.provider,
+            "requested": requested,
+            "served": served,
+            "source": source,
+            "deployment": sent if self.expected_model else "",
+        }
+
     def report_served_model_of(self, metadata: Optional[dict]) -> None:
         """Send which model served this call to LaunchDarkly (see utils/served_model.py)."""
         if self.user_context is None:
             return
         try:
-            from .served_model import report_served_model, requested_model_id, served_model
+            from .served_model import report_served_model
 
-            requested = requested_model_id(self.model)
-            served, source = served_model(metadata, requested)
-            mismatch = report_served_model(
-                ldclient.get(),
-                self.user_context,
-                config_key=self.config_key,
-                variation_key=self.variation_key,
-                provider=self.provider,
-                requested=requested,
-                served=served,
-                source=source,
-            )
+            event = self._served_event_data(metadata)
+            mismatch = report_served_model(ldclient.get(), self.user_context, **event)
             if mismatch:
-                print(f"  ⚠️ {self.config_key}: requested {requested}, served by {served}")
+                print(f"  ⚠️ {self.config_key}: requested {event['requested']}, served by {event['served']}")
         except Exception as e:
             import logging
             logging.debug(f"Failed to report served model: {e}")
+
+    def report_content_filtered(self, metadata: Optional[dict]) -> None:
+        """Send ``ai-content-filtered`` for a call a content filter blocked (see utils/served_model.py)."""
+        print(f"  ⚠️ {self.config_key}: response blocked by a content filter")
+        if self.user_context is None:
+            return
+        try:
+            from .served_model import report_content_filtered
+
+            report_content_filtered(ldclient.get(), self.user_context, **self._served_event_data(metadata))
+        except Exception as e:
+            import logging
+            logging.debug(f"Failed to report content filter: {e}")
 
     def _extract_tokens(self, response: Any) -> dict[str, int]:
         """Extract token counts from response.

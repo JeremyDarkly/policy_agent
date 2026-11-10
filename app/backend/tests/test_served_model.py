@@ -297,3 +297,95 @@ def test_no_context_sends_nothing(ld):
     invoker.user_context = None
     invoker.report_served_model_of({"model_name": "x"})
     assert ld.events == []
+
+
+# --- Azure AI Foundry deployments -----------------------------------------------------------------------------------
+
+
+class _AzureModel(BaseChatModel):
+    """A Foundry deployment called by its deployment name; the response names the underlying model."""
+
+    model_name: str = "branch-grok"
+    served: str = "grok-4.6"
+    finish_reason: str = "stop"
+
+    @property
+    def _llm_type(self) -> str:
+        return "fake-azure"
+
+    def _generate(self, *a: Any, **k: Any) -> ChatResult:
+        meta = {"model_name": self.served, "finish_reason": self.finish_reason}
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="", response_metadata=meta))])
+
+
+def _azure_invoker(model, expected_model):
+    invoker = _invoker(model, "azure ai foundry")
+    invoker.expected_model = expected_model
+    return invoker
+
+
+def test_azure_deployment_compared_to_base_model(ld):
+    _azure_invoker(_AzureModel(), "grok-4.6").invoke([HumanMessage(content="hi")])
+    assert ld.names() == [SERVED_EVENT, MISMATCH_EVENT]
+    assert ld.mismatch_values() == [0]
+    data = ld.events[0][1]
+    assert data["requestedModel"] == "grok-4.6"
+    assert data["servedModel"] == "grok-4.6"
+    assert data["deployment"] == "branch-grok"
+
+
+def test_azure_dated_model_matches_base_model(ld):
+    # Azure OpenAI deployments answer with the model's dated version.
+    model = _AzureModel(model_name="branch-gpt-4o", served="gpt-4o-2024-11-20")
+    _azure_invoker(model, "gpt-4o").invoke([HumanMessage(content="hi")])
+    assert ld.mismatch_values() == [0]
+
+
+def test_azure_without_base_model(ld):
+    # Without baseModel the deployment name is compared, so a differently named deployment reads as a mismatch.
+    _azure_invoker(_AzureModel(), "").invoke([HumanMessage(content="hi")])
+    assert ld.mismatch_values() == [1]
+    data = ld.events[0][1]
+    assert data["requestedModel"] == "branch-grok"
+    assert "deployment" not in data
+
+
+def test_content_filter_sends_event_and_raises(ld):
+    from src.utils.served_model import CONTENT_FILTERED_EVENT
+
+    class Tracker(NoOpTracker):
+        calls: list = []
+
+        def track_success(self):
+            self.calls.append("success")
+
+        def track_error(self):
+            self.calls.append("error")
+
+    invoker = _azure_invoker(_AzureModel(finish_reason="content_filter"), "grok-4.6")
+    invoker.tracker = Tracker()
+    with pytest.raises(ValueError, match="content filter"):
+        invoker.invoke([HumanMessage(content="hi")])
+    assert invoker.tracker.calls == ["error"]
+    assert ld.names() == [CONTENT_FILTERED_EVENT]
+    name, data, value = ld.events[0]
+    assert value == 1
+    assert data["variationKey"] == "var"
+    assert data["servedModel"] == "grok-4.6"
+    assert data["deployment"] == "branch-grok"
+
+
+def test_get_model_invoker_reads_base_model(monkeypatch):
+    from src.utils.llm_config import get_model_invoker
+
+    monkeypatch.setenv("AZURE_FOUNDRY_ENDPOINT", "https://example-resource.services.ai.azure.com")
+    monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "test-key")
+    config = {
+        "provider": "Azure AI Foundry",
+        "model": {"name": "branch-grok", "parameters": {"temperature": 0.1}, "custom": {"baseModel": "grok-4.6"}},
+        "_variation": "azure-foundry",
+    }
+    invoker, _ = get_model_invoker("branch_agent", evaluated=(config, NoOpTracker(), CONTEXT))
+    assert invoker.provider == "azure ai foundry"
+    assert invoker.expected_model == "grok-4.6"
+    assert invoker.model.model_name == "branch-grok"

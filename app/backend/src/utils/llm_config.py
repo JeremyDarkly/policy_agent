@@ -230,6 +230,8 @@ def get_model_invoker(
             skip_span_annotation=skip_span_annotation,
             variation_key=config.get("_variation", ""),
             provider=provider,
+            # An Azure AI Foundry model ID is a deployment name; the model config says which model it runs
+            expected_model=(model_config.get("custom") or {}).get("baseModel") or "",
         ),
         config,
     )
