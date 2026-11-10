@@ -152,6 +152,20 @@ def add_azure_demo_rule(api_base: str, project: str, environment: str, token: st
     return True
 
 
+def request_status(method: str, url: str, token: str, body: dict | None = None) -> tuple[int, str]:
+    """A plain JSON request that returns (HTTP status, response body) instead of exiting on an error."""
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", token)
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, resp.read().decode(errors="replace")
+    except urllib.error.HTTPError as err:
+        return err.code, err.read().decode(errors="replace")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="report what would change")
