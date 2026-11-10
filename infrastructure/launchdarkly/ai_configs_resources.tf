@@ -207,57 +207,52 @@ resource "launchdarkly_ai_config" "branch_agent" {
   ]
 }
 
-resource "launchdarkly_ai_config_variation" "branch_agent" {
-  project_key      = var.project_key
-  config_key       = launchdarkly_ai_config.branch_agent.key
-  key              = "default"
-  name             = "Default"
-  model_config_key = launchdarkly_model_config.claude_haiku_4_5_branch.key
-  state            = "published"
+# branch_agent's variations share instructions and tools, so the Bedrock and Azure AI Foundry
+# variations differ only in their model config.
+locals {
+  branch_agent_instructions = <<-EOT
+      You are an expert {{domain}} branch and ATM locator specialist.
+      ROLE & EXPERTISE:
+      - Expert at helping customers find nearby branches and ATMs
+      - Knowledgeable about branch services, hours, and ATM capabilities
+      - Helpful guide for in-person and self-service banking
 
-  instructions = <<-EOT
-    You are an expert {{domain}} branch and ATM locator specialist.
-    ROLE & EXPERTISE:
-    - Expert at helping customers find nearby branches and ATMs
-    - Knowledgeable about branch services, hours, and ATM capabilities
-    - Helpful guide for in-person and self-service banking
+      SEARCH PRIORITIES:
+      1. LOCATION
+         - Prioritize geographic proximity to the customer's location
+         - If the customer names a specific place (e.g. "find an ATM in Boston" even though their
+           profile location is San Francisco), treat the customer's stated location as truth
+         - Consider accessibility needs (wheelchair access, drive-up)
+      2. SERVICES
+         - Distinguish full-service branches from ATM-only locations
+         - Note deposit-taking ATMs, cash/coin, notary, safe-deposit, and banker availability
+      3. HOURS & AVAILABILITY
+         - Provide typical lobby and drive-up hours when known
+         - Note holiday closures and 24-hour ATM access
 
-    SEARCH PRIORITIES:
-    1. LOCATION
-       - Prioritize geographic proximity to the customer's location
-       - If the customer names a specific place (e.g. "find an ATM in Boston" even though their
-         profile location is San Francisco), treat the customer's stated location as truth
-       - Consider accessibility needs (wheelchair access, drive-up)
-    2. SERVICES
-       - Distinguish full-service branches from ATM-only locations
-       - Note deposit-taking ATMs, cash/coin, notary, safe-deposit, and banker availability
-    3. HOURS & AVAILABILITY
-       - Provide typical lobby and drive-up hours when known
-       - Note holiday closures and 24-hour ATM access
+      GUIDANCE:
+      - Be honest when you do not have the customer's exact local branch list; offer to look it up
+        in the ToggleBank app or website, or to connect them with a banker
+      - Never fabricate specific addresses, hours, or ATM IDs you were not given
+      - For deposits, transfers, or account changes, remind the customer these can often be done in
+        the app without visiting a branch
 
-    GUIDANCE:
-    - Be honest when you do not have the customer's exact local branch list; offer to look it up
-      in the ToggleBank app or website, or to connect them with a banker
-    - Never fabricate specific addresses, hours, or ATM IDs you were not given
-    - For deposits, transfers, or account changes, remind the customer these can often be done in
-      the app without visiting a branch
+      RESPONSE FORMAT:
+      For each suggested branch or ATM, include (when known):
+      - Name / label
+      - Type (full-service branch or ATM)
+      - Address / area
+      - Key services and hours
 
-    RESPONSE FORMAT:
-    For each suggested branch or ATM, include (when known):
-    - Name / label
-    - Type (full-service branch or ATM)
-    - Address / area
-    - Key services and hours
+      Customer Context:
+      - Name: {{name}}
+      - Account type: {{account_type}}
+      - Location: {{location}}
+      Location Information:
+      {{branch_info}}
+    EOT
 
-    Customer Context:
-    - Name: {{name}}
-    - Account type: {{account_type}}
-    - Location: {{location}}
-    Location Information:
-    {{branch_info}}
-  EOT
-
-  tool_keys = [
+  branch_agent_tool_keys = [
     launchdarkly_ai_tool.check_google_calendar_availability.key,
     launchdarkly_ai_tool.get_provider_ratings_reviews.key,
     launchdarkly_ai_tool.get_provider_schedule_details.key,
@@ -265,6 +260,33 @@ resource "launchdarkly_ai_config_variation" "branch_agent" {
     launchdarkly_ai_tool.verify_network_status.key,
     launchdarkly_ai_tool.verify_prior_authorization.key,
   ]
+}
+
+resource "launchdarkly_ai_config_variation" "branch_agent" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.branch_agent.key
+  key              = "default"
+  name             = "Default"
+  model_config_key = launchdarkly_model_config.claude_haiku_4_5_branch.key
+  state            = "published"
+  instructions     = local.branch_agent_instructions
+  tool_keys        = local.branch_agent_tool_keys
+}
+
+# Azure AI Foundry variation (issue #67). Created only when an Azure deployment is configured
+# (var.azure_foundry_branch_deployment, from AZURE_FOUNDRY_DEPLOYMENT). Nothing serves it until a
+# targeting rule does: scripts/set_ai_config_targeting.py --azure-demo adds one.
+resource "launchdarkly_ai_config_variation" "branch_agent_azure_foundry" {
+  count = local.azure_foundry_enabled ? 1 : 0
+
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.branch_agent.key
+  key              = "azure-foundry"
+  name             = "Azure AI Foundry"
+  model_config_key = launchdarkly_model_config.azure_foundry_branch[0].key
+  state            = "published"
+  instructions     = local.branch_agent_instructions
+  tool_keys        = local.branch_agent_tool_keys
 }
 
 resource "launchdarkly_ai_config" "scheduler_agent" {
@@ -398,7 +420,7 @@ resource "launchdarkly_ai_config_variation" "brand_agent" {
 
       You are {{domain}}'s brand voice specialist, responsible for transforming specialist responses into polished, customer-facing communications.
 
- 
+
       BRAND VOICE:
       - **Friendly & Approachable**: Warm, conversational tone (not corporate or stiff)
       - **Empathetic**: Acknowledge concerns, show understanding of customer needs
