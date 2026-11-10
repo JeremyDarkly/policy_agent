@@ -3,6 +3,7 @@
 import os
 from functools import lru_cache
 from typing import Any, Optional, Tuple
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from langchain_core.language_models import BaseChatModel
@@ -11,6 +12,23 @@ from .launchdarkly_config import ModelInvoker, get_ld_client
 
 # Load environment variables
 load_dotenv()
+
+# Provider names (normalized: lowercased, text after ":" dropped) that select the Azure AI Foundry client.
+# The model config uses "Azure AI Foundry"; the other spellings are accepted so a hand-made config still works.
+AZURE_PROVIDERS = {"azure ai foundry", "azure", "azure openai", "foundry"}
+
+
+def azure_foundry_base_url(endpoint: str) -> str:
+    """The v1 OpenAI-compatible base URL for an Azure AI Foundry resource.
+
+    ``AZURE_FOUNDRY_ENDPOINT`` may be the bare resource URL or a full request URL copied from the portal (for
+    example ``https://<resource>.services.ai.azure.com/openai/v1/chat/completions``). Only the scheme and host
+    are kept.
+    """
+    parts = urlsplit(endpoint.strip())
+    if not parts.scheme or not parts.netloc:
+        raise ValueError(f"AZURE_FOUNDRY_ENDPOINT is not a URL: {endpoint!r}")
+    return f"{parts.scheme}://{parts.netloc}/openai/v1/"
 
 
 @lru_cache(maxsize=1)
@@ -284,8 +302,29 @@ def _create_llm_for_provider(
             api_key=api_key,
         )
 
+    elif provider_normalized in AZURE_PROVIDERS:
+        # Azure AI Foundry through its OpenAI-compatible v1 route. This serves OpenAI and non-OpenAI deployments
+        # (Grok, Llama, DeepSeek) with plain ChatOpenAI and needs no api-version. model_name is the deployment name.
+        from langchain_openai import ChatOpenAI
+
+        endpoint = os.getenv("AZURE_FOUNDRY_ENDPOINT")
+        if not endpoint:
+            raise ValueError("AZURE_FOUNDRY_ENDPOINT not set in environment (needed for Azure AI Foundry variations)")
+        api_key = os.getenv("AZURE_FOUNDRY_API_KEY")
+        if not api_key:
+            raise ValueError("AZURE_FOUNDRY_API_KEY not set in environment (needed for Azure AI Foundry variations)")
+
+        return ChatOpenAI(
+            model=model_name,
+            base_url=azure_foundry_base_url(endpoint),
+            api_key=api_key,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream_usage=True,
+        )
+
     else:
         raise ValueError(
             f"Unsupported LLM provider: {provider} (normalized: {provider_normalized}). "
-            f"Supported providers: bedrock, openai, anthropic"
+            f"Supported providers: bedrock, openai, anthropic, azure ai foundry"
         )

@@ -35,6 +35,9 @@ services:
       # API Keys (if using OpenAI/Anthropic directly)
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Azure AI Foundry, for variations whose model config has provider "Azure AI Foundry"
+      AZURE_FOUNDRY_ENDPOINT: ${AZURE_FOUNDRY_ENDPOINT:-}
+      AZURE_FOUNDRY_API_KEY: ${AZURE_FOUNDRY_API_KEY:-}
       # TypeSafe Jev, for triage_agent's jev-choice variation
       TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
       # (PYTHONUNBUFFERED / PYTHONDONTWRITEBYTECODE are set in the Dockerfile)

@@ -83,6 +83,7 @@ variable substitution and also bind-mounts it into the backend container.
 | `LLM_PROVIDER` | no | backend | Provider fallback. Default `bedrock` |
 | `LLM_MODEL` | no | backend | Model fallback used only if an AI Config carries no model. Default `claude-3-5-sonnet` |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | no | backend | Only if you point the agents at those providers directly |
+| `AZURE_FOUNDRY_ENDPOINT` / `AZURE_FOUNDRY_API_KEY` | no | backend | Only for variations on an Azure AI Foundry model config (see [Serving from Azure AI Foundry](#serving-from-azure-ai-foundry)). The endpoint is the resource URL; any path after the host is ignored |
 
 `.env` is gitignored. Don't commit it.
 
