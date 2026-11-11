@@ -294,6 +294,12 @@ resource "launchdarkly_ai_config_variation" "branch_agent_azure_foundry" {
   # No tools: this variation answers from the location context (the ToggleHealth tools that
   # were attached here had no implementation in the backend). See branch_agent_tool_calling.
   tool_keys = []
+
+  # A plan without the Azure variables fails here instead of deleting a variation that
+  # targeting may be serving. See launchdarkly_model_config.azure_foundry_branch.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # Tool-calling variation (issue #72): the model looks branches up with find_branches. The
