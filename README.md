@@ -106,13 +106,13 @@ docker compose run --rm terraform output     # show managed keys and IDs
 
 | Resource | Count | File |
 |---|---|---|
-| AI Configs (5 agents + 4 judges) | 9 | `ai_configs_resources.tf` |
-| AI Config variations (`default`, published) | 9 | `ai_configs_resources.tf` |
+| AI Configs (5 agents + 5 judges) | 10 | `ai_configs_resources.tf` |
+| AI Config variations (`default` on each, plus `tool-calling` on `scheduler_agent` and `branch_agent`; published) | 12 | `ai_configs_resources.tf` |
 | Reusable model configs | 6 | `model_configs.tf` |
-| AI tool definitions | 20 | `tools.tf` |
+| AI tool definitions (20 ToggleHealth, plus `get_available_slots` and `find_branches`) | 22 | `tools.tf` |
 | AI agent graph (`banking_agent_graph`) | 1 | `agent_graph.tf` |
 
-41 resources total. Each config is created with a single `Default` variation, and
+Each config is created with a `Default` variation, and
 LaunchDarkly auto-adds a "disabled" variation ahead of it — so variation index 0 is
 `disabled` and index 1 is `Default`.
 
@@ -152,8 +152,10 @@ docker compose run --rm \
 
 Each variation declares `tool_keys`, and provider v3.1.5 **does** attach them to the
 served variation. Verified against a live apply: the tools on each served variation
-match the declared counts exactly (triage 7, accounts 7, branch 6, scheduler 5, brand
-voice 4; the two judges declare none).
+match the declared counts exactly. Most of them are ToggleHealth leftovers that no code
+implements; the model is only ever offered tools the backend implements (see
+[Tool calling](#tool-calling)). `scheduler_agent`'s and `branch_agent`'s `default`
+variations attach none.
 
 Earlier provider versions sent `tool_keys` to an API field that was accepted and
 ignored, so no manual attachment step is needed anymore. The `ai_config_tool_attachments`
@@ -341,6 +343,49 @@ reads as a mismatch on every call.
 - **Quota.** A deployment with a low tokens-per-minute limit returns `429` under load; those count as errors on
   `azure-foundry`. Keep `-n` small or raise the limit.
 
+### Tool calling
+
+`scheduler_agent` and `branch_agent` each have a `tool-calling` variation on which the model looks things up itself
+instead of reading data the backend prefetched. Targeting decides which path answers, with no redeploy.
+
+| Config | `default` | `tool-calling` |
+|---|---|---|
+| `scheduler_agent` | The backend calls `get_available_slots()` and puts 10 slots in the prompt | The model calls the `get_available_slots` tool (`days_ahead` 1-14) and offers only the slots it returns |
+| `branch_agent` | Location context only; the model has no branch data | The model calls `find_branches` (`location`) on a made-up directory of 8 ToggleBank locations in San Francisco, Oakland, Boston and New York |
+
+**How it fits together.** The tools are Library tools in `tools.tf` (snake_case keys: Amazon Nova can't call a tool
+whose name contains a hyphen, #74). Their implementations are in `app/backend/src/tools/registry.py`, which the CI
+evals use too. When the served variation attaches tools the backend implements, the node runs
+`run_tool_loop` (`app/backend/src/utils/tool_loop.py`): the model is bound to them (`BedrockConverseLLM.bind_tools`
+sends the Converse `toolConfig`), each call is run and its result sent back, for at most 4 model calls. The loop is one
+tracked generation (duration, success, summed tokens), and each call sends:
+
+| Event | Value | Shows up |
+|---|---|---|
+| `$ld:ai:tool_call` (`tracker.track_tool_call`) | 1 per call, with `toolKey` | The config's Monitoring tab |
+| `ai-tool-call-error` | 1 when the call raised or found nothing (`not_found`), else 0 | A custom metric, for a guarded rollout |
+| `scheduler-unlisted-slot` | Per scheduler reply: 1 when it names a slot ID no tool call returned, else 0 | Same |
+
+The UI terminal lists each call on the agent's node, and the chat API returns them in `agentFlow[].tool_calls`.
+
+**Demo.**
+
+```bash
+python3 scripts/set_ai_config_targeting.py --config scheduler_agent --config branch_agent --tools-demo --rules-only
+python3 scripts/tool_load.py -n 40      # half employee (tool-calling), half customer (default)
+```
+
+`--tools-demo` adds a rule to both configs: `role` is `employee` (the UI's employee login) gets `tool-calling`, everyone
+else the fallthrough. `--rules-only` leaves the default rules alone. On `branch_agent` the new rule goes after the
+Azure demo rule, which also matches the employee login, so that login still gets `azure-foundry` there; pass
+`--tools-demo-first` to put the tools rule first. `tool_load.py` uses employee keys that the Azure rule doesn't match,
+so both tool paths get traffic either way. It prints tool calls per request, failed calls, and whether questions that
+need a tool got one.
+
+**In CI.** `evals/ci_eval.py` runs a variation that attaches tools with those tools and the backend's implementations,
+on the `*_tools_dataset` datasets, and grades the trajectory with the `ci-judge-tool-use` judge. See
+[evals/CI_EVALS.md](evals/CI_EVALS.md).
+
 ### Observability
 
 The backend sends traces to LaunchDarkly observability (**Monitor > Traces**, and the LLM
@@ -410,9 +455,10 @@ policy_agent/
 │   ├── agent_graph.tf
 │   ├── variables.tf  outputs.tf  main.tf  versions.tf
 ├── scripts/
-│   ├── set_ai_config_targeting.py      # post-apply: point fallthrough at Default (--azure-demo: Azure rule)
+│   ├── set_ai_config_targeting.py      # post-apply: point fallthrough at Default (--azure-demo, --tools-demo: demo rules)
 │   ├── register_metrics.py             # post-apply: ai-model-mismatch and ai-content-filtered metrics
-│   └── foundry_load.py                 # traffic for branch_agent's Bedrock and Azure variations
+│   ├── foundry_load.py                 # traffic for branch_agent's Bedrock and Azure variations
+│   └── tool_load.py                    # traffic for the tool-calling variations
 ├── docker-compose.yml                 # backend + frontend + terraform (tools profile)
 ├── commands.md                        # Command cheat sheet
 └── .env.example
