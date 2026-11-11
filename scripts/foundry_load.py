@@ -16,6 +16,12 @@ Usage (backend running, e.g. `docker compose up`):
     python scripts/foundry_load.py                 # 40 requests
     python scripts/foundry_load.py -n 10 --concurrency 2
     python scripts/foundry_load.py --url http://localhost:8000 --name "Demo User"
+    python scripts/foundry_load.py -n 200 --users 100 --customers-only   # traffic for a guarded rollout
+
+A guarded rollout on branch_agent's default rule splits traffic by user key, so
+it needs many users: --users K spreads the customer requests over K keys
+(<name>-load-<i>-commercial-plan), and --customers-only skips the internal user
+the Azure demo rule always sends to Foundry.
 
 Stdlib only. Each request runs the whole graph (triage, branch agent, brand
 voice), so N requests are about 3N model calls, N/2 of them on Azure.
@@ -91,20 +97,25 @@ def main() -> int:
     )
     parser.add_argument("--concurrency", type=int, default=4, help="requests in flight (default 4)")
     parser.add_argument("--timeout", type=float, default=120, help="seconds per request (default 120)")
+    parser.add_argument("--users", type=int, default=1, help="spread customer requests over this many user keys")
+    parser.add_argument("--customers-only", action="store_true", help="send no requests as the internal user")
     args = parser.parse_args()
 
     prefix = key_prefix(args.name)
     jobs = []
     for i in range(args.n):
-        preset = "internal" if i % 2 else "commercial"
+        preset = "internal" if i % 2 and not args.customers_only else "commercial"
         user = DEMO_USERS[preset]
+        user_key = f"{prefix}-{user['suffix']}"
+        if preset == "commercial" and args.users > 1:
+            user_key = f"{prefix}-load-{i % args.users}-{user['suffix']}"
         jobs.append(
             (
                 preset,
                 {
                     "userInput": QUESTIONS[i % len(QUESTIONS)],
                     "userName": args.name,
-                    "userKey": f"{prefix}-{user['suffix']}",
+                    "userKey": user_key,
                     "userType": user["userType"],
                     "role": user["role"],
                     "plan": user["plan"],
@@ -114,7 +125,7 @@ def main() -> int:
             )
         )
 
-    print(f"Sending {args.n} requests to {args.url}/api/chat as {prefix}-commercial-plan and {prefix}-internal-dev")
+    print(f"Sending {args.n} requests to {args.url}/api/chat ({len({b['userKey'] for _, b in jobs})} user keys)")
     stats: dict[str, dict] = defaultdict(
         lambda: {"requests": 0, "branch": 0, "errors": 0, "models": Counter(), "durations": [], "tokens": []}
     )
@@ -128,7 +139,7 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as pool:
         for preset, body, result in pool.map(run, jobs):
             done += 1
-            s = stats[body["userKey"]]
+            s = stats[body["userKey"] if args.users <= 1 else ("internal" if preset == "internal" else "customers (all keys)")]
             s["requests"] += 1
             if result.get("error"):
                 s["errors"] += 1

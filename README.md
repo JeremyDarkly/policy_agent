@@ -315,8 +315,11 @@ go through the same `ModelInvoker` tracker calls as Bedrock.
 
 **Moving traffic.** In the LaunchDarkly UI, `branch_agent` → Targeting: change the rule to a percentage rollout, or
 change the fallthrough to `azure-foundry`, and the next request is served from Azure. Switching back is the same edit.
-For a guarded rollout of `azure-foundry`, use the AI Config error rate, completion time and `ai-model-mismatch` as
-guardrails.
+For a guarded rollout of `azure-foundry` on the default rule, use `ld_autogen__ai-completion-error`, the
+`ai-model-mismatch` metric and `ai-content-filtered` as guardrails, randomized by `user`. The completion-time metric
+can't be one: it is randomized by `request`, and a user-randomized rollout rejects it (`Metric ... does not have
+randomization unit: user`). Watch latency on the Monitoring tab instead. A rollout splits traffic by user key, so drive
+it with many keys: `python3 scripts/foundry_load.py -n 400 --users 150 --customers-only`.
 
 **What the mismatch check compares.** A Foundry model ID is a deployment name, which need not be a model name. The
 backend therefore checks the served model against the model config's `baseModel`, not the deployment name. Azure
