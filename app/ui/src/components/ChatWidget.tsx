@@ -25,6 +25,36 @@ interface AgentStep {
   };
 }
 
+// One Jev answer, from the ai-judge-jev judge (see app/backend/src/evaluation/jev_judge.py).
+interface JevResult {
+  score: number;
+  passed: boolean;
+  label?: string | null;
+  confidence?: number | null;
+}
+
+interface JevEvaluation {
+  mode: "jev-alongside" | "jev-only";
+  model: string;
+  results: Record<string, JevResult> | null;
+  duration_ms: number;
+  cost_cents: number;
+  error?: string | null;
+}
+
+const JEV_QUESTION_LABELS: Record<string, string> = {
+  accuracy: "Accuracy",
+  hallucination: "Hallucination-free",
+  answers_question: "Answers the question",
+  coherence: "Coherence",
+  tone: "Tone",
+};
+
+const jevQuestionRank = (name: string): number => {
+  const i = Object.keys(JEV_QUESTION_LABELS).indexOf(name);
+  return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+};
+
 interface ChatResponse {
   response: string;
   requestId: string;
@@ -44,6 +74,7 @@ interface ChatResponse {
     judge_model_name?: string;
     judge_input_tokens?: number;
     judge_output_tokens?: number;
+    jev?: JevEvaluation;
   };
   error?: string;
 }
@@ -128,6 +159,7 @@ const ChatWidget = ({ isOpen, onClose, initialQuery }: ChatWidgetProps) => {
               judge_model_name: data.evaluation.judge_model_name,
               judge_input_tokens: data.evaluation.judge_input_tokens,
               judge_output_tokens: data.evaluation.judge_output_tokens,
+              jev: data.evaluation.jev ?? undefined,
             };
           });
         } else {
@@ -517,9 +549,13 @@ const ChatWidget = ({ isOpen, onClose, initialQuery }: ChatWidgetProps) => {
 
                 {/* Judge Evaluation */}
                 {(lastMetrics.accuracy_score !== undefined ||
-                  lastMetrics.coherence_score !== undefined) && (
+                  lastMetrics.coherence_score !== undefined ||
+                  lastMetrics.jev) && (
                   <div className="cw-metrics-section">
                     <h4 className="cw-metrics-section-title">Judge Evaluation</h4>
+                    {/* On jev-only the LLM judges didn't run; their rows would only repeat Jev's */}
+                    {lastMetrics.jev?.mode !== "jev-only" && (
+                    <>
                     {lastMetrics.accuracy_score !== undefined && (
                       <div className="cw-metric-row">
                         <span className="cw-metric-label">Accuracy:</span>
@@ -611,6 +647,52 @@ const ChatWidget = ({ isOpen, onClose, initialQuery }: ChatWidgetProps) => {
                           </div>
                         )}
                       </>
+                    )}
+                    </>
+                    )}
+
+                    {/* Jev judge: one request, several classifications */}
+                    {lastMetrics.jev && (
+                      <div className="cw-jev-judge">
+                        <div className="cw-judge-info">
+                          <small>
+                            Judge: {lastMetrics.jev.model} |{" "}
+                            {lastMetrics.jev.duration_ms} ms |{" "}
+                            {lastMetrics.jev.cost_cents.toFixed(4)}¢
+                          </small>
+                        </div>
+                        {lastMetrics.jev.error || !lastMetrics.jev.results ? (
+                          <div className="cw-metric-row">
+                            <span className="cw-metric-label">Jev judge:</span>
+                            <span className="cw-metric-value cw-metric-bad">
+                              failed
+                            </span>
+                          </div>
+                        ) : (
+                          // LaunchDarkly serves the questions with sorted keys; list known ones in a fixed order
+                          Object.entries(lastMetrics.jev.results)
+                            .sort(
+                              ([a], [b]) =>
+                                jevQuestionRank(a) - jevQuestionRank(b)
+                            )
+                            .map(([name, r]) => (
+                              <div className="cw-metric-row" key={name}>
+                                <span className="cw-metric-label">
+                                  {JEV_QUESTION_LABELS[name] ?? name}:
+                                </span>
+                                <span
+                                  className={`cw-metric-value ${
+                                    r.passed ? "cw-metric-good" : "cw-metric-bad"
+                                  }`}
+                                >
+                                  {r.label
+                                    ? r.label.replace(/_/g, " ")
+                                    : `${(r.score * 100).toFixed(1)}%`}
+                                </span>
+                              </div>
+                            ))
+                        )}
+                      </div>
                     )}
                   </div>
                 )}

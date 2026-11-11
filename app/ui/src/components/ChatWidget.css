@@ -716,3 +716,10 @@
     border-radius: 16px;
   }
 }
+
+/* Jev judge results, under the LLM judges (or alone on jev-only) */
+.cw-jev-judge {
+  margin-top: 0.5rem;
+  padding-top: 0.45rem;
+  border-top: 1px dashed var(--cw-border);
+}

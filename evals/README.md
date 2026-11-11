@@ -184,6 +184,53 @@ On 2026-10-31 that pilot gave:
 `ci_eval.py` doesn't evaluate `jev-choice`. The eval runner generates through LangChain and drops `model.custom`, so
 `ci_targets.toml` lists it in `exclude_variations`.
 
+### Jev judge
+
+`ai-judge-jev` is a judge-mode AI Config that grades each brand voice reply with Jev. One request answers five
+questions (`accuracy`, `hallucination`, `answers_question`, `coherence`, `tone`), and each answer is its own metric.
+Its variations and what they do are in the [README](../README.md#judges). `setup_jev_judge.py` creates the config,
+its `jev-alongside` and `jev-only` variations (from one question definition, so they can't drift), and eight
+metrics. It points the default rule at `disabled` and adds one rule that serves `jev-alongside` to contexts with
+`judge_pilot` = true, which only the pilot sets.
+
+```sh
+python3 evals/setup_jev_judge.py --env-file .env.staging-org     # config, variations, metrics, pilot rule
+PILOT="uv run --no-project --with-requirements app/backend/requirements.txt python evals/run_judge_pilot.py --env-file .env.staging-org"
+$PILOT                          # 1. LLM judges and Jev over the labeled set; no events (needs AWS credentials)
+$PILOT --skip-llm --send        #    Jev only, and send its events so the metrics get traffic
+$PILOT --skip-llm --send --fault  #  every Jev call fails: jev-judge-error-rate goes to 100%
+```
+
+`judge_labeled_dataset.jsonl` has 48 hand-written replies: 12 questions over two account profiles, four replies each.
+`good` is accurate and well written. `halluc` is well written with one invented or contradicted fact. `incoh` has
+correct facts but is garbled or jargon-heavy. `both` has an invented fact and is curt or rude. So accuracy should pass
+on `good` and `incoh`, and coherence on `good` and `halluc`. The labels were written before any judge ran.
+
+The pilot runs each row as a simulated user through the backend's own code: `BrandVoiceEvaluator` for the LLM judges
+and `jev_judge` for Jev, on whatever `ai-judge-jev` serves that user. On 2026-11-03 it gave:
+
+| Judge | Accuracy correct | Planted inaccuracies missed | Accurate replies failed | Coherence correct | Bad writing missed | Good writing failed | p50 latency | Cost per reply |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| LLM judges (Claude Sonnet 5 on Bedrock), thresholds 0.8 / 0.7 | 39/48 | 0 | 9 | 30/48 | 0 | 18 | 4,060 ms / 4,718 ms | 0.922 ¢ (both) |
+| Jev `jev-1.14.0`, as the app decides (`accuracy` and `hallucination`; `coherence` and `tone`) | 41/48 | 0 | 7 | 43/48 | 0 | 5 | 108 ms | 0.0040 ¢ |
+| Jev, `accuracy` alone; `coherence` alone | 41/48 | 0 | 7 | 41/48 | 3 | 4 | same call | same call |
+| Jev, `hallucination` alone; `tone` alone | 45/48 | 0 | 3 | 46/48 | 0 | 2 | same call | same call |
+
+`answers_question` passed on all 12 `good` replies. Jev and the LLM judges disagreed on 23 of 48 replies (accuracy or
+coherence), mostly where an LLM judge failed a good reply. That is the baseline for `jev-judge-disagreement`, which
+counts a reply once if either verdict differs. `coherence` alone passed three short, rude replies that `tone` caught.
+
+The thresholds are today's (accuracy 0.8, coherence 0.7, noul 0.5). Both judges catch every planted failure; they
+differ in how many good replies they fail. 48 rows on two profiles is a small set, and the replies are more clear-cut
+than real brand voice output. `jev-alongside` and `jev-judge-disagreement` are how Jev is watched on real chats.
+
+**Live demo.** In `ai-judge-jev`'s targeting for `test`, add an individual target that serves `jev-alongside` to the
+demo user's context key (`<name>-commercial-plan`). A chat as that user shows the LLM scores and, under them, Jev's
+five results with `jev-1.14.0`, its latency and its cost. Switch the target to `jev-only` and the LLM judge calls
+stop. Remove the target afterwards; the user is back on `disabled`.
+
+`ci_eval.py` doesn't use `ai-judge-jev`: the SDK's `Judge` parses one LLM score, so a Jev judge can't run there.
+
 ## CI evals
 
 `ci_eval.py` evaluates AI Config variations directly: the AI SDK reads each variation's model and prompt from

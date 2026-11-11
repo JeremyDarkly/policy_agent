@@ -509,6 +509,8 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
             metrics["judge_model_name"] = eval_data.get("judge_model_name")
             metrics["judge_input_tokens"] = eval_data.get("judge_input_tokens")
             metrics["judge_output_tokens"] = eval_data.get("judge_output_tokens")
+            if eval_data.get("jev"):
+                metrics["jev"] = eval_data.get("jev")
 
         logger.info(
             f"[{request_id}] Response generated: {len(final_response)} chars, {len(agent_flow)} agents, {total_duration}ms"
