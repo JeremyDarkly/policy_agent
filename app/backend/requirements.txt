@@ -21,7 +21,7 @@ httpx>=0.28.1,<1
 typing-extensions>=4.8.0
 
 # LaunchDarkly AI Configs & Observability
-launchdarkly-server-sdk>=9.12.0
+launchdarkly-server-sdk>=9.20.0
 launchdarkly-server-sdk-ai==1.1.0
 # Pins OpenTelemetry and installs the instrumentors it auto-enables (FastAPI,
 # LangChain, Bedrock, OpenAI, Anthropic, ...), so they are not listed here

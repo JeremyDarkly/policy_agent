@@ -137,8 +137,8 @@ for name in ("LD_API_TOKEN", "LD_SDK_KEY", "OPENAI_API_KEY"):
 # later). Step 7 also needs the LangChain handler and `langchain-aws` for Bedrock:
 #
 # ```sh
-# pip install launchdarkly-ai-python launchdarkly-ai-openai-messages
-# pip install launchdarkly-ai-langchain-messages langchain-aws   # Step 7 only
+# pip install launchdarkly-ai-python==1.0.0 launchdarkly-ai-openai-messages==1.0.0
+# pip install launchdarkly-ai-langchain-messages==1.0.0 langchain-aws   # Step 7 only
 # ```
 #
 # `init_evaluations()` takes the project that holds the evaluations, judges and tools, and reads `LD_API_TOKEN` and
