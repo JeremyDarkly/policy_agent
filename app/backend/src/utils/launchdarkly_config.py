@@ -9,10 +9,14 @@ import ldclient
 from dotenv import load_dotenv
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
+from langchain_core.messages.ai import add_usage
 from ldclient import Context
 from ldclient.config import Config
 from ldai.client import LDAIClient, ModelConfig, ProviderConfig, LDMessage
 from ldai.models import AIConfig, AICompletionConfig, AICompletionConfigDefault
+from ldai.tracker import TokenUsage
+
+from .served_model import CONTENT_FILTER_MESSAGE, is_content_filtered
 
 # Load environment variables
 load_dotenv()
@@ -487,6 +491,30 @@ class NoOpTracker:
         pass
 
 
+def token_usage_from(usage: Optional[dict]) -> Optional[TokenUsage]:
+    """The ``TokenUsage`` to track for a LangChain ``usage_metadata`` block, or None if there is none.
+
+    Some reasoning models report reasoning tokens outside ``output_tokens``: Grok on Azure AI Foundry returned
+    input 11, output 1, reasoning 97, total 109. Those tokens are billed, so they are counted as output. OpenAI
+    reasoning models already include them in ``output_tokens`` (total = input + output), so reasoning is added only
+    up to the gap between ``total_tokens`` and input + output, never twice. ``total`` is the provider's
+    ``total_tokens`` when it sends one.
+    """
+    if not usage:
+        return None
+    input_tokens = usage.get("input_tokens") or 0
+    output_tokens = usage.get("output_tokens") or 0
+    reasoning = (usage.get("output_token_details") or {}).get("reasoning") or 0
+    total = usage.get("total_tokens")
+    if total:
+        uncounted = total - input_tokens - output_tokens
+        if reasoning > 0 and uncounted > 0:
+            output_tokens += min(reasoning, uncounted)
+    else:
+        total = input_tokens + output_tokens
+    return TokenUsage(input=input_tokens, output=output_tokens, total=total)
+
+
 class ModelInvoker:
     """Helper class to invoke models with tracking.
     
@@ -504,6 +532,7 @@ class ModelInvoker:
         skip_span_annotation: bool = False,
         variation_key: str = "",
         provider: str = "",
+        expected_model: str = "",
     ):
         """Initialize model invoker.
 
@@ -515,7 +544,9 @@ class ModelInvoker:
             user_context: LaunchDarkly user context (for span annotation)
             skip_span_annotation: If True, skip all span annotation (for background threads)
             variation_key: The served variation's key (sent with the served-model events)
-            provider: Provider name (bedrock, openai, anthropic)
+            provider: Provider name (bedrock, openai, anthropic, azure ai foundry)
+            expected_model: The model the served one is checked against, when the request's model ID isn't a model
+                (an Azure AI Foundry deployment name; from the model config's ``baseModel``). Empty: the request's.
         """
         self.model = model
         self.tracker = tracker
@@ -525,6 +556,7 @@ class ModelInvoker:
         self.skip_span_annotation = skip_span_annotation
         self.variation_key = variation_key
         self.provider = provider
+        self.expected_model = expected_model
 
     def _annotate_current_span(self) -> None:
         """Set ld.ai_config.key on the current span (the agent's node span).
@@ -560,27 +592,19 @@ class ModelInvoker:
 
             # Track the LLM call
             result = self.tracker.track_duration_of(lambda: self.model.invoke(messages))
-            
+
+            # Azure withholds a filtered response and says so in finish_reason; count it as an error, not a reply
+            metadata = getattr(result, "response_metadata", None)
+            if is_content_filtered(metadata):
+                self.report_content_filtered(metadata)
+                raise ValueError(CONTENT_FILTER_MESSAGE)
+
             # Track success (no arguments)
             self.tracker.track_success()
             
             # Extract and track token usage if available
-            if hasattr(result, "usage_metadata") and result.usage_metadata:
-                from ldai.tracker import TokenUsage
-                import random
-                
-                usage_data = result.usage_metadata
-                
-                # Extract actual token usage (no jitter)
-                input_tokens = usage_data.get("input_tokens", 0)
-                output_tokens = usage_data.get("output_tokens", 0)
-                total_tokens = input_tokens + output_tokens
-                
-                token_usage = TokenUsage(
-                    input=input_tokens,
-                    output=output_tokens,
-                    total=total_tokens
-                )
+            token_usage = token_usage_from(getattr(result, "usage_metadata", None))
+            if token_usage is not None:
                 self.tracker.track_tokens(token_usage)
             
             # Extract and track Time to First Token (TTFT) if available
@@ -639,7 +663,7 @@ class ModelInvoker:
             start_time = time.time()
             
             # Stream from the model
-            accumulated_tokens = {"input": 0, "output": 0, "total": 0}
+            usage = None
             ttft_ms = None
             served_metadata = None
             
@@ -655,14 +679,10 @@ class ModelInvoker:
                     if isinstance(chunk_metadata, dict):
                         ttft_ms = chunk_metadata.get("ttft_ms")
                 
-                # Extract token usage from final chunk
-                if hasattr(chunk, 'message') and hasattr(chunk.message, 'usage_metadata'):
-                    if chunk.message.usage_metadata:
-                        accumulated_tokens = {
-                            "input": chunk.message.usage_metadata.get("input_tokens", 0),
-                            "output": chunk.message.usage_metadata.get("output_tokens", 0),
-                            "total": chunk.message.usage_metadata.get("total_tokens", 0)
-                        }
+                # Providers split usage across chunks (Anthropic sends input first and output last), so add it up
+                chunk_usage = getattr(chunk_message, "usage_metadata", None)
+                if chunk_usage:
+                    usage = chunk_usage if usage is None else add_usage(usage, chunk_usage)
                 
                 yield chunk
             
@@ -676,13 +696,8 @@ class ModelInvoker:
             self.tracker.track_duration(duration_ms)
             
             # Track tokens if we got them
-            if accumulated_tokens["total"] > 0:
-                from ldai.tracker import TokenUsage
-                token_usage = TokenUsage(
-                    input=accumulated_tokens["input"],
-                    output=accumulated_tokens["output"],
-                    total=accumulated_tokens["total"]
-                )
+            token_usage = token_usage_from(usage)
+            if token_usage is not None and token_usage.total > 0:
                 self.tracker.track_tokens(token_usage)
             
             # Track TTFT if we got it
@@ -710,30 +725,50 @@ class ModelInvoker:
             
             raise
 
+    def _served_event_data(self, metadata: Optional[dict]) -> dict:
+        """Keyword args for the served-model events: the expected model, the served one and the deployment."""
+        from .served_model import requested_model_id, served_model
+
+        sent = requested_model_id(self.model)
+        requested = self.expected_model or sent
+        served, source = served_model(metadata, requested)
+        return {
+            "config_key": self.config_key,
+            "variation_key": self.variation_key,
+            "provider": self.provider,
+            "requested": requested,
+            "served": served,
+            "source": source,
+            "deployment": sent if self.expected_model else "",
+        }
+
     def report_served_model_of(self, metadata: Optional[dict]) -> None:
         """Send which model served this call to LaunchDarkly (see utils/served_model.py)."""
         if self.user_context is None:
             return
         try:
-            from .served_model import report_served_model, requested_model_id, served_model
+            from .served_model import report_served_model
 
-            requested = requested_model_id(self.model)
-            served, source = served_model(metadata, requested)
-            mismatch = report_served_model(
-                ldclient.get(),
-                self.user_context,
-                config_key=self.config_key,
-                variation_key=self.variation_key,
-                provider=self.provider,
-                requested=requested,
-                served=served,
-                source=source,
-            )
+            event = self._served_event_data(metadata)
+            mismatch = report_served_model(ldclient.get(), self.user_context, **event)
             if mismatch:
-                print(f"  ⚠️ {self.config_key}: requested {requested}, served by {served}")
+                print(f"  ⚠️ {self.config_key}: requested {event['requested']}, served by {event['served']}")
         except Exception as e:
             import logging
             logging.debug(f"Failed to report served model: {e}")
+
+    def report_content_filtered(self, metadata: Optional[dict]) -> None:
+        """Send ``ai-content-filtered`` for a call a content filter blocked (see utils/served_model.py)."""
+        print(f"  ⚠️ {self.config_key}: response blocked by a content filter")
+        if self.user_context is None:
+            return
+        try:
+            from .served_model import report_content_filtered
+
+            report_content_filtered(ldclient.get(), self.user_context, **self._served_event_data(metadata))
+        except Exception as e:
+            import logging
+            logging.debug(f"Failed to report content filter: {e}")
 
     def _extract_tokens(self, response: Any) -> dict[str, int]:
         """Extract token counts from response.

@@ -440,6 +440,9 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
                     "duration": duration_ms,  # Total time to generate
                     "ttft_ms": ttft_ms,  # Time to first token
                     "tokens": tokens,
+                    # Which branch_agent variation served it (scripts/foundry_load.py reads these)
+                    "model": branch_data.get("model"),
+                    "served_model": branch_data.get("served_model"),
                 }
             )
         elif "scheduler_specialist" in agent_data:
