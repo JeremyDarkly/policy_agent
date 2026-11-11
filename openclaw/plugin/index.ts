@@ -1,5 +1,5 @@
 // OpenClaw plugin: each agent run gets its model, instructions and tools from a LaunchDarkly AgentControl config,
-// and its tokens, duration, tool calls and outcome are recorded on that config's tracker.
+// and its tokens, duration, tool calls and outcome are recorded on that config (see ai_config.ts).
 //
 // The config is evaluated once per run, in whichever hook fires first, and every later hook in the run reuses it.
 // Turning the config off in LaunchDarkly blocks new runs. Credentials come from the environment only.
@@ -17,12 +17,12 @@ import {
   getSkillResult,
   setSkillStore,
   skillRefs,
-} from "@launchdarkly/ai-server";
+} from "@launchdarkly/ai-node";
 import { init, type LDClient, type LDContext, type LDEvaluationDetail } from "@launchdarkly/node-server-sdk";
-import { initAi, type LDAIAgentConfig, type LDAIClient, type LDAIConfigTracker } from "@launchdarkly/server-sdk-ai";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "typebox";
 
+import { ConfigTracker, servedConfig, type AgentConfig } from "./ai_config.ts";
 import { MISMATCH_EVENT, SERVED_EVENT, modelsMatch, servedCalls } from "./served_model.ts";
 import { runTracer, type RunTrace } from "./tracing.ts";
 
@@ -55,9 +55,9 @@ type RunState =
   | {
       kind: "served";
       trace?: RunTrace;
-      config: LDAIAgentConfig;
+      config: AgentConfig;
       context: LDContext;
-      tracker: LDAIConfigTracker;
+      tracker: ConfigTracker;
       variationKey: string;
       allowedTools: Set<string>;
       skills: PinnedSkill[];
@@ -104,7 +104,7 @@ function buildContext(ctx: HookContext): LDContext {
 
 // A variation's model becomes an OpenClaw `provider/model` reference. Set `openclawModel` in the model's custom
 // parameters to give the full reference when LaunchDarkly's provider name doesn't match OpenClaw's provider id.
-function modelOverride(config: LDAIAgentConfig): { providerOverride?: string; modelOverride?: string } {
+function modelOverride(config: AgentConfig): { providerOverride?: string; modelOverride?: string } {
   const explicit = config.model?.custom?.openclawModel;
   if (typeof explicit === "string" && explicit.includes("/")) {
     const [provider, ...rest] = explicit.split("/");
@@ -118,7 +118,7 @@ function modelOverride(config: LDAIAgentConfig): { providerOverride?: string; mo
 }
 
 // Library tools named `<prefix><openclaw tool id>` are the tools a variation allows. No tools means none allowed.
-function allowedTools(config: LDAIAgentConfig, prefix: string): Set<string> {
+function allowedTools(config: AgentConfig, prefix: string): Set<string> {
   return new Set(
     Object.keys(config.tools ?? {})
       .filter((key) => key.startsWith(prefix))
@@ -153,7 +153,7 @@ export default definePluginEntry({
   register(api) {
     const settings = readSettings(api.pluginConfig);
     const runs = new Map<string, Promise<RunState>>();
-    let client: Promise<{ ld: LDClient; ai: LDAIClient; skills?: LaunchDarklySkillStore } | undefined> | undefined;
+    let client: Promise<{ ld: LDClient; skills?: LaunchDarklySkillStore } | undefined> | undefined;
     // Set by the SDK on each evaluation. Linking a trace works without it, but LaunchDarkly's hooks send it.
     let environmentId: string | undefined;
 
@@ -196,7 +196,7 @@ export default definePluginEntry({
           api.logger.warn(`ld-agentcontrol: LaunchDarkly did not initialize: ${String(error)}`);
           return undefined;
         }
-        // Skill content comes from a separate store in the newer AI SDK, @launchdarkly/ai-server. A store that
+        // Skill content comes from the AI SDK's skill store, apart from flag evaluation. A store that
         // doesn't answer leaves runs without skills; the config itself still applies.
         let skills: LaunchDarklySkillStore | undefined = new LaunchDarklySkillStore(sdkKey, {
           mode: baseUri === undefined ? "stream" : "poll",
@@ -210,12 +210,12 @@ export default definePluginEntry({
           await skills.close();
           skills = undefined;
         }
-        return { ld, ai: initAi(ld), skills };
+        return { ld, skills };
       })();
       return client;
     };
 
-    // The AI SDK's config object leaves out a variation's skill pins, so they're read from the raw variation.
+    // Skill pins, read from the raw variation.
     const pinnedSkills = async (
       sdk: { skills?: LaunchDarklySkillStore },
       raw: LDEvaluationDetail["value"] | undefined,
@@ -276,11 +276,12 @@ export default definePluginEntry({
         return { kind: "unavailable" };
       }
       const context = buildContext(ctx);
-      const config = await sdk.ai.agentConfig(settings.configKey, context, { enabled: false });
-      if (!config.enabled) {
-        // A config that doesn't exist also comes back disabled. Treat it like an unreachable LaunchDarkly, so a
+      // One raw evaluation serves the config, the skill pins and the trace link.
+      const detail = await sdk.ld.variationDetail(settings.configKey, context, null);
+      const served = servedConfig(detail.value, context);
+      if (!served) {
+        // A config that doesn't exist comes back as the default. Treat it like an unreachable LaunchDarkly, so a
         // wrong key or environment doesn't silently turn every agent off.
-        const detail = await sdk.ld.variationDetail(settings.configKey, context, null);
         if (detail.reason.kind === "ERROR") {
           api.logger.warn(`ld-agentcontrol: can't evaluate ${settings.configKey}: ${detail.reason.errorKind}`);
           log({ event: "served", runId: ctx.runId, agentId: ctx.agentId, state: "unavailable", error: detail.reason.errorKind });
@@ -290,13 +291,18 @@ export default definePluginEntry({
         const trace = (await tracingOn(sdk.ld, context)) ? startTrace(context, ctx, startTime, detail) : undefined;
         return { kind: "disabled", context, trace };
       }
-      const tracker = config.createTracker();
-      const { variationKey } = tracker.getTrackData();
+      const { config, meta } = served;
+      const tracker = new ConfigTracker(
+        (event, trackContext, data, value) => sdk.ld.track(event, trackContext as LDContext, data, value),
+        context,
+        settings.configKey,
+        config,
+        meta,
+      );
+      const { variationKey } = tracker.trackData;
       const tools = allowedTools(config, settings.toolPrefix);
-      // One raw evaluation serves both the skill pins and the trace link, so neither costs an extra one.
       const traced = await tracingOn(sdk.ld, context);
-      const detail = sdk.skills || traced ? await sdk.ld.variationDetail(settings.configKey, context, null) : undefined;
-      const skills = await pinnedSkills(sdk, detail?.value, ctx);
+      const skills = await pinnedSkills(sdk, detail.value, ctx);
       log({
         event: "served",
         runId: ctx.runId,
@@ -309,7 +315,7 @@ export default definePluginEntry({
       });
       return {
         kind: "served",
-        trace: traced && detail ? startTrace(context, ctx, startTime, detail) : undefined,
+        trace: traced ? startTrace(context, ctx, startTime, detail) : undefined,
         config,
         context,
         tracker,

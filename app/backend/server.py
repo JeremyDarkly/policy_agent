@@ -41,7 +41,6 @@ from datetime import datetime
 from src.graph.workflow import run_workflow
 from src.utils.user_profile import create_user_profile
 from src.utils.aws_token_monitor import AWSTokenMonitor
-from ldai.tracker import FeedbackKind
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -837,10 +836,7 @@ async def submit_feedback(request: FeedbackRequest):
 
     # Track feedback in LaunchDarkly using the tracker from the ModelInvoker
     try:
-        feedback_kind = (
-            FeedbackKind.Positive if feedback_type == "positive" else FeedbackKind.Negative
-        )
-        model_invoker.tracker.track_feedback({"kind": feedback_kind})
+        model_invoker.tracker.track_feedback(positive=feedback_type == "positive")
         logger.info(f"[{request_id}] ✅ Feedback tracked in LaunchDarkly: {feedback_type}")
 
         # Flush to ensure immediate delivery

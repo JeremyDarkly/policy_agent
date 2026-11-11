@@ -584,15 +584,6 @@ wheels = [
 ]
 
 [[package]]
-name = "expiringdict"
-version = "1.2.2"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/fc/62/c2af4ebce24c379b949de69d49e3ba97c7e9c9775dc74d18307afa8618b7/expiringdict-1.2.2.tar.gz", hash = "sha256:300fb92a7e98f15b05cf9a856c1415b3bc4f2e132be07daa326da6414c23ee09", size = 8137, upload-time = "2022-06-21T09:12:30.415Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/cb/84/a04c59324445f4bcc98dc05b39a1cd07c242dde643c1a3c21e4f7beaf2f2/expiringdict-1.2.2-py3-none-any.whl", hash = "sha256:09a5d20bc361163e6432a874edd3179676e935eb81b925eccef48d409a8a45e8", size = 8456, upload-time = "2022-06-21T09:12:28.652Z" },
-]
-
-[[package]]
 name = "fastjsonschema"
 version = "2.22.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1586,19 +1577,18 @@ wheels = [
 
 [[package]]
 name = "launchdarkly-server-sdk"
-version = "9.18.4"
+version = "9.20.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "certifi" },
-    { name = "expiringdict" },
     { name = "launchdarkly-eventsource" },
     { name = "pyrfc3339" },
     { name = "semver" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a7/75/e3608fd0298afc683ae4daf0b9daae3bfae7b30458d57c601a67c0e45aaa/launchdarkly_server_sdk-9.18.4.tar.gz", hash = "sha256:b5ecb89c84e99133a420a29015dbb705c760cc3493478307577993bc53ae6195", size = 416483, upload-time = "2026-10-26T15:43:22.621Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/43/25/a4adb6175210350c948a56a4dd42dd529deb973cdf12b1cf51b7c05784bb/launchdarkly_server_sdk-9.20.0.tar.gz", hash = "sha256:a7b4a94117222b9ea9dc13c1abc58c4c8917ee09d78f96a64385e3d4ad9d3d5d", size = 421077, upload-time = "2026-11-05T22:48:33.643Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/91/a2/9f85e09af114f2b16c92c1baf5270a08d7e05335c6329b200237fae9cf2f/launchdarkly_server_sdk-9.18.4-py3-none-any.whl", hash = "sha256:e27a90f1be84dee0d1fc2db5f7887e50f9b0f78889f7f63a73a5e1f095534a37", size = 283758, upload-time = "2026-10-26T15:43:21.324Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/7f/efd84aa91688fb4681b6cb66ce96ebf0c87f046d401d857a16ec6891560b/launchdarkly_server_sdk-9.20.0-py3-none-any.whl", hash = "sha256:dee3911d48bb70a5b3548692e4288c2017ea882bf69892eead1848a7942b26c0", size = 284875, upload-time = "2026-11-05T22:48:32.165Z" },
 ]
 
 [[package]]
@@ -2305,9 +2295,9 @@ requires-dist = [
     { name = "launchdarkly-ai-langchain-agents", specifier = "==1.0.0" },
     { name = "launchdarkly-ai-langchain-messages", specifier = "==1.0.0" },
     { name = "launchdarkly-ai-openai-messages", specifier = "==1.0.0" },
-    { name = "launchdarkly-ai-python", specifier = ">=1.0.0" },
+    { name = "launchdarkly-ai-python", specifier = "==1.0.0" },
     { name = "launchdarkly-ai-server", extras = ["otel"], specifier = "==1.0.0" },
-    { name = "launchdarkly-server-sdk", specifier = ">=9.0" },
+    { name = "launchdarkly-server-sdk", specifier = ">=9.20.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
 ]
 
