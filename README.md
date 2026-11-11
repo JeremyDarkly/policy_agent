@@ -281,7 +281,7 @@ tokens and errors side by side.
 **How it fits together.** The global model catalog has no Azure provider, so Terraform creates a project model config,
 `azure-foundry-branch`, with provider `Azure AI Foundry`, the Foundry deployment name as its model ID, and the model
 the deployment runs as the custom parameter `baseModel`. The `branch_agent` variation `azure-foundry` uses it, with the
-same instructions and tools as `default`. When a variation's provider is `Azure AI Foundry` (or `azure`,
+same instructions as `default` plus the TOOLS paragraph, and the `find_branches` tool (see [Tool calling](#tool-calling)). When a variation's provider is `Azure AI Foundry` (or `azure`,
 `azure openai`, `foundry`; see `AZURE_PROVIDERS` in `app/backend/src/utils/llm_config.py`), the backend calls the
 deployment through `ChatOpenAI` on the resource's OpenAI-compatible v1 route (`<resource>/openai/v1/`), which serves
 OpenAI and non-OpenAI models (Grok, Llama, DeepSeek) and needs no `api-version`. Tokens, duration, success and errors
@@ -365,6 +365,11 @@ instead of reading data the backend prefetched. Targeting decides which path ans
 | `scheduler_agent` | The backend calls `get_available_slots()` and puts 10 slots in the prompt | The model calls the `get_available_slots` tool (`days_ahead` 1-14) and offers only the slots it returns |
 | `branch_agent` | Location context only; the model has no branch data | The model calls `find_branches` (`location`) on a made-up directory of 8 ToggleBank locations in San Francisco, Oakland, Boston and New York |
 
+`branch_agent`'s `azure-foundry` variation (see [Serving from Azure AI Foundry](#serving-from-azure-ai-foundry)) attaches
+`find_branches` too, with the same instructions as `tool-calling`, so the same loop runs on Azure through
+`ChatOpenAI.bind_tools`. Expect it to be slower: a reasoning model such as Grok spends seconds per round, and a tool
+call adds a round.
+
 **How it fits together.** The tools are Library tools in `tools.tf` (snake_case keys: Amazon Nova can't call a tool
 whose name contains a hyphen, #74). Their implementations are in `app/backend/src/tools/registry.py`, which the CI
 evals use too. When the served variation attaches tools the backend implements, the node runs
@@ -389,10 +394,10 @@ python3 scripts/tool_load.py -n 40      # half employee (tool-calling), half cus
 
 `--tools-demo` adds a rule to both configs: `role` is `employee` (the UI's employee login) gets `tool-calling`, everyone
 else the fallthrough. `--rules-only` leaves the default rules alone. On `branch_agent` the new rule goes after the
-Azure demo rule, which also matches the employee login, so that login still gets `azure-foundry` there; pass
-`--tools-demo-first` to put the tools rule first. `tool_load.py` uses employee keys that the Azure rule doesn't match,
-so both tool paths get traffic either way. It prints tool calls per request, failed calls, and whether questions that
-need a tool got one.
+Azure demo rule, which also matches the employee login, so that login gets `azure-foundry` there, which calls the tool
+on Azure (`--tools-demo-first` puts the tools rule first instead). `tool_load.py` uses employee keys that the Azure
+rule doesn't match, so `tool-calling` gets traffic too. It prints, per served model, tool calls per request, failed
+calls, and whether questions that need a tool got one.
 
 **In CI.** `evals/ci_eval.py` runs a variation that attaches tools with those tools and the backend's implementations,
 on the `*_tools_dataset` datasets, and grades the trajectory with the `ci-judge-tool-use` judge. See
