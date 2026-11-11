@@ -1,6 +1,7 @@
 """LaunchDarkly AI Config integration."""
 
 import os
+import re
 import time
 from functools import lru_cache
 from typing import Any, Optional
@@ -11,15 +12,36 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from langchain_core.messages.ai import add_usage
 from ldclient import Context
-from ldclient.config import Config
-from ldai.client import LDAIClient, ModelConfig, ProviderConfig, LDMessage
-from ldai.models import AIConfig, AICompletionConfig, AICompletionConfigDefault
-from ldai.tracker import TokenUsage
+from launchdarkly_ai_server import parse_ai_config, parse_template
 
+from .ai_tracking import ConfigTracker, TokenUsage, track_data_for
 from .served_model import CONTENT_FILTER_MESSAGE, is_content_filtered
 
 # Load environment variables
 load_dotenv()
+
+
+def _fill(template: str, variables: dict[str, Any]) -> str:
+    """Fill ``{{variable}}`` placeholders, and blank the ones ``variables`` has no value for.
+
+    The AI SDK's ``parse_template`` leaves an unknown placeholder in place. The agents were
+    written against the legacy SDK, which rendered it empty (mustache), and add some of those
+    values themselves (account_specialist appends the account profile), so that is kept.
+    """
+    return re.sub(r"\{\{[\w.]+\}\}", "", parse_template(template, variables))
+
+
+def _tools_of(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """The variation's tools as {name, description, parameters}: the root ``tools`` map, or else
+    ``model.parameters.tools`` (where tools were set before the tools library)."""
+    tools = config.get("tools")
+    if isinstance(tools, dict) and tools:
+        entries = list(tools.values())  # parse_ai_config has checked each has a name, type and parameters
+    else:
+        listed = ((config.get("model") or {}).get("parameters") or {}).get("tools")
+        entries = [t for t in listed or [] if isinstance(t, dict) and t.get("name")]
+    return [{k: v for k, v in t.items() if k in ("name", "description", "type", "parameters", "customParameters")}
+            for t in entries]
 
 
 class LaunchDarklyClient:
@@ -62,7 +84,6 @@ class LaunchDarklyClient:
         
         # Use the already-initialized client (with ObservabilityPlugin from observability.py)
         self.client = ldclient.get()
-        self.ai_client = LDAIClient(self.client)
         print("✅ LaunchDarkly AI Config client ready (using observability-enabled SDK)")
 
     def get_ai_config(
@@ -70,155 +91,92 @@ class LaunchDarklyClient:
         config_key: str,
         context: Optional[dict[str, Any]] = None,
         default_config: Optional[dict[str, Any]] = None,
-    ) -> tuple[dict[str, Any], Any, Context]:
-        """Retrieve AI configuration from LaunchDarkly.
+    ) -> tuple[dict[str, Any], ConfigTracker, Context]:
+        """Evaluate an AI Config and return (config dict, tracker, LD context).
+
+        The variation is read and validated as the AI SDK reads it (``launchdarkly_ai_server``'s
+        ``extract_variation``: the flag value, its ``_ldMeta``, then ``parse_ai_config``). The
+        config dict has ``_instructions`` for an agent-mode variation, with ``{{variable}}`` and
+        ``{{ldctx.attribute}}`` placeholders filled from ``context``, or ``messages`` for a
+        completion-mode one, with only ``{{ldctx.attribute}}`` filled. Both as the legacy SDK did.
 
         Args:
             config_key: The AI config key in LaunchDarkly
-            context: User/session context for targeting
-            default_config: Default configuration fallback
+            context: User/session context for targeting, and the template variables
+            default_config: Served (as variation ``default-fallback``) when the config is missing,
+                disabled or invalid. Without one those raise.
 
-        Returns:
-            Tuple of (config_value, tracker, ld_context) for the AI config
-            
         Raises:
-            RuntimeError: If LaunchDarkly client is not initialized
+            RuntimeError: If the config can't be served and there is no default_config
         """
-        if not self.ai_client:
-            raise RuntimeError("LaunchDarkly client is not initialized. Check your SDK key.")
-
-        # Create LaunchDarkly context
         ld_context = self._create_context(context or {})
-
-        # Default configuration - convert dict to AIConfig if needed
-        if default_config:
-            default_ai_config = self._dict_to_ai_config(default_config, key=config_key)
+        try:
+            raw = self.client.variation(config_key, ld_context, None)
+        except Exception as e:
+            raw = None
+            problem = f"evaluation failed: {e}"
         else:
-            default_ai_config = self._get_default_ai_config(key=config_key)
+            problem = "not found in LaunchDarkly"
 
-        # Try agent-based config first (using .agent_config() method)
-        try:
-            from ldai.models import AIAgentConfigDefault
-            
-            template_vars = {k: str(v) for k, v in (context or {}).items()
-                            if isinstance(v, (str, int, float, bool))}
-
-            agent = self.ai_client.agent_config(
-                config_key,
-                ld_context,
-                AIAgentConfigDefault(
-                    enabled=True,
-                    instructions="__DEFAULT_INSTRUCTIONS__"
-                ),
-                variables=template_vars,
-            )
-            
-            if agent and agent.enabled:
-                
-                # Check if this is actually an agent-based config (has non-default instructions)
-                has_instructions = (
-                    hasattr(agent, 'instructions') and 
-                    agent.instructions and 
-                    agent.instructions != "__DEFAULT_INSTRUCTIONS__"
-                )
-                
-                if has_instructions:
-                    # This is truly an agent-based config (has "Goal or task" field)
-                    # Use agent.to_dict() to get all data including custom parameters
-                    agent_dict = agent.to_dict()
-                    
-                    # Get variation key by calling variation_detail (agents() API doesn't expose it)
-                    try:
-                        vd = self.client.variation_detail(config_key, ld_context, {})
-                        if vd and isinstance(vd.value, dict):
-                            variation_name = vd.value.get("_ldMeta", {}).get("variationKey", "unknown")
-                        else:
-                            variation_name = "unknown"
-                    except:
-                        variation_name = "unknown"
-                    
-                    # Extract provider
-                    provider_value = ""
-                    if agent_dict.get("provider"):
-                        provider_dict = agent_dict["provider"]
-                        provider_value = provider_dict.get("name", "") if isinstance(provider_dict, dict) else str(provider_dict)
-                    
-                    config_dict = {
-                        "enabled": agent_dict.get("_ldMeta", {}).get("enabled", True),
-                        "provider": provider_value,
-                        "_variation": variation_name,  # Store variation name in config
-                    }
-                    
-                    # Extract model config with custom parameters
-                    if agent_dict.get("model"):
-                        model_dict = agent_dict["model"]
-                        config_dict["model"] = {
-                            "name": model_dict.get("name", ""),
-                            "parameters": model_dict.get("parameters", {}),
-                        }
-                        # Custom parameters (like awskbid) are available in agent.to_dict()!
-                        if model_dict.get("custom"):
-                            config_dict["model"]["custom"] = model_dict["custom"]
-                    
-                    # Store instructions separately (not as messages)
-                    config_dict["_instructions"] = agent_dict.get("instructions", "")
-
-                    # Library tools attached to the served variation, as
-                    # {name, description, parameters}. The tool loop
-                    # (utils/tool_loop.py) runs the ones the backend implements.
-                    config_dict["tools"] = list((agent_dict.get("tools") or {}).values())
-                    
-                    tracker = agent.create_tracker()
-                    # Variation logging is now handled by individual agents
-                    return config_dict, tracker, ld_context
-                # If no instructions, this is a completion-based config, fall through
-        except Exception as e:
-            # Agent-based retrieval failed, will try completion-based
-            pass
-
-        # Fall back to completion-based config (using .completion_config() method)
-        try:
-            config_value = self.ai_client.completion_config(
-                config_key, ld_context, default_ai_config, {}
-            )
-            tracker = config_value.create_tracker()
-            
-            config_dict = self._ai_config_to_dict(config_value)
-            
-            try:
-                vd = self.client.variation_detail(config_key, ld_context, {})
-                if vd and isinstance(vd.value, dict):
-                    variation_name = vd.value.get("_ldMeta", {}).get("variationKey", "unknown")
+        meta: dict[str, Any] = {}
+        config: Optional[dict[str, Any]] = None
+        if isinstance(raw, dict):
+            meta = raw.get("_ldMeta") or {}
+            if not meta.get("enabled"):
+                problem = "is disabled (targeting serves a disabled variation)"
+            else:
+                parsed = parse_ai_config({k: v for k, v in raw.items() if k != "_ldMeta"})
+                if parsed.success:
+                    config = parsed.data
                 else:
-                    variation_name = "unknown"
-            except:
-                variation_name = "unknown"
-            
-            config_dict["_variation"] = variation_name
-            
-            default_dict = self._ai_config_to_dict(default_ai_config)
-            
-            is_from_ld = (
-                config_dict.get("model", {}).get("name") != default_dict.get("model", {}).get("name") or
-                config_dict.get("provider") != default_dict.get("provider") or
-                "custom" in config_dict.get("model", {}) or
-                config_dict.get("messages")
-            )
-            
-            if not is_from_ld:
-                if default_config:
-                    config_dict["_variation"] = "default-fallback"
-                    print(f"⚠️  AI config '{config_key}' not found in LaunchDarkly - using default fallback")
-                else:
-                    error_msg = f"CATASTROPHIC: AI config '{config_key}' not found in LaunchDarkly!"
-                    print(f"❌ {error_msg}")
-                    raise RuntimeError(error_msg)
-            
-            return config_dict, tracker, ld_context
-            
-        except Exception as e:
-            print(f"❌ CATASTROPHIC: Error retrieving AI config '{config_key}': {e}")
-            raise RuntimeError(f"Failed to retrieve AI config '{config_key}' from LaunchDarkly: {e}")
+                    problem = f"is invalid: {parsed.error['message']}"
+
+        if config is None:
+            if default_config:
+                print(f"⚠️  AI config '{config_key}' {problem} - using default fallback")
+                config_dict = self._default_config_dict(default_config)
+                tracker = ConfigTracker(self.client, ld_context, track_data_for(
+                    config_key,
+                    {"model": default_config.get("model") or {}, "provider": {"name": config_dict["provider"]}},
+                    None,
+                ))
+                return config_dict, tracker, ld_context
+            error_msg = f"CATASTROPHIC: AI config '{config_key}' {problem}!"
+            print(f"❌ {error_msg}")
+            raise RuntimeError(error_msg)
+
+        variables: dict[str, Any] = {
+            k: str(v) for k, v in (context or {}).items() if isinstance(v, (str, int, float, bool))
+        }
+        variables["ldctx"] = ld_context.to_dict()
+
+        model = config.get("model") or {}
+        config_dict: dict[str, Any] = {
+            "enabled": True,
+            "provider": (config.get("provider") or {}).get("name", ""),
+            "_variation": meta.get("variationKey") or "unknown",
+            "model": {"name": model.get("name", ""), "parameters": model.get("parameters") or {}},
+        }
+        # Custom parameters (like awskbid or baseModel) set on the model config
+        if model.get("custom"):
+            config_dict["model"]["custom"] = model["custom"]
+        if config.get("custom"):
+            config_dict["_custom"] = config["custom"]
+
+        if isinstance(config.get("instructions"), str):
+            # Agent mode ("Goal or task" in the UI); instructions are kept apart from messages
+            config_dict["_instructions"] = _fill(config["instructions"], variables)
+            # Library tools attached to the served variation, as {name, description, parameters}.
+            # The tool loop (utils/tool_loop.py) runs the ones the backend implements.
+            config_dict["tools"] = _tools_of(config)
+        else:
+            config_dict["messages"] = [
+                {"role": m.get("role", "user"), "content": _fill(m.get("content") or "", {"ldctx": variables["ldctx"]})}
+                for m in config.get("messages") or []
+            ]
+
+        tracker = ConfigTracker(self.client, ld_context, track_data_for(config_key, config, meta))
+        return config_dict, tracker, ld_context
 
     def _create_context(self, context_dict: dict[str, Any]) -> Context:
         """Create LaunchDarkly context from dictionary.
@@ -242,119 +200,30 @@ class LaunchDarklyClient:
 
         return context_builder.build()
 
-    def _get_default_config(self) -> dict[str, Any]:
-        """Get default AI configuration as dict.
-
-        Returns:
-            Default configuration dictionary
-        """
-        provider = os.getenv("LLM_PROVIDER", "bedrock")
-        model = os.getenv("LLM_MODEL", "claude-3-5-sonnet")
-
-        return {
-            "model": {
-                "name": model,
-                "parameters": {"maxTokens": 2000},
-            },
+    def _default_config_dict(self, default_config: dict[str, Any]) -> dict[str, Any]:
+        """A caller's fallback config, in the shape get_ai_config returns."""
+        model = default_config.get("model") or {}
+        provider = default_config.get("provider") or os.getenv("LLM_PROVIDER", "bedrock")
+        if isinstance(provider, dict):
+            provider = provider.get("name", "")
+        config_dict: dict[str, Any] = {
+            "enabled": default_config.get("enabled", True),
             "provider": provider,
-            "enabled": True,
+            "_variation": "default-fallback",
+            "model": {
+                "name": model.get("name") or os.getenv("LLM_MODEL", "claude-3-5-sonnet"),
+                "parameters": model.get("parameters") or {"maxTokens": 2000},
+            },
         }
-
-    def _get_default_ai_config(self, key: str = "_default") -> AICompletionConfigDefault:
-        """Get default AI configuration."""
-        provider = os.getenv("LLM_PROVIDER", "bedrock")
-        model = os.getenv("LLM_MODEL", "claude-3-5-sonnet")
-
-        model_config = ModelConfig(
-            name=model,
-            parameters={"maxTokens": 2000}
-        )
-        provider_config = ProviderConfig(name=provider)
-        return AICompletionConfigDefault(
-            enabled=True,
-            model=model_config,
-            provider=provider_config,
-        )
-
-    def _dict_to_ai_config(self, config_dict: dict[str, Any], key: str = "_default") -> AICompletionConfigDefault:
-        """Convert dict config to AICompletionConfigDefault object."""
-        model_dict = config_dict.get("model", {})
-        model_config = ModelConfig(
-            name=model_dict.get("name", "claude-3-5-sonnet"),
-            parameters=model_dict.get("parameters", {"maxTokens": 2000})
-        )
-        provider_config = ProviderConfig(name=config_dict.get("provider", "bedrock"))
-        
-        messages = []
-        if config_dict.get("messages"):
-            for msg in config_dict["messages"]:
-                if isinstance(msg, dict):
-                    messages.append(LDMessage(
-                        role=msg.get("role", "user"),
-                        content=msg.get("content", "")
-                    ))
-                else:
-                    messages.append(msg)
-        
-        return AICompletionConfigDefault(
-            enabled=config_dict.get("enabled", True),
-            model=model_config,
-            provider=provider_config,
-            messages=messages if messages else None,
-        )
-
-    def _ai_config_to_dict(self, ai_config: AIConfig) -> dict[str, Any]:
-        """Convert AIConfig object to dict.
-
-        Args:
-            ai_config: AIConfig object
-
-        Returns:
-            Configuration dictionary
-        """
-        # Use to_dict() method which handles all the conversion
-        config_dict = ai_config.to_dict()
-        
-        # Extract the structure we need
-        result = {
-            "enabled": config_dict.get("_ldMeta", {}).get("enabled", True),
-        }
-        
-        # Extract prompts from LaunchDarkly AI Config
-        # Support both prompt-based (messages array) and agent-based (_prompt field)
-        if config_dict.get("messages"):
-            # Prompt-based AI Config: uses messages array with roles
-            result["messages"] = config_dict["messages"]
-        elif config_dict.get("_prompt"):
-            # Agent-based AI Config: uses _prompt field (Goal or task in UI)
-            # Convert to messages format for consistency
-            result["messages"] = [
-                {"role": "system", "content": config_dict["_prompt"]}
+        if default_config.get("instructions"):
+            config_dict["_instructions"] = default_config["instructions"]
+            config_dict["tools"] = []
+        else:
+            config_dict["messages"] = [
+                {"role": m.get("role", "user"), "content": m.get("content", "")}
+                for m in default_config.get("messages") or []
             ]
-
-        if config_dict.get("model"):
-            model_dict = config_dict["model"]
-            result["model"] = {
-                "name": model_dict.get("name", ""),
-                "parameters": model_dict.get("parameters", {}),
-            }
-            
-            # Extract custom parameters from model.custom
-            if model_dict.get("custom"):
-                result["model"]["custom"] = model_dict["custom"]
-
-        if config_dict.get("provider"):
-            provider_dict = config_dict["provider"]
-            result["provider"] = provider_dict.get("name", "")
-        
-        # Extract top-level custom parameters (e.g., guardrail_id, awskbid)
-        # These can be in either _custom or model.custom
-        if config_dict.get("_custom"):
-            result["_custom"] = config_dict["_custom"]
-        elif config_dict.get("custom"):
-            result["_custom"] = config_dict["custom"]
-
-        return result
+        return config_dict
 
     def build_langchain_messages(self, ld_config: dict[str, Any], context_vars: dict[str, Any]) -> list:
         """Build LangChain messages from LaunchDarkly config (agent-based or completion-based).

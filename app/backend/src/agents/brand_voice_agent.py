@@ -6,7 +6,6 @@ import ldclient
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from opentelemetry import trace
-from ldai.client import LDMessage
 
 from ..graph.state import AgentState
 from ..utils.llm_config import get_model_invoker
@@ -41,8 +40,8 @@ Transform the specialist's response into a customer-facing message that:
 
 Provide ONLY the final customer-facing response. Do not include meta-commentary."""
 
-# Passed to LDClientManager.get_ai_config as the `default_config` fallback, which
-# expects a plain dict (see _dict_to_ai_config in launchdarkly_config.py).
+# Passed to LDClientManager.get_ai_config as the `default_config` fallback (see
+# _default_config_dict in launchdarkly_config.py).
 DEFAULT_BRAND_AGENT_CONFIG = {
     "key": "brand_agent",
     "enabled": True,
@@ -51,7 +50,7 @@ DEFAULT_BRAND_AGENT_CONFIG = {
         "parameters": {"maxTokens": 2000},
     },
     "provider": "bedrock",
-    "messages": [LDMessage(role="system", content=DEFAULT_BRAND_VOICE_SYSTEM_PROMPT)],
+    "messages": [{"role": "system", "content": DEFAULT_BRAND_VOICE_SYSTEM_PROMPT}],
 }
 
 
@@ -81,16 +80,16 @@ def track_agent_graph_traversal(
     The app orchestrates in code (LangGraph), so nothing drives the SDK's
     agent-graph runner and the LaunchDarkly agent graph view shows no usage.
     This mirrors the traversal onto the graph so the view populates:
-      - graph-level: invocation, path, handoffs, total tokens/duration (AIGraphTracker)
-      - per-node: success, duration, tokens on each node's graph-scoped tracker
-        (obtained from the graph definition, so metrics land on the node cards)
+      - graph-level: each node entered, handoffs, invocation, total tokens/duration,
+        as the AI SDK's graph() runner sends them (utils/ai_tracking.GraphTracker)
+      - per-node: success, duration, tokens and TTFT on each node's config, with the
+        graph's key and run ID so the metrics land on the node cards
     Best-effort; never raises.
     """
     try:
         import ldclient
         from ldclient import Context
-        from ldai.client import LDAIClient
-        from ldai.tracker import AIGraphTracker, TokenUsage
+        from ..utils.ai_tracking import ConfigTracker, GraphTracker, TokenUsage, track_data_for
 
         agent_data = state.get("agent_data", {})
 
@@ -124,26 +123,24 @@ def track_agent_graph_traversal(
         if context is None:
             context = Context.builder(user_context.get("user_key", "anonymous")).kind("user").build()
 
-        # --- Graph-level metrics (mirrors LDAIClient.agent_graph internals) ---
-        variation = raw.variation(AGENT_GRAPH_KEY, context, {})
-        meta = variation.get("_ldMeta", {}) if isinstance(variation, dict) else {}
-        gtracker = AIGraphTracker(raw, meta.get("variationKey", ""), AGENT_GRAPH_KEY, int(meta.get("version", 1) or 1), context)
-        gtracker.track_invocation_success()
-        gtracker.track_path(path)
+        # --- Graph-level metrics, as the AI SDK's graph() runner sends them ---
+        gtracker = GraphTracker(raw, context, AGENT_GRAPH_KEY)
+        for index, ck in enumerate(path):
+            gtracker.track_node(ck, index)
         for src, tgt in zip(path, path[1:]):
             gtracker.track_handoff_success(src, tgt)
-        if total_in or total_out:
-            gtracker.track_total_tokens(TokenUsage(total=total_in + total_out, input=total_in, output=total_out))
+        gtracker.track_total_tokens(total_in + total_out)
         if total_dur:
             gtracker.track_duration(total_dur)
+        gtracker.track_invocation_success()
 
-        # --- Per-node metrics via each node's graph-scoped config tracker ---
-        defn = LDAIClient(raw).agent_graph(AGENT_GRAPH_KEY, context)
+        # --- Per-node metrics on each node's config, scoped to this graph run ---
         for ck, data in ran:
-            node = defn.get_node(ck)
-            if not node:
+            variation = raw.variation(ck, context, None)
+            if not isinstance(variation, dict):
                 continue
-            nt = node.get_config().create_tracker()
+            nt = ConfigTracker(raw, context, track_data_for(
+                ck, variation, variation.get("_ldMeta"), graph_key=AGENT_GRAPH_KEY, run_id=gtracker.run_id))
             nt.track_success()
             dur = int(data.get("duration_ms") or 0)
             if dur:
