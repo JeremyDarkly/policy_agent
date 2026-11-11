@@ -8,8 +8,14 @@
 # exclude_variations: variation keys never evaluated, even when targeting or a
 #   test context serves them (for variations the eval runner can't call).
 #
-# Tools: the backend doesn't give the model the tools attached to these
-# variations, so ci_eval.py runs every target with no tools, as production does.
+# Tools: a variation is run with the Library tools it attaches that the backend
+# implements (app/backend/src/tools/registry.py), backed by those
+# implementations, as the backend's tool loop runs it. Attached tools the
+# backend doesn't implement aren't given to the model, as in production. For a
+# variation with tools, the target's [<config>.tools] table replaces its
+# dataset, quick_dataset, scorers and judges, so the tool-use judge
+# (ci-judge-tool-use) grades the trajectory only where there is one. Variations
+# without tools keep the target's own settings.
 
 # --- Test contexts -------------------------------------------------------------
 # For each target, ci_eval.py asks LaunchDarkly (with the server SDK) which
@@ -91,11 +97,31 @@ judges = [
   { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = "{{branch_info}}" },
 ]
 
+# For tool-calling (find_branches). The branch details come from the tool, so the
+# accuracy judge's location context isn't the ground truth any more.
+[branch_agent.tools]
+dataset = "branch_agent_tools_dataset"
+quick_dataset = "branch_agent_tools_dataset_quick"
+judges = [
+  { key = "ci-judge-tool-use", threshold = 0.8, ground_truth = "Expected tool calls (an empty list means no tool is needed): {{expected_tools}}" },
+  { key = "ci-judge-coherence", threshold = 0.7 },
+]
+
 [scheduler_agent]
 dataset = "scheduler_agent_dataset"
 quick_dataset = "scheduler_agent_dataset_quick"
 judges = [
   { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = "Available appointment slots (offer only these):\n{{available_slots}}" },
+  { key = "ci-judge-coherence", threshold = 0.7 },
+]
+
+# For tool-calling (get_available_slots). The slots come from the tool in the run,
+# so the tool-use judge checks them against the trajectory, not a stored list.
+[scheduler_agent.tools]
+dataset = "scheduler_agent_tools_dataset"
+quick_dataset = "scheduler_agent_tools_dataset_quick"
+judges = [
+  { key = "ci-judge-tool-use", threshold = 0.8, ground_truth = "Expected tool calls (an empty list means no tool is needed): {{expected_tools}}" },
   { key = "ci-judge-coherence", threshold = 0.7 },
 ]
 

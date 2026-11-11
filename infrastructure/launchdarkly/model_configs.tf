@@ -87,16 +87,55 @@ resource "launchdarkly_model_config" "claude_sonnet_4" {
   tags = ["managed-by-terraform"]
 }
 
-# Keyed map of the model configs above, consumed by outputs.tf.
+# Azure AI Foundry deployment for branch_agent's azure-foundry variation (issue #67).
+# The global model catalog has no Azure provider, so this is a project model config with a
+# free-text provider. The backend picks its Azure client from that provider string
+# (AZURE_PROVIDERS in app/backend/src/utils/llm_config.py). model_id is the deployment name;
+# baseModel is the model the deployment runs, which ai-model-mismatch compares the served
+# model with. Not affected by model_override. No costs: the Monitoring tab shows none (#69).
+resource "launchdarkly_model_config" "azure_foundry_branch" {
+  count = local.azure_foundry_enabled ? 1 : 0
+
+  project_key    = var.project_key
+  key            = "azure-foundry-branch"
+  name           = "Azure AI Foundry (Branch)"
+  model_id       = var.azure_foundry_branch_deployment
+  model_provider = "Azure AI Foundry"
+
+  custom_parameters = local.azure_foundry_base_model == "" ? null : jsonencode({
+    baseModel = local.azure_foundry_base_model
+  })
+
+  params = jsonencode({
+    temperature = 0.1
+  })
+
+  tags = ["managed-by-terraform"]
+
+  # Once created, an empty AZURE_FOUNDRY_DEPLOYMENT (for example, a run without the Azure
+  # variables loaded) would plan to delete this config and the azure-foundry variation, even
+  # while targeting serves that variation. prevent_destroy makes that plan fail instead.
+  # To remove the Azure resources on purpose, see "Removing the Azure resources" in the README.
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 locals {
+  # Null and "" both mean unset. coalesce() can't be used here: it errors when every
+  # argument is null or "", which is what docker-compose passes for an unset env var.
+  azure_foundry_enabled    = trimspace(var.azure_foundry_branch_deployment == null ? "" : var.azure_foundry_branch_deployment) != ""
+  azure_foundry_base_model = trimspace(var.azure_foundry_branch_base_model == null ? "" : var.azure_foundry_branch_base_model)
+
+  # Keyed map of the model configs above, consumed by outputs.tf.
   model_config_resources = {
-    for r in [
+    for r in concat([
       launchdarkly_model_config.claude_sonnet_5,
       launchdarkly_model_config.llama_3_1_70b_accounts,
       launchdarkly_model_config.claude_haiku_4_5_branch,
       launchdarkly_model_config.nova_pro,
       launchdarkly_model_config.claude_haiku_4_5_brand_voice,
       launchdarkly_model_config.claude_sonnet_4,
-    ] : r.key => r
+    ], launchdarkly_model_config.azure_foundry_branch) : r.key => r
   }
 }

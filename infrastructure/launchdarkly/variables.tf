@@ -31,3 +31,15 @@ variable "target_environment" {
   type        = string
   default     = "test"
 }
+
+variable "azure_foundry_branch_deployment" {
+  description = "Azure AI Foundry deployment name for branch_agent's azure-foundry variation (TF_VAR_azure_foundry_branch_deployment, mapped from AZURE_FOUNDRY_DEPLOYMENT by the docker-compose terraform service). Null or empty: the Azure model config and variation are not created."
+  type        = string
+  default     = null
+}
+
+variable "azure_foundry_branch_base_model" {
+  description = "The model the Azure deployment runs, e.g. grok-4.6 or gpt-4o (TF_VAR_azure_foundry_branch_base_model, mapped from AZURE_FOUNDRY_BASE_MODEL). Stored as the model config's baseModel custom parameter, which ai-model-mismatch compares the served model with. Empty: the deployment name is compared instead."
+  type        = string
+  default     = null
+}

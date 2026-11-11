@@ -9,6 +9,7 @@ from ..utils.llm_config import get_model_invoker
 from ..utils.served_model import served_model_id_of
 from ..utils import spend_ledger
 from ..utils.launchdarkly_config import get_ld_client
+from ..utils.tool_loop import run_tool_loop, tools_for
 
 
 def branch_specialist_node(state: AgentState) -> dict[str, Any]:
@@ -82,7 +83,15 @@ def branch_specialist_node(state: AgentState) -> dict[str, Any]:
     import time
     start_time = time.time()
 
-    response = model_invoker.invoke(langchain_messages)
+    # A tool-calling variation looks branches up with find_branches.
+    tools = tools_for(ld_config)
+    tool_calls: list[dict[str, Any]] = []
+    if tools:
+        print(f"  Tools: {', '.join(t['name'] for t in tools)}")
+        loop = run_tool_loop(model_invoker, langchain_messages, tools)
+        response, tool_calls = loop.message, loop.calls
+    else:
+        response = model_invoker.invoke(langchain_messages)
     served_model_id = served_model_id_of(response, model_id)
 
     # Calculate duration
@@ -157,7 +166,8 @@ def branch_specialist_node(state: AgentState) -> dict[str, Any]:
             "branch_specialist": {
                 "model": model_id,  # Track which model was used
                 "served_model": served_model_id,  # Model the API reported
-                "source": "location_profile",
+                "source": "find_branches" if tools else "location_profile",
+                "tool_calls": tool_calls,
                 "account_context": branch_info_str,  # Source of truth for evaluation
                 "query": query,
                 "account_id": account_id,

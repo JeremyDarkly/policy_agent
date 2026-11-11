@@ -70,6 +70,12 @@ jobs:
       LD_BASE_URI: ${{ secrets.LD_BASE_URI }}
       LD_STREAM_URI: ${{ secrets.LD_STREAM_URI }}
       LD_EVENTS_URI: ${{ secrets.LD_EVENTS_URI }}
+      # Where the run's spans go (the SDK's otel extra). Unset: LaunchDarkly production.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${{ secrets.OTEL_EXPORTER_OTLP_ENDPOINT }}
+      # Azure AI Foundry, for variations on an Azure model config (branch_agent's azure-foundry).
+      # Unset, those variations error, since the SDK would call OpenAI instead.
+      AZURE_FOUNDRY_ENDPOINT: ${{ secrets.AZURE_FOUNDRY_ENDPOINT }}
+      AZURE_FOUNDRY_API_KEY: ${{ secrets.AZURE_FOUNDRY_API_KEY }}
       # Whose targeting decides which variation is "served".
       LD_ENVIRONMENT: ${{ secrets.LD_ENVIRONMENT }}
     steps:

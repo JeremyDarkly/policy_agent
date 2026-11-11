@@ -16,6 +16,10 @@ SOURCE_REQUESTED_FALLBACK = "requested_fallback"  # the API reported nothing, so
 
 SERVED_EVENT = "ai-model-served"
 MISMATCH_EVENT = "ai-model-mismatch"
+CONTENT_FILTERED_EVENT = "ai-content-filtered"
+
+# The error a content-filtered call raises; the same text AzureChatOpenAI uses.
+CONTENT_FILTER_MESSAGE = "Azure has not provided the response due to a content filter being triggered"
 
 # Bedrock cross-region inference profile prefixes, e.g. "us.anthropic.claude-...".
 _PROFILE_PREFIX = re.compile(r"^(us|us-gov|eu|apac|jp|au|ca|global)\.")
@@ -103,6 +107,44 @@ def bedrock_served_model(response: dict, requested: str) -> tuple[str, str]:
     return requested, SOURCE_REQUESTED_FALLBACK
 
 
+def served_event_data(
+    *,
+    config_key: str,
+    variation_key: str,
+    provider: str,
+    requested: str,
+    served: str,
+    source: str,
+    deployment: str = "",
+) -> dict:
+    """The data sent with ``ai-model-served``, ``ai-model-mismatch`` and ``ai-content-filtered``.
+
+    ``deployment`` is set when the model ID sent in the request is an Azure AI Foundry deployment name; ``requested``
+    is then the model the deployment is configured to run (the model config's ``baseModel``).
+    """
+    data = {
+        "configKey": config_key,
+        "variationKey": variation_key,
+        "provider": provider,
+        "requestedModel": requested,
+        "servedModel": served,
+        "source": source,
+    }
+    if deployment:
+        data["deployment"] = deployment
+    return data
+
+
+def is_content_filtered(metadata: Optional[dict]) -> bool:
+    """True when the response was withheld by a content filter (Azure returns ``finish_reason`` ``content_filter``)."""
+    return (metadata or {}).get("finish_reason") == "content_filter"
+
+
+def report_content_filtered(ld_client: Any, context: Any, **event_data: str) -> None:
+    """Send ``ai-content-filtered`` (value 1) for a call a content filter blocked. Takes ``served_event_data``'s args."""
+    ld_client.track(CONTENT_FILTERED_EVENT, context, served_event_data(**event_data), 1)
+
+
 def report_served_model(
     ld_client: Any,
     context: Any,
@@ -113,6 +155,7 @@ def report_served_model(
     requested: str,
     served: str,
     source: str,
+    deployment: str = "",
 ) -> bool:
     """Send ``ai-model-served`` for this call, and ``ai-model-mismatch`` when the served model could be checked.
 
@@ -121,14 +164,15 @@ def report_served_model(
     prompt router is expected to choose a model other than the router ARN, and a response that names no model
     (Bedrock without a router) can't be checked. Returns whether the call counted as a mismatch.
     """
-    data = {
-        "configKey": config_key,
-        "variationKey": variation_key,
-        "provider": provider,
-        "requestedModel": requested,
-        "servedModel": served,
-        "source": source,
-    }
+    data = served_event_data(
+        config_key=config_key,
+        variation_key=variation_key,
+        provider=provider,
+        requested=requested,
+        served=served,
+        source=source,
+        deployment=deployment,
+    )
     ld_client.track(SERVED_EVENT, context, data, 1)
     if source != SOURCE_RESPONSE:
         return False
