@@ -313,6 +313,18 @@ go through the same `ModelInvoker` tracker calls as Bedrock.
    `-n` to change). It prints, per user, how many requests reached the branch agent, errors, the served model, and
    branch-agent latency and tokens.
 
+**Keep the Azure variables loaded for every Terraform run.** Once the Azure model config and variation exist, a
+`terraform plan` or `apply` without `AZURE_FOUNDRY_DEPLOYMENT` stops with `Error: Instance cannot be destroyed` on
+`azure_foundry_branch` or `branch_agent_azure_foundry`. That is deliberate: without it, the run would delete the
+variation even while targeting serves it. Load the variables and run it again. If they live in a separate env file:
+
+```bash
+docker compose --env-file .env --env-file .env.azure run --rm terraform plan
+```
+
+**Removing the Azure resources.** Move `branch_agent`'s rules and fallthrough off `azure-foundry` first. Then set
+`prevent_destroy = false` on both resources, apply without `AZURE_FOUNDRY_DEPLOYMENT`, and set it back to `true`.
+
 **Moving traffic.** In the LaunchDarkly UI, `branch_agent` → Targeting: change the rule to a percentage rollout, or
 change the fallthrough to `azure-foundry`, and the next request is served from Azure. Switching back is the same edit.
 For a guarded rollout of `azure-foundry` on the default rule, use `ld_autogen__ai-completion-error`, the

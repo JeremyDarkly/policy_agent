@@ -111,6 +111,14 @@ resource "launchdarkly_model_config" "azure_foundry_branch" {
   })
 
   tags = ["managed-by-terraform"]
+
+  # Once created, an empty AZURE_FOUNDRY_DEPLOYMENT (for example, a run without the Azure
+  # variables loaded) would plan to delete this config and the azure-foundry variation, even
+  # while targeting serves that variation. prevent_destroy makes that plan fail instead.
+  # To remove the Azure resources on purpose, see "Removing the Azure resources" in the README.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 locals {
