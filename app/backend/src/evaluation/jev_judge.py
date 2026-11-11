@@ -308,7 +308,7 @@ def send_jev_events(
         try:
             tracker.track_duration(int(jev_result.get("duration_ms", 0)))
             if ok:
-                from ldai.tracker import TokenUsage
+                from ..utils.ai_tracking import TokenUsage
 
                 tracker.track_success()
                 tokens_in, tokens_out = jev_result["input_tokens"], jev_result["output_tokens"]
@@ -338,7 +338,7 @@ def send_jev_events(
         print("⚠️  No brand_agent tracker: Jev classifications not sent")
         return
     try:
-        from ldai.providers.types import JudgeResult
+        from ..utils.ai_tracking import JudgeResult
 
         for name, r in (jev_result.get("jev") or {}).items():
             if not r.get("metric_key"):

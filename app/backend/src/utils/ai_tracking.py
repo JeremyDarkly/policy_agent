@@ -7,6 +7,9 @@ track data (``launchdarkly_ai_server.tracking.execute_and_track``): runId, confi
 version, modelName, providerName, the pinned model-config stamps and, inside the agent graph,
 graphKey.
 
+Judge scores are sent as the SDK's judges send them: the judge's metric key as the event, with the
+evaluated config's track data plus ``judgeConfigKey``.
+
 Three events the 1.0.0 SDK doesn't send are kept, because the config Monitoring tab still charts
 them: time to first token (``$ld:ai:tokens:ttf``) and user feedback
 (``$ld:ai:feedback:user:positive`` / ``negative``).
@@ -30,6 +33,17 @@ class TokenUsage:
     total: int
     input: int
     output: int
+
+
+@dataclass(frozen=True)
+class JudgeResult:
+    """One judge score for the config a tracker belongs to."""
+
+    judge_config_key: str
+    metric_key: str
+    score: float
+    success: bool = True
+    sampled: bool = True
 
 
 def _environment_id() -> Optional[str]:
@@ -108,6 +122,11 @@ class ConfigTracker:
 
     def track_tool_call(self, tool_key: str) -> None:
         self._track("$ld:ai:tool_call", 1, {"toolKey": tool_key})
+
+    def track_judge_result(self, result: JudgeResult) -> None:
+        if result.sampled and result.success and result.metric_key:
+            extra = {"judgeConfigKey": result.judge_config_key} if result.judge_config_key else None
+            self._track(result.metric_key, result.score, extra)
 
     def track_feedback(self, positive: bool) -> None:
         self._track("$ld:ai:feedback:user:positive" if positive else "$ld:ai:feedback:user:negative", 1)

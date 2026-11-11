@@ -3,7 +3,7 @@
 import pytest
 from ldclient import Context
 
-from src.utils.ai_tracking import ConfigTracker, GraphTracker, TokenUsage, track_data_for
+from src.utils.ai_tracking import ConfigTracker, GraphTracker, JudgeResult, TokenUsage, track_data_for
 from src.utils.launchdarkly_config import LaunchDarklyClient
 
 AGENT_VARIATION = {
@@ -160,3 +160,17 @@ def test_graph_tracker_sends_sdk_graph_events():
     assert node["graphKey"] == node["configKey"] == "banking_agent_graph"
     assert node["runId"] == "g-1" and node["nodeKey"] == "triage_agent" and node["index"] == 0
     assert ld.events[1][1]["sourceKey"] == "triage_agent" and ld.events[1][1]["targetKey"] == "branch_agent"
+
+
+def test_judge_result_is_sent_on_the_evaluated_config():
+    ld = FakeLD({})
+    tracker = ConfigTracker(ld, Context.create("u-1"), track_data_for("brand_agent", COMPLETION_VARIATION,
+                                                                     COMPLETION_VARIATION["_ldMeta"], run_id="r"))
+    tracker.track_judge_result(JudgeResult(judge_config_key="ai-judge-jev", metric_key="jev-accuracy", score=0.8))
+    tracker.track_judge_result(JudgeResult(judge_config_key="ai-judge-jev", metric_key="x", score=1, sampled=False))
+    tracker.track_judge_result(JudgeResult(judge_config_key="ai-judge-jev", metric_key="x", score=1, success=False))
+
+    assert len(ld.events) == 1
+    event, data, value = ld.events[0]
+    assert (event, value) == ("jev-accuracy", 0.8)
+    assert data["configKey"] == "brand_agent" and data["judgeConfigKey"] == "ai-judge-jev"
