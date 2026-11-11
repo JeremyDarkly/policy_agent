@@ -3,6 +3,7 @@
 import functools
 from typing import Any, Callable, Literal
 
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, StateGraph
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
@@ -14,9 +15,29 @@ from ..agents import (
     triage_node,
     brand_voice_node,
 )
+from ..utils.observability import set_agent_turn, set_input_message
 from .state import AgentState
 
 _tracer = trace.get_tracer("togglebank.workflow", "1.0.0")
+
+# Nodes whose agent_data entry is stored under a different key than the node name
+_AGENT_DATA_KEYS = {"triage": "triage_router"}
+
+
+def _user_question(state: AgentState) -> str:
+    """The customer's message that started this request."""
+    for message in state.get("messages", []):
+        if isinstance(message, HumanMessage):
+            return str(message.content)
+    return ""
+
+
+def _agent_reply(result: dict[str, Any]) -> str:
+    """The message this node added, if it added one."""
+    messages = result.get("messages") or []
+    if messages and isinstance(messages[-1], AIMessage):
+        return str(messages[-1].content)
+    return ""
 
 
 def _traced_node(name: str, fn: Callable) -> Callable:
@@ -34,7 +55,8 @@ def _traced_node(name: str, fn: Callable) -> Callable:
         ) as span:
             try:
                 result = fn(state)
-                agent_data = result.get("agent_data", {}).get(name, {})
+                set_agent_turn(span, name, _user_question(state), _agent_reply(result))
+                agent_data = result.get("agent_data", {}).get(_AGENT_DATA_KEYS.get(name, name), {})
                 if agent_data:
                     model = agent_data.get("model", "")
                     if model:
@@ -209,6 +231,8 @@ def run_workflow(
         "multi-agent-workflow",
         attributes=span_attributes,
     ) as span:
+        # The conversation view opens with the question on the request's top span
+        set_input_message(span, user_message)
         initial_state = create_initial_state(
             user_message,
             user_context,

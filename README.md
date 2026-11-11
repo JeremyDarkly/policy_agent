@@ -83,6 +83,7 @@ variable substitution and also bind-mounts it into the backend container.
 | `LLM_PROVIDER` | no | backend | Provider fallback. Default `bedrock` |
 | `LLM_MODEL` | no | backend | Model fallback used only if an AI Config carries no model. Default `claude-3-5-sonnet` |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | no | backend | Only if you point the agents at those providers directly |
+| `AZURE_FOUNDRY_ENDPOINT` / `AZURE_FOUNDRY_API_KEY` | no | backend | Only for variations on an Azure AI Foundry model config (see [Serving from Azure AI Foundry](#serving-from-azure-ai-foundry)). The endpoint is the resource URL; any path after the host is ignored |
 
 `.env` is gitignored. Don't commit it.
 
@@ -105,18 +106,18 @@ docker compose run --rm terraform output     # show managed keys and IDs
 
 | Resource | Count | File |
 |---|---|---|
-| AI Configs (5 agents + 4 judges) | 9 | `ai_configs_resources.tf` |
-| AI Config variations (`default`, published) | 9 | `ai_configs_resources.tf` |
+| AI Configs (5 agents + 5 judges) | 10 | `ai_configs_resources.tf` |
+| AI Config variations (`default` on each, plus `tool-calling` on `scheduler_agent` and `branch_agent`; published) | 12 | `ai_configs_resources.tf` |
 | Reusable model configs | 6 | `model_configs.tf` |
-| AI tool definitions | 20 | `tools.tf` |
+| AI tool definitions (20 ToggleHealth, plus `get_available_slots` and `find_branches`) | 22 | `tools.tf` |
 | AI agent graph (`banking_agent_graph`) | 1 | `agent_graph.tf` |
 | Jev judge AI Config (`ai-judge-jev`) and its metrics | 1 + 8 | `jev_judge.tf` |
 
-50 resources total. `ai-judge-jev`'s two variations (`jev-alongside`, `jev-only`) are not in Terraform: they need
+`ai-judge-jev`'s two variations (`jev-alongside`, `jev-only`) are not in Terraform: they need
 model config `TypeSafe.jev-1.14.0` plus questions in `model.custom`, and the provider (3.1.5) takes either a model
 config key or an inline model, with no custom parameters. Run `python3 evals/setup_jev_judge.py` after `terraform
 apply` to create them. In a project where that script already created the config and metrics, `jev_judge.tf` lists
-the `terraform import` commands. Each config is created with a single `Default` variation, and
+the `terraform import` commands. Each config is created with a `Default` variation, and
 LaunchDarkly auto-adds a "disabled" variation ahead of it — so variation index 0 is
 `disabled` and index 1 is `Default`.
 
@@ -156,8 +157,10 @@ docker compose run --rm \
 
 Each variation declares `tool_keys`, and provider v3.1.5 **does** attach them to the
 served variation. Verified against a live apply: the tools on each served variation
-match the declared counts exactly (triage 7, accounts 7, branch 6, scheduler 5, brand
-voice 4; the two judges declare none).
+match the declared counts exactly. Most of them are ToggleHealth leftovers that no code
+implements; the model is only ever offered tools the backend implements (see
+[Tool calling](#tool-calling)). `scheduler_agent`'s and `branch_agent`'s `default`
+variations attach none.
 
 Earlier provider versions sent `tool_keys` to an API field that was accepted and
 ignored, so no manual attachment step is needed anymore. The `ai_config_tool_attachments`
@@ -268,6 +271,10 @@ sends two custom events with the AI Config's context:
 |---|---|---|
 | `ai-model-served` | Every call (value `1`) | `configKey`, `variationKey`, `provider`, `requestedModel`, `servedModel`, `source` |
 | `ai-model-mismatch` | Every call whose response named the model: value `1` when the served model isn't the requested one (or the requested one made more specific), `0` when it is | Same as above |
+| `ai-content-filtered` | A call whose response a content filter withheld (Azure `finish_reason` `content_filter`), value `1`. The call is also tracked as an AI Config error and raises | Same as above |
+
+For an Azure AI Foundry deployment, `requestedModel` is the model config's `baseModel` and the data also carries
+`deployment`, the deployment name sent in the request (see [Serving from Azure AI Foundry](#serving-from-azure-ai-foundry)).
 
 `source` says where `servedModel` came from:
 - **`response`:** the API named the model. OpenAI and Anthropic always do.
@@ -297,6 +304,137 @@ different variations depending on who is signed in:
 
 `<name>` is `DEMO_USER_NAME` as a slug: `Jane Doe` gives `jane-doe-commercial-plan`. With no name set, the keys
 start with `demo-user`.
+
+### Serving from Azure AI Foundry
+
+`branch_agent` can serve a model hosted in Azure AI Foundry alongside its Bedrock `default` variation. Targeting
+decides which cloud answers, with no redeploy, and the AI Config's Monitoring tab shows both variations' latency,
+tokens and errors side by side.
+
+**How it fits together.** The global model catalog has no Azure provider, so Terraform creates a project model config,
+`azure-foundry-branch`, with provider `Azure AI Foundry`, the Foundry deployment name as its model ID, and the model
+the deployment runs as the custom parameter `baseModel`. The `branch_agent` variation `azure-foundry` uses it, with the
+same instructions as `default` plus the TOOLS paragraph, and the `find_branches` tool (see [Tool calling](#tool-calling)). When a variation's provider is `Azure AI Foundry` (or `azure`,
+`azure openai`, `foundry`; see `AZURE_PROVIDERS` in `app/backend/src/utils/llm_config.py`), the backend calls the
+deployment through `ChatOpenAI` on the resource's OpenAI-compatible v1 route (`<resource>/openai/v1/`), which serves
+OpenAI and non-OpenAI models (Grok, Llama, DeepSeek) and needs no `api-version`. Tokens, duration, success and errors
+go through the same `ModelInvoker` tracker calls as Bedrock.
+
+**Setup.**
+
+1. Add to `.env`:
+
+   | Variable | Used by | Value |
+   |---|---|---|
+   | `AZURE_FOUNDRY_ENDPOINT` | backend | Resource URL, e.g. `https://<resource>.services.ai.azure.com`. A request URL copied from the portal works too; only the scheme and host are used |
+   | `AZURE_FOUNDRY_API_KEY` | backend | The resource's API key. Entra ID is not supported yet |
+   | `AZURE_FOUNDRY_DEPLOYMENT` | Terraform | Deployment name, e.g. `grok-4.6`. Unset: the Azure model config and variation are not created |
+   | `AZURE_FOUNDRY_BASE_MODEL` | Terraform | The model the deployment runs, e.g. `grok-4.6` or `gpt-4o`. Stored as `baseModel` |
+
+2. Create the model config and variation, add the demo rule, and register the metrics:
+
+   ```bash
+   docker compose run --rm terraform apply
+   python3 scripts/set_ai_config_targeting.py --azure-demo   # internal demo user -> azure-foundry
+   python3 scripts/register_metrics.py                       # ai-model-mismatch, ai-content-filtered
+   docker compose up -d backend                              # picks up the AZURE_FOUNDRY_* variables
+   ```
+
+   `--azure-demo` adds one rule to `branch_agent`: a user key ending in `-internal-dev` (the UI's Internal preset) gets
+   `azure-foundry`; everyone else gets the fallthrough, `default`. Add `--config branch_agent` to leave the other
+   configs' targeting alone.
+
+3. Send traffic to both variations: `python3 scripts/foundry_load.py` (40 requests, alternating the two demo users;
+   `-n` to change). It prints, per user, how many requests reached the branch agent, errors, the served model, and
+   branch-agent latency and tokens.
+
+**Keep the Azure variables loaded for every Terraform run.** Once the Azure model config and variation exist, a
+`terraform plan` or `apply` without `AZURE_FOUNDRY_DEPLOYMENT` stops with `Error: Instance cannot be destroyed` on
+`azure_foundry_branch` or `branch_agent_azure_foundry`. That is deliberate: without it, the run would delete the
+variation even while targeting serves it. Load the variables and run it again. If they live in a separate env file:
+
+```bash
+docker compose --env-file .env --env-file .env.azure run --rm terraform plan
+```
+
+**Removing the Azure resources.** Move `branch_agent`'s rules and fallthrough off `azure-foundry` first. Then set
+`prevent_destroy = false` on both resources, apply without `AZURE_FOUNDRY_DEPLOYMENT`, and set it back to `true`.
+
+**Moving traffic.** In the LaunchDarkly UI, `branch_agent` → Targeting: change the rule to a percentage rollout, or
+change the fallthrough to `azure-foundry`, and the next request is served from Azure. Switching back is the same edit.
+For a guarded rollout of `azure-foundry` on the default rule, use `ld_autogen__ai-completion-error`, the
+`ai-model-mismatch` metric and `ai-content-filtered` as guardrails, randomized by `user`. The completion-time metric
+can't be one: it is randomized by `request`, and a user-randomized rollout rejects it (`Metric ... does not have
+randomization unit: user`). Watch latency on the Monitoring tab instead. A rollout splits traffic by user key, so drive
+it with many keys: `python3 scripts/foundry_load.py -n 400 --users 150 --customers-only`.
+
+**What the mismatch check compares.** A Foundry model ID is a deployment name, which need not be a model name. The
+backend therefore checks the served model against the model config's `baseModel`, not the deployment name. Azure
+OpenAI models answer with a dated version (`gpt-4o-2024-11-20`), which matches `baseModel = "gpt-4o"` under the usual
+snapshot rule. Without `baseModel`, the deployment name is compared, so a deployment named differently from its model
+reads as a mismatch on every call.
+
+**Things to expect.**
+
+- **Reasoning tokens.** Some models (Grok on Foundry) report reasoning tokens outside `completion_tokens`.
+  `ModelInvoker` counts them as output tokens, up to the response's `total_tokens`, so output tokens on
+  `azure-foundry` are much higher than on Haiku. That is expected.
+- **Latency.** A reasoning model spends seconds reasoning even on short replies (3-5 s for a one-word reply from
+  `grok-4.6`), so compare its latency with its own earlier runs rather than with Bedrock Haiku.
+- **Content filter.** A response Azure withholds comes back with `finish_reason` `content_filter`; it counts as an
+  AI Config error and sends `ai-content-filtered`.
+- **Cost.** No costs are set on the Azure or Bedrock model configs: LaunchDarkly currently reports `$0` cost for AI
+  Configs in the Monitoring tab and the metrics API (#69).
+- **Quota.** A deployment with a low tokens-per-minute limit returns `429` under load; those count as errors on
+  `azure-foundry`. Keep `-n` small or raise the limit.
+
+### Tool calling
+
+`scheduler_agent` and `branch_agent` each have a `tool-calling` variation on which the model looks things up itself
+instead of reading data the backend prefetched. Targeting decides which path answers, with no redeploy.
+
+| Config | `default` | `tool-calling` |
+|---|---|---|
+| `scheduler_agent` | The backend calls `get_available_slots()` and puts 10 slots in the prompt | The model calls the `get_available_slots` tool (`days_ahead` 1-14) and offers only the slots it returns |
+| `branch_agent` | Location context only; the model has no branch data | The model calls `find_branches` (`location`) on a made-up directory of 8 ToggleBank locations in San Francisco, Oakland, Boston and New York |
+
+`branch_agent`'s `azure-foundry` variation (see [Serving from Azure AI Foundry](#serving-from-azure-ai-foundry)) attaches
+`find_branches` too, with the same instructions as `tool-calling`, so the same loop runs on Azure through
+`ChatOpenAI.bind_tools`. Expect it to be slower: a reasoning model such as Grok spends seconds per round, and a tool
+call adds a round.
+
+**How it fits together.** The tools are Library tools in `tools.tf` (snake_case keys: Amazon Nova can't call a tool
+whose name contains a hyphen, #74). Their implementations are in `app/backend/src/tools/registry.py`, which the CI
+evals use too. When the served variation attaches tools the backend implements, the node runs
+`run_tool_loop` (`app/backend/src/utils/tool_loop.py`): the model is bound to them (`BedrockConverseLLM.bind_tools`
+sends the Converse `toolConfig`), each call is run and its result sent back, for at most 4 model calls. The loop is one
+tracked generation (duration, success, summed tokens), and each call sends:
+
+| Event | Value | Shows up |
+|---|---|---|
+| `$ld:ai:tool_call` (`tracker.track_tool_call`) | 1 per call, with `toolKey` | The config's Monitoring tab |
+| `ai-tool-call-error` | 1 when the call raised or found nothing (`not_found`), else 0 | A custom metric, for a guarded rollout |
+| `scheduler-unlisted-slot` | Per scheduler reply: 1 when it names a slot ID no tool call returned, else 0 | Same |
+
+The UI terminal lists each call on the agent's node, and the chat API returns them in `agentFlow[].tool_calls`.
+
+**Demo.**
+
+```bash
+python3 scripts/set_ai_config_targeting.py --config scheduler_agent --config branch_agent --tools-demo --rules-only
+python3 scripts/tool_load.py -n 40      # half employee (tool-calling), half customer (default)
+```
+
+`--tools-demo` adds a rule to both configs: `role` is `employee` (the UI's employee login) gets `tool-calling`, everyone
+else the fallthrough. `--rules-only` leaves the default rules alone. On `branch_agent` the new rule goes after the
+Azure demo rule, which also matches the employee login, so that login gets `azure-foundry` there, which calls the tool
+on Azure (`--tools-demo-first` puts the tools rule first instead). `tool_load.py` uses employee keys that the Azure
+rule doesn't match, so `tool-calling` gets traffic too. It prints, per served model, tool calls per request, failed
+calls, and whether questions that need a tool got one.
+
+**In CI.** `evals/ci_eval.py` runs a variation that attaches tools with those tools and the backend's implementations,
+on the `*_tools_dataset` datasets, and grades the trajectory with the `ci-judge-tool-use` judge. See
+[evals/CI_EVALS.md](evals/CI_EVALS.md).
 
 ### Observability
 
@@ -367,7 +505,10 @@ policy_agent/
 │   ├── agent_graph.tf
 │   ├── variables.tf  outputs.tf  main.tf  versions.tf
 ├── scripts/
-│   └── set_ai_config_targeting.py      # post-apply: point fallthrough at Default
+│   ├── set_ai_config_targeting.py      # post-apply: point fallthrough at Default (--azure-demo, --tools-demo: demo rules)
+│   ├── register_metrics.py             # post-apply: ai-model-mismatch and ai-content-filtered metrics
+│   ├── foundry_load.py                 # traffic for branch_agent's Bedrock and Azure variations
+│   └── tool_load.py                    # traffic for the tool-calling variations
 ├── docker-compose.yml                 # backend + frontend + terraform (tools profile)
 ├── commands.md                        # Command cheat sheet
 └── .env.example
@@ -387,6 +528,7 @@ have. Model configs are reusable resources referenced by variation via
 | `nova-pro` | `us.amazon.nova-pro-v1:0` | defaults |
 | `claude-haiku-4-5-brand-voice` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | `temperature=0.9`, `max_tokens=10000` |
 | `claude-sonnet-4` | `us.anthropic.claude-sonnet-4-20250514-v1:0` | `temperature=0.1` |
+| `azure-foundry-branch` | Azure AI Foundry deployment `AZURE_FOUNDRY_DEPLOYMENT` (only when set) | `temperature=0.1`, custom `baseModel` |
 
 Every model config is a ForceNew resource in the provider — editing one replaces it
 rather than updating in place.

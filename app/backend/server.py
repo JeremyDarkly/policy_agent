@@ -440,6 +440,11 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
                     "duration": duration_ms,  # Total time to generate
                     "ttft_ms": ttft_ms,  # Time to first token
                     "tokens": tokens,
+                    # Which branch_agent variation served it (scripts/foundry_load.py reads these)
+                    "model": branch_data.get("model"),
+                    "served_model": branch_data.get("served_model"),
+                    # Tool calls on a tool-calling variation (scripts/tool_load.py reads these)
+                    "tool_calls": branch_data.get("tool_calls", []),
                 }
             )
         elif "scheduler_specialist" in agent_data:
@@ -456,6 +461,10 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
                     "duration": duration_ms,  # Total time to generate
                     "ttft_ms": ttft_ms,  # Time to first token
                     "tokens": tokens,
+                    "model": scheduler_data.get("model"),
+                    "served_model": scheduler_data.get("served_model"),
+                    # Tool calls on a tool-calling variation (scripts/tool_load.py reads these)
+                    "tool_calls": scheduler_data.get("tool_calls", []),
                 }
             )
 
@@ -668,6 +677,7 @@ async def chat_stream(request: ChatRequest):
                         "icon": "🏧",
                         "ttft_ms": branch_data.get("ttft_ms"),
                         "tokens": branch_data.get("tokens", {"input": 0, "output": 0}),
+                        "tool_calls": branch_data.get("tool_calls", []),
                     }
                 )
             elif "scheduler_specialist" in agent_data:
@@ -680,6 +690,7 @@ async def chat_stream(request: ChatRequest):
                         "icon": "📅",
                         "ttft_ms": scheduler_data.get("ttft_ms"),
                         "tokens": scheduler_data.get("tokens", {"input": 0, "output": 0}),
+                        "tool_calls": scheduler_data.get("tool_calls", []),
                     }
                 )
 
