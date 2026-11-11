@@ -15,7 +15,9 @@ LaunchDarkly records custom events without a metric, but a guarded rollout or
 experiment can only use a metric. This script creates the metrics through the
 REST API, so a fresh clone can repeat it after `terraform apply`.
 
-Idempotent: a metric whose key already exists is skipped, not changed.
+Idempotent: an event that already has a numeric metric with the same
+aggregation (under any key, e.g. one made in the UI) is skipped, and so is a
+metric whose key exists. Nothing existing is changed.
 
 Usage:
     python scripts/register_metrics.py                     # reads .env
@@ -26,6 +28,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -83,9 +86,37 @@ def main() -> int:
     api_base = (env.get("LAUNCHDARKLY_API_HOST") or DEFAULT_API_HOST).rstrip("/") + "/api/v2"
     print(f"project={project}\n")
 
+    # The list is paged (at most 50 per page); follow _links.next to the end.
+    existing: list[dict] = []
+    host = api_base.removesuffix("/api/v2")
+    url = f"{api_base}/metrics/{project}?limit=50"
+    while url:
+        status, body = request_status("GET", url, token)
+        if status != 200:
+            print(f"error: listing metrics returned HTTP {status}: {body[:300]}", file=sys.stderr)
+            return 1
+        page = json.loads(body)
+        existing.extend(page.get("items", []))
+        next_href = page.get("_links", {}).get("next", {}).get("href")
+        url = f"{host}{next_href}" if next_href and page.get("items") else None
+
     failed = 0
     for metric in METRICS:
         key = metric["key"]
+        same_event = next(
+            (
+                m["key"]
+                for m in existing
+                if m.get("eventKey") == metric["eventKey"]
+                and m.get("isNumeric") == metric["isNumeric"]
+                and m.get("unitAggregationType") == metric["unitAggregationType"]
+                and not m.get("archived")
+            ),
+            None,
+        )
+        if same_event and same_event != key:
+            print(f"  {key:<22} ok      {metric['eventKey']} already measured by metric '{same_event}'")
+            continue
         status, _ = request_status("GET", f"{api_base}/metrics/{project}/{key}", token)
         if status == 200:
             print(f"  {key:<22} ok      already exists")
