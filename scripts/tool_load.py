@@ -4,7 +4,9 @@
 With the rule from `scripts/set_ai_config_targeting.py --tools-demo`, users whose
 `role` is `employee` are served the `tool-calling` variation of scheduler_agent
 and branch_agent, and the model calls `get_available_slots` / `find_branches`.
-Customers get the fallthrough (no tools), for comparison. Each tool call sends
+Customers get the fallthrough: no tools on scheduler_agent, and on branch_agent
+whatever its default rule serves (`azure-foundry`, which also has find_branches,
+runs the same loop on Azure AI Foundry). Each tool call sends
 `$ld:ai:tool_call` (the config's Monitoring tab) and `ai-tool-call-error`, and
 each tool-calling scheduler reply sends `scheduler-unlisted-slot`.
 
@@ -13,8 +15,8 @@ Employee requests use keys `<name>-load-<i>-employee`, not the UI's
 suffix) doesn't take them. Some questions need no tool (controls), to show the
 model doesn't call one when it isn't needed.
 
-Prints, per path (employee = tool-calling, customer = default): requests, how many
-reached each specialist, errors, tool calls per request, failed tool calls, and
+Prints, per path, specialist and served model: requests, tool calls per
+request, failed tool calls, whether questions that need a tool got one, and
 specialist latency.
 
 Usage (backend running, e.g. `docker compose up`):
@@ -65,6 +67,13 @@ PRESETS = {
 
 def key_prefix(name: str) -> str:
     return re.sub(r"^-|-$", "", re.sub(r"[^a-z0-9]+", "-", name.lower().strip()))
+
+
+def short_model(model_id: str) -> str:
+    """us.anthropic.claude-haiku-4-5-20251001-v1:0 -> claude-haiku-4-5-20251001-v1; grok-4.6 stays grok-4.6."""
+    model = re.sub(r"^(us|eu|apac|global)\.", "", str(model_id))
+    model = re.sub(r"^(anthropic|amazon|meta|mistral|cohere|ai21|deepseek)\.", "", model)
+    return model.split(":")[0]
 
 
 def send(url: str, body: dict, timeout: float) -> dict:
@@ -118,7 +127,7 @@ def main() -> int:
         }))
 
     print(f"Sending {args.n} requests to {args.url}/api/chat")
-    stats: dict[tuple[str, str], dict] = defaultdict(
+    stats: dict[tuple[str, str, str], dict] = defaultdict(
         lambda: {"requests": 0, "tool_calls": 0, "failed_calls": 0, "with_calls": 0,
                  "needed": 0, "needed_and_called": 0, "unneeded_and_called": 0, "durations": []}
     )
@@ -143,7 +152,8 @@ def main() -> int:
                 totals[preset]["other"] += 1
                 print(".", end="", flush=True)
                 continue
-            s = stats[(preset, SPECIALISTS[step["agent"]])]
+            model = short_model(step.get("served_model") or step.get("model") or "?")
+            s = stats[(preset, SPECIALISTS[step["agent"]], model)]
             calls = step.get("tool_calls") or []
             s["requests"] += 1
             s["tool_calls"] += len(calls)
@@ -158,18 +168,19 @@ def main() -> int:
                 s["durations"].append(int(step["duration"]))
             print("t" if calls else "s", end="", flush=True)
 
-    print(f"\n\n{'path':<10} {'agent':<10} {'reqs':>4} {'calls/req':>9} {'failed':>6} "
+    print(f"\n\n{'path':<10} {'agent':<10} {'model':<28} {'reqs':>4} {'calls/req':>9} {'failed':>6} "
           f"{'needed→called':>13} {'control→called':>14} {'p50 ms':>7} {'p95 ms':>7}")
-    for (preset, agent), s in sorted(stats.items()):
+    for (preset, agent, model), s in sorted(stats.items()):
         per = s["tool_calls"] / s["requests"] if s["requests"] else 0
         controls = s["requests"] - s["needed"]
         p50, p95 = percentile(s["durations"], 50), percentile(s["durations"], 95)
-        print(f"{preset:<10} {agent:<10} {s['requests']:>4} {per:>9.2f} {s['failed_calls']:>6} "
+        print(f"{preset:<10} {agent:<10} {model[:28]:<28} {s['requests']:>4} {per:>9.2f} {s['failed_calls']:>6} "
               f"{s['needed_and_called']:>6}/{s['needed']:<6} {s['unneeded_and_called']:>7}/{controls:<6} "
               f"{p50 if p50 is not None else '-':>7} {p95 if p95 is not None else '-':>7}")
     for preset, t in sorted(totals.items()):
         print(f"{preset}: {t['requests']} requests, {t['errors']} errors, {t['other']} routed to another agent")
-    print("\nemployee = tool-calling variation (role rule), customer = the fallthrough. failed = tool calls that "
+    print("\nemployee = tool-calling variation (role rule), customer = the fallthrough. calls/req 0 means "
+          "the variation has no tools. failed = tool calls that "
           "errored or found nothing (ai-tool-call-error = 1). Latency is the specialist's whole call, tool rounds included.")
     if error_samples:
         print("\nFirst errors:")
