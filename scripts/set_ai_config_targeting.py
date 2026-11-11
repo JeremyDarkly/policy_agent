@@ -14,6 +14,10 @@ its fallthrough still on variation index 0 -- LaunchDarkly's auto-added
 moved to index 1 ("Default"), which is what this script does via the AI Configs
 targeting endpoint.
 
+`ai-judge-jev` is the exception: its default rule serves "disabled", so the
+LLM judges run alone until a demo targets someone with jev-alongside or
+jev-only. The script turns its targeting on so those targets work.
+
 Run it after `terraform apply`. It is idempotent.
 
 With --azure-demo it also adds a rule to branch_agent that serves its
@@ -68,9 +72,12 @@ CONFIG_KEYS = [
     "ai-judge-coherence",
     "ci-judge-accuracy",
     "ci-judge-coherence",
+    "ai-judge-jev",
 ]
 
 DEFAULT_VARIATION_NAME = "Default"
+# Configs whose default rule serves another variation (by name).
+FALLTHROUGH_VARIATION = {"ai-judge-jev": "disabled"}
 
 # --azure-demo: branch_agent serves azure-foundry to the internal demo user (app/ui/src/lib/demoUser.ts).
 AZURE_DEMO_CONFIG = "branch_agent"
@@ -296,13 +303,14 @@ def main() -> int:
         targeting = request("GET", url, token)
 
         variations = targeting.get("variations", [])
+        wanted = FALLTHROUGH_VARIATION.get(key, DEFAULT_VARIATION_NAME)
         target_idx = next(
-            (i for i, v in enumerate(variations) if v.get("name") == DEFAULT_VARIATION_NAME),
+            (i for i, v in enumerate(variations) if v.get("name") == wanted),
             None,
         )
         if target_idx is None:
             names = [v.get("name") for v in variations]
-            print(f"  {key:<20} SKIP  no '{DEFAULT_VARIATION_NAME}' variation (found {names})")
+            print(f"  {key:<20} SKIP  no '{wanted}' variation (found {names})")
             failed += 1
             continue
 
@@ -314,7 +322,7 @@ def main() -> int:
 
         current_idx = env_state.get("fallthrough", {}).get("variation")
         if current_idx == target_idx and env_state.get("enabled"):
-            print(f"  {key:<20} ok    already serving '{DEFAULT_VARIATION_NAME}'")
+            print(f"  {key:<20} ok    already serving '{wanted}'")
             continue
 
         if args.dry_run:

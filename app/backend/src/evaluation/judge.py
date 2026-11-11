@@ -16,6 +16,30 @@ from opentelemetry import trace
 
 from ..utils.llm_config import get_model_invoker
 from ..utils.launchdarkly_config import get_ld_client
+from .jev_judge import (
+    MODE_ALONGSIDE,
+    MODE_DISABLED,
+    MODE_ONLY,
+    failed_result,
+    disagreement,
+    evaluate_jev_config,
+    llm_equivalents,
+    run_jev_judge,
+    send_jev_events,
+)
+
+
+def _print_jev(block: Dict[str, Any]) -> None:
+    print(f"🔍 Jev judge ({block['mode']}, {block['model']}): {block['duration_ms']}ms, {block['cost_cents']:.4f}¢")
+    if block["error"]:
+        print(f"   ❌ failed: {block['error']}")
+        return
+    for name, r in (block["results"] or {}).items():
+        mark = "✅" if r["passed"] else "❌"
+        label = f" ({r['label']})" if r.get("label") else ""
+        print(f"   {mark} {name}: {r['score']:.2f}{label}")
+    if block.get("disagrees") is not None:
+        print(f"   disagrees with the LLM judges: {block['disagrees']}")
 
 
 @dataclass
@@ -56,77 +80,49 @@ class BrandVoiceEvaluator:
             Dict with evaluation results
         """
         try:
-            # Note: We don't need to pre-fetch config here since each metric
-            # will get its own config (brand_eval_judge_accuracy, brand_eval_judge_coherence)
+            # ai-judge-jev decides whether Jev runs, and whether the LLM judges
+            # (ai-judge-accuracy, ai-judge-coherence) still run beside it.
+            jev = evaluate_jev_config(user_context)
+            run_llm = jev.mode != MODE_ONLY
+            run_jev = jev.mode != MODE_DISABLED
 
-            # Run accuracy and coherence evaluations in parallel
-            accuracy_task = self._evaluate_accuracy(
-                original_query, account_context, brand_voice_output, user_context
-            )
+            tasks = []
+            if run_llm:
+                tasks.append(
+                    self._evaluate_accuracy(
+                        original_query, account_context, brand_voice_output, user_context
+                    )
+                )
+                tasks.append(self._evaluate_coherence(brand_voice_output, user_context))
+            if run_jev:
+                tasks.append(
+                    run_jev_judge(
+                        jev, original_query, account_context, brand_voice_output, user_context
+                    )
+                )
 
-            coherence_task = self._evaluate_coherence(brand_voice_output, user_context)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            jev_result = results[-1] if run_jev else None
+            if isinstance(jev_result, Exception):  # run_jev_judge doesn't raise; be safe anyway
+                jev_result = failed_result(jev, f"{type(jev_result).__name__}: {jev_result}")
 
-            results = await asyncio.gather(accuracy_task, coherence_task, return_exceptions=True)
-
-            # Unpack results
-            accuracy_data = results[0]
-            coherence_data = results[1]
-
-            # Handle any exceptions and extract data
-            if isinstance(accuracy_data, Exception):
-                error_msg = str(accuracy_data)
-                print(f"⚠️  Accuracy evaluation failed: {error_msg}")
-
-                # Check for AWS credential errors
-                if any(
-                    pattern in error_msg
-                    for pattern in [
-                        "KeyError",
-                        "JSONDecodeError",
-                        "Extra data",
-                        "token",
-                        "credentials",
-                        "sso",
-                    ]
-                ):
-                    reason = "AWS authentication failed - session expired. Re-run: aws sso login --profile eric"
-                else:
-                    reason = error_msg
-
-                accuracy_result = {"score": 0.0, "passed": False, "reason": reason}
-                accuracy_model = "unknown"
-                accuracy_tokens = {"input": 0, "output": 0}
+            if run_llm:
+                accuracy_result, accuracy_model, accuracy_tokens = self._unpack_llm_result(
+                    results[0], "Accuracy"
+                )
+                coherence_result, coherence_model, coherence_tokens = self._unpack_llm_result(
+                    results[1], "Coherence"
+                )
             else:
-                accuracy_result, accuracy_model, accuracy_tokens = accuracy_data
-
-            if isinstance(coherence_data, Exception):
-                error_msg = str(coherence_data)
-                print(f"⚠️  Coherence evaluation failed: {error_msg}")
-
-                # Check for AWS credential errors
-                if any(
-                    pattern in error_msg
-                    for pattern in [
-                        "KeyError",
-                        "JSONDecodeError",
-                        "Extra data",
-                        "token",
-                        "credentials",
-                        "sso",
-                    ]
-                ):
-                    reason = "AWS authentication failed - session expired. Re-run: aws sso login --profile eric"
-                else:
-                    reason = error_msg
-
-                coherence_result = {"score": 0.0, "passed": False, "reason": reason}
-                coherence_model = "unknown"
+                filled = llm_equivalents(jev_result)
+                accuracy_result, coherence_result = filled["accuracy"], filled["coherence"]
+                accuracy_model = coherence_model = jev_result["judge_model_name"]
+                accuracy_tokens = {"input": jev_result["input_tokens"], "output": jev_result["output_tokens"]}
                 coherence_tokens = {"input": 0, "output": 0}
-            else:
-                coherence_result, coherence_model, coherence_tokens = coherence_data
 
-            # Demo proofing: Override accuracy to 95% when using fallback config
-            if user_context.get("is_fallback", False):
+            # Demo proofing: Override accuracy to 95% when using fallback config.
+            # Only the LLM judges' results; Jev's are never overridden.
+            if run_llm and user_context.get("is_fallback", False):
                 domain = user_context.get("domain", "")
                 if domain == "togglecell":
                     accuracy_result = {
@@ -168,10 +164,32 @@ class BrandVoiceEvaluator:
                         "issues": [],
                     }
 
-            # Send judgment metrics to LaunchDarkly using user context and tracker
-            self._send_judgment_to_ld(
-                user_context, accuracy_result, coherence_result, brand_tracker
-            )
+            # Send judgment metrics to LaunchDarkly using user context and tracker.
+            # On jev-only the LLM judges didn't run, so their events aren't sent.
+            if run_llm:
+                self._send_judgment_to_ld(
+                    user_context, accuracy_result, coherence_result, brand_tracker
+                )
+
+            jev_block = None
+            if run_jev:
+                disagrees = (
+                    disagreement(jev_result, {"accuracy": accuracy_result, "coherence": coherence_result})
+                    if jev.mode == MODE_ALONGSIDE
+                    else None
+                )
+                send_jev_events(jev, jev_result, brand_tracker, disagrees)
+                jev_block = {
+                    "mode": jev.mode,
+                    "model": jev_result["judge_model_name"],
+                    "results": jev_result["jev"],
+                    "duration_ms": jev_result["duration_ms"],
+                    "cost_cents": jev_result["cost_cents"],
+                    "input_tokens": jev_result["input_tokens"],
+                    "error": jev_result["error"],
+                    "disagrees": disagrees,
+                }
+                _print_jev(jev_block)
 
             print(
                 f"✅ Evaluation completed: Accuracy={accuracy_result['score']:.2f}, Coherence={coherence_result['score']:.2f}"
@@ -185,7 +203,7 @@ class BrandVoiceEvaluator:
             judge_model_name = accuracy_model if accuracy_model != "unknown" else coherence_model
 
             # Return flattened structure that matches frontend expectations
-            return {
+            result = {
                 "accuracy": accuracy_result,
                 "coherence": coherence_result,
                 "overall_passed": accuracy_result["passed"] and coherence_result["passed"],
@@ -193,6 +211,9 @@ class BrandVoiceEvaluator:
                 "judge_input_tokens": total_input_tokens,
                 "judge_output_tokens": total_output_tokens,
             }
+            if jev_block is not None:
+                result["jev"] = jev_block
+            return result
 
         except Exception as e:
             print(f"❌ Evaluation error: {e}")
@@ -201,6 +222,34 @@ class BrandVoiceEvaluator:
                 "coherence": {"score": 0.0, "passed": False, "reason": str(e)},
                 "overall_passed": False,
             }
+
+    def _unpack_llm_result(
+        self, data: Any, label: str
+    ) -> tuple[Dict[str, Any], str, Dict[str, int]]:
+        """(result, model, tokens) from an LLM judge task, or a failed result for its exception."""
+        if not isinstance(data, Exception):
+            return data
+        error_msg = str(data)
+        print(f"⚠️  {label} evaluation failed: {error_msg}")
+
+        # Check for AWS credential errors
+        if any(
+            pattern in error_msg
+            for pattern in [
+                "KeyError",
+                "JSONDecodeError",
+                "Extra data",
+                "token",
+                "credentials",
+                "sso",
+            ]
+        ):
+            reason = "AWS authentication failed - session expired. Re-run: aws sso login --profile eric"
+        else:
+            reason = error_msg
+        # `error` marks a judge that didn't run, so Jev's disagreement check skips it.
+        result = {"score": 0.0, "passed": False, "reason": reason, "error": True}
+        return result, "unknown", {"input": 0, "output": 0}
 
     async def _evaluate_accuracy(
         self,
@@ -332,7 +381,7 @@ class BrandVoiceEvaluator:
             }
         except Exception as e:
             print(f"⚠️  Failed to parse evaluation response: {e}")
-            return {"score": 0.0, "passed": False, "reason": f"Parse error: {e}", "issues": []}
+            return {"score": 0.0, "passed": False, "reason": f"Parse error: {e}", "issues": [], "error": True}
 
     def _send_judgment_to_ld(
         self,
@@ -456,9 +505,17 @@ _tracer = trace.get_tracer("togglebank.evaluation", "1.0.0")
 
 
 def _add_evaluation_events(span: trace.Span, results: Optional[Dict[str, Any]]) -> None:
-    """Record each judge's score as a gen_ai.evaluation.result event."""
-    for name in ("accuracy", "coherence"):
-        result = (results or {}).get(name)
+    """Record each judge's score as a gen_ai.evaluation.result event.
+
+    One event each for accuracy and coherence, and one per Jev question, named
+    `jev.<question>`, when Jev ran.
+    """
+    results = results or {}
+    entries = [(name, results.get(name)) for name in ("accuracy", "coherence")]
+    jev = results.get("jev") or {}
+    for question, result in (jev.get("results") or {}).items():
+        entries.append((f"jev.{question}", {**result, "reason": result.get("label") or ""}))
+    for name, result in entries:
         if not result:
             continue
         span.add_event(

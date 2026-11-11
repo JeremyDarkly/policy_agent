@@ -10,13 +10,12 @@ from ..graph.state import AgentState, QueryType
 from ..utils.llm_config import get_model_invoker
 from ..utils import spend_ledger
 from ..utils.launchdarkly_config import get_ld_client
+from ..utils.typesafe_client import is_jev_config
 
 CONFIG_KEY = "triage_agent"
 # The LLM path's low-confidence threshold. A Jev variation sets its own in
 # model.custom.choice_confidence_min.
 CONFIDENCE_MIN = 0.7
-# Provider name the AI Config model catalog uses for Jev models.
-JEV_PROVIDER = "typesafe"
 # Brand names sent to Jev as state, by user_context["domain"].
 _BRANDS = {"togglebank": "ToggleBank", "togglehealth": "ToggleHealth", "togglecell": "ToggleCell"}
 
@@ -34,12 +33,6 @@ PARSE_FAILURE_RESULT = {
 def _evaluate_triage_config(user_context: dict[str, Any]):
     """Evaluate triage_agent once: (config dict, tracker, ld_context)."""
     return get_ld_client().get_ai_config(CONFIG_KEY, user_context)
-
-
-def is_jev_config(config: dict[str, Any]) -> bool:
-    """True when the served variation is on a TypeSafe (Jev) model config."""
-    provider = str(config.get("provider") or "")
-    return provider.split(":")[0].strip().lower() == JEV_PROVIDER
 
 
 def _jev_triage(config: dict[str, Any], query: str, user_context: dict[str, Any]) -> tuple[dict, dict, str]:

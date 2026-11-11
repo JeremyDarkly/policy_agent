@@ -111,8 +111,13 @@ docker compose run --rm terraform output     # show managed keys and IDs
 | Reusable model configs | 6 | `model_configs.tf` |
 | AI tool definitions (20 ToggleHealth, plus `get_available_slots` and `find_branches`) | 22 | `tools.tf` |
 | AI agent graph (`banking_agent_graph`) | 1 | `agent_graph.tf` |
+| Jev judge AI Config (`ai-judge-jev`) and its metrics | 1 + 8 | `jev_judge.tf` |
 
-Each config is created with a `Default` variation, and
+`ai-judge-jev`'s two variations (`jev-alongside`, `jev-only`) are not in Terraform: they need
+model config `TypeSafe.jev-1.14.0` plus questions in `model.custom`, and the provider (3.1.5) takes either a model
+config key or an inline model, with no custom parameters. Run `python3 evals/setup_jev_judge.py` after `terraform
+apply` to create them. In a project where that script already created the config and metrics, `jev_judge.tf` lists
+the `terraform import` commands. Each config is created with a `Default` variation, and
 LaunchDarkly auto-adds a "disabled" variation ahead of it — so variation index 0 is
 `disabled` and index 1 is `Default`.
 
@@ -195,7 +200,8 @@ customer-facing answer. Judges then score that answer asynchronously.
                         ┌────────▼────────┐
                         │ ONLINE JUDGES   │
                         │ accuracy +      │
-                        │ coherence       │
+                        │ coherence,      │
+                        │ and/or Jev      │
                         │ → LaunchDarkly  │
                         └─────────────────┘
 ```
@@ -227,6 +233,33 @@ auto-generated metric. They run in background threads on every response.
 |---|---|---|---|
 | Accuracy | `ai-judge-accuracy` | `$ld:ai:judge:accuracy` | 0.8 |
 | Coherence | `ai-judge-coherence` | `$ld:ai:judge:coherence` | 0.7 |
+| Jev (five classifications in one request) | `ai-judge-jev` | `$ld:ai:judge:jev-accuracy`, `jev-hallucination-free`, `jev-answers-question`, `jev-coherence`, `jev-tone-ok` | Per question, in the variation (below) |
+
+`ai-judge-jev` grades the same reply with Jev, TypeSafe's decision model, instead of an LLM. One request answers
+five questions, and each answer is sent as its own metric on the `brand_agent` tracker. The served variation
+decides what runs, with no redeploy:
+
+| Variation | Behavior |
+|---|---|
+| `disabled` (default rule) | Jev is not called. The two LLM judges run as above. |
+| `jev-alongside` | Jev runs as well as the LLM judges. The chat panel shows both, and `jev-judge-disagreement` records whether their pass/fail verdicts differ. |
+| `jev-only` | Jev replaces the LLM judges. Accuracy passes when Jev's `accuracy` and `hallucination` pass; coherence passes when `coherence` and `tone` pass. |
+
+| Question | Type | Value sent | Passes when | Metric |
+|---|---|---|---|---|
+| `accuracy` | score, 3 levels | score / 2 | ≥ 0.8 | `jev-accuracy` |
+| `hallucination` | noul | 1 − noul | noul < 0.5 | `jev-hallucination-free` |
+| `answers_question` | noul | noul | ≥ 0.5 | `jev-answers-question` |
+| `coherence` | score, 3 levels | score / 2 | ≥ 0.7 | `jev-coherence` |
+| `tone` | choice | probability of `warm_professional` | choice is `warm_professional` | `jev-tone-ok` |
+
+The questions, thresholds and metric keys live in the variations' `model.custom.questions`, so they are edited in
+LaunchDarkly. A judge AI Config holds one `evaluationMetricKey`, so the other four metric keys are kept there too
+(#57). The Jev path has its own guardrail metrics: `jev-judge-error-rate`, `jev-judge-cost-cents`,
+`jev-judge-disagreement`, and latency from the `ai-judge-jev` tracker's duration. A Jev failure never blocks a chat:
+it sends `jev-judge-error` = 1, and the LLM judges still run unless `jev-only` is served. The backend needs
+`TYPESAFE_API_KEY`. Setup, the labeled pilot and the demo steps are in
+[evals/README.md](evals/README.md#jev-judge).
 
 ### Served model
 
@@ -502,7 +535,7 @@ policy_agent/
 │   │       │                          # branch_specialist, scheduler_specialist,
 │   │       │                          # brand_voice_agent
 │   │       ├── graph/                 # workflow.py (StateGraph), state.py
-│   │       ├── evaluation/            # judge.py, agent_evaluator.py (G-Eval)
+│   │       ├── evaluation/            # judge.py, jev_judge.py, agent_evaluator.py (G-Eval)
 │   │       ├── tools/                 # calendar.py (appointment slots/booking)
 │   │       └── utils/                 # LD client, observability, Bedrock invoker,
 │   │                                  # model config resolution, user profiles,
