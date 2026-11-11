@@ -114,8 +114,10 @@ resource "launchdarkly_model_config" "azure_foundry_branch" {
 }
 
 locals {
-  azure_foundry_enabled    = trimspace(coalesce(var.azure_foundry_branch_deployment, "")) != ""
-  azure_foundry_base_model = trimspace(coalesce(var.azure_foundry_branch_base_model, ""))
+  # Null and "" both mean unset. coalesce() can't be used here: it errors when every
+  # argument is null or "", which is what docker-compose passes for an unset env var.
+  azure_foundry_enabled    = trimspace(var.azure_foundry_branch_deployment == null ? "" : var.azure_foundry_branch_deployment) != ""
+  azure_foundry_base_model = trimspace(var.azure_foundry_branch_base_model == null ? "" : var.azure_foundry_branch_base_model)
 
   # Keyed map of the model configs above, consumed by outputs.tf.
   model_config_resources = {
