@@ -5,6 +5,11 @@ prompt from LaunchDarkly, generates an answer for every row of the target's
 stored dataset on Bedrock, and runs the target's scorers and judges. The app
 doesn't need to be running.
 
+A variation that attaches Library tools the backend implements
+(app/backend/src/tools/registry.py) is run with those tools, backed by the
+backend's own implementations, and with the target's [<config>.tools] dataset
+and judges, so its tool trajectory is graded. Other variations run with no tools.
+
 Results are advisory: a failed verdict is reported, not raised. The script
 exits non-zero only when a run can't be completed (missing credentials or
 dataset, API errors). It writes a Markdown summary to --summary-file, which
@@ -51,6 +56,7 @@ from launchdarkly_ai_server import (
 )
 
 EVALS_DIR = Path(__file__).resolve().parent
+BACKEND_DIR = EVALS_DIR.parent / "app" / "backend"
 
 # The app's .env uses LAUNCHDARKLY_* names; the AI SDK reads LD_* names.
 ENV_MAP = {
@@ -90,6 +96,8 @@ class TargetResult:
     context_errors: list[str] = field(default_factory=list)
     # Set when there was nothing to evaluate, with the reason.
     skipped: str = ""
+    # Library tool keys the run gave the model (the variation's tools the backend implements).
+    tools: list[str] = field(default_factory=list)
     key: str = ""
     passed: bool | None = None
     url: str = ""
@@ -209,6 +217,52 @@ def ld_get(path: str) -> Any:
     except urllib.error.HTTPError as error:
         body = error.read().decode(errors="replace")[:300]
         raise EvaluationsError(f"LaunchDarkly API GET {path} failed with {error.code}: {body}") from None
+
+
+def load_tool_registry() -> dict[str, Any]:
+    """The backend's TOOLS (Library tool key -> implementation).
+
+    The tool modules use only the standard library, so CI needs none of the
+    backend's dependencies.
+    """
+    if str(BACKEND_DIR) not in sys.path:
+        sys.path.insert(0, str(BACKEND_DIR))
+    from src.tools.registry import TOOLS
+
+    return TOOLS
+
+
+def eval_implementation(implementation: Any) -> Any:
+    """Adapt a registry implementation to the eval runner.
+
+    The runner calls a tool with one dict of arguments; the registry takes them
+    as keyword arguments. A bad argument becomes an {"error"} result the model
+    sees, as in the backend's tool loop, instead of failing the row.
+    """
+
+    def call(arguments: dict[str, Any] | None = None) -> Any:
+        try:
+            return implementation(**(arguments or {}))
+        except (TypeError, ValueError) as error:
+            return {"error": str(error)}
+
+    return call
+
+
+def attached_tools(evals: Any, config: str, variation: str) -> list[str]:
+    """The Library tool keys the variation attaches."""
+    data = ld_get(f"projects/{evals.project_key}/ai-configs/{config}")
+    for v in data.get("variations") or []:
+        if v.get("key") == variation:
+            return [t["key"] for t in v.get("tools") or [] if t.get("key")]
+    raise EvaluationsError(f"variation {variation!r} not found in {config}")
+
+
+def target_for_tools(target: dict[str, Any], tool_keys: list[str]) -> dict[str, Any]:
+    """The target's [<config>.tools] settings layered on its own, for a variation with tools."""
+    if not tool_keys or "tools" not in target:
+        return target
+    return {**target, **target["tools"]}
 
 
 def judge_lookup(evals: Any, target: dict[str, Any]) -> dict[str, JudgeInfo]:
@@ -488,7 +542,7 @@ async def run_config(evals: Any, config: str, target: dict[str, Any], args: argp
         result.source = source
         result.contexts = selection.contexts.get(variation, [])
         if index == 0:
-            result.notes = selection.notes
+            result.notes = selection.notes + result.notes
             result.uncovered = selection.uncovered
             result.context_errors = selection.context_errors
         results.append(result)
@@ -499,13 +553,31 @@ async def run_target(
     evals: Any, config: str, target: dict[str, Any], variation: str, args: argparse.Namespace
 ) -> TargetResult:
     global current
+    registry = args.tool_registry
+    try:
+        attached = attached_tools(evals, config, variation)
+    except Exception as error:  # report every target, then exit non-zero
+        return TargetResult(config=config, variation=variation, dataset=dataset_for(target, args),
+                            error=f"reading tools: {type(error).__name__}: {error}")
+    tool_keys = [key for key in attached if key in registry]
+    target = target_for_tools(target, tool_keys)
     dataset = dataset_for(target, args)
-    result = TargetResult(config=config, variation=variation, dataset=dataset)
-    print(f"running {config}/{variation} on dataset {dataset}", flush=True)
+    result = TargetResult(config=config, variation=variation, dataset=dataset, tools=tool_keys)
+    unimplemented = [key for key in attached if key not in registry]
+    if unimplemented:
+        names = ", ".join(f"`{k}`" for k in unimplemented)
+        result.notes.append(f"`{variation}` attaches {names}, which the backend doesn't implement, so the "
+                            "model isn't given them (as in production).")
+    if tool_keys and "tools" not in target:
+        result.notes.append(f"`{variation}` has tools but ci_targets.toml has no `[{config}.tools]`, so its "
+                            "trajectory isn't judged.")
+    print(f"running {config}/{variation} on dataset {dataset}"
+          + (f" with tools {', '.join(tool_keys)}" if tool_keys else ""), flush=True)
     current = result
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     result.key = f"ci-{args.label}-{config}-{variation}-{stamp}".lower()
     try:
+        tools = [await evals.tools.get(key, implementation=eval_implementation(registry[key])) for key in tool_keys]
         judges = judge_lookup(evals, target)
         run = await evals.run(
             key=result.key,
@@ -518,7 +590,8 @@ async def run_target(
                 recording_handler(handler, result, judges)
                 for handler in (create_langchain_agents_handler(), create_langchain_messages_handler())
             ],
-            tools=[],
+            # Replaces the variation's tools: only the ones the backend implements.
+            tools=tools,
             criteria=criteria_for(target),
             concurrency=args.concurrency,
             poll_timeout_seconds=600,
@@ -585,15 +658,16 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
     lines = [
         f"### LaunchDarkly evals ({mode}, advisory)",
         "",
-        "| AI Config | Variation | Served to | Dataset | Rows passed | vs `main` | Verdict | Run |",
-        "|---|---|---|---|---|---|---|---|",
+        "| AI Config | Variation | Served to | Tools | Dataset | Rows passed | vs `main` | Verdict | Run |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
         variation = f"`{r.variation}`" + (f" ({r.source})" if r.source else "")
         served_to = ", ".join(f"{c['name']} ({c['reason']})" for c in r.contexts) or "–"
+        tools = ", ".join(f"`{t}`" for t in r.tools) or "–"
         if r.error or r.skipped:
             verdict = "error" if r.error else "skipped"
-            lines.append(f"| `{r.config}` | {variation} | {served_to} | `{r.dataset}` | – | – | {verdict} | – |")
+            lines.append(f"| `{r.config}` | {variation} | {served_to} | {tools} | `{r.dataset}` | – | – | {verdict} | – |")
             continue
         s = r.summary
         counts = f"{s['passed']}/{s['total']}" + (f" ({s['error']} errors)" if s["error"] else "")
@@ -606,13 +680,14 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
         verdict = "passed" if r.passed else "failed"
         run = f"[open]({r.url})" if links else f"`{r.key}`"
         lines.append(
-            f"| `{r.config}` | {variation} | {served_to} | `{r.dataset}` | {counts} | {delta} | {verdict} | {run} |"
+            f"| `{r.config}` | {variation} | {served_to} | {tools} | `{r.dataset}` | {counts} | {delta} | {verdict} | {run} |"
         )
     if any(r.source for r in results):
         lines += ["", "*served*: what the default rule serves in the environment. *context*: what LaunchDarkly "
                   "serves a test context from `[contexts]` in ci_targets.toml. *listed*: from `variations` in "
                   "ci_targets.toml. *chosen*: from `--variation`. *Served to*: the test contexts LaunchDarkly "
-                  "serves the variation to, and why."]
+                  "serves the variation to, and why. *Tools*: the Library tools the run gave the model, backed by "
+                  "the backend's implementations."]
     if not links:
         lines += ["", "Find a run in LaunchDarkly under **Evaluations** by the name in the Run column."]
     if compared is False:
@@ -699,6 +774,7 @@ async def main() -> int:
         return 1
 
     targets, contexts = load_targets(Path(args.targets), args.config)
+    args.tool_registry = load_tool_registry()
     evals = init_evaluations()
     args.ld_client, args.test_contexts = None, {}
     if contexts and not args.variation and not args.no_contexts:
