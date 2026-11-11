@@ -17,7 +17,14 @@ through its {{account_info}} / {{branch_info}} variable.
 
 The scheduler's slots are dated from the day the files are built.
 
-Writes evals/ci_datasets/<config>_dataset.jsonl and <config>_dataset_quick.jsonl.
+The tools datasets (<config>_tools_dataset) are for the variations that attach
+tools (issue #72). They carry no prefetched data: the scheduler rows have no
+available_slots, since the model fetches them with get_available_slots, as the
+backend's tool loop does. Each row says in metadata whether it expects a tool
+call (expects_tool_call) and which tools (expected_tools), and repeats the list
+in variables.expected_tools for the tool-use judge. Control rows need no tool.
+
+Writes evals/ci_datasets/<key>.jsonl and <key>_quick.jsonl for each dataset.
 Upload each one in the LaunchDarkly UI (Library > Datasets > New dataset) with
 the file name (without .jsonl) as its key.
 
@@ -125,6 +132,8 @@ PROMPT_AND_JUDGE_VARIABLES = {
     "branch_agent": ["account_type", "branch_info", "domain", "location", "name"],
     "scheduler_agent": ["account_type", "available_slots", "domain", "location", "name"],
     "brand_agent": ["domain", "name", "specialist_response"],
+    "branch_agent_tools": ["account_type", "branch_info", "domain", "location", "name"],
+    "scheduler_agent_tools": ["account_type", "domain", "location", "name"],
 }
 MAX_ROW_CHARS = 4000
 
@@ -134,6 +143,9 @@ def row(
 ) -> dict[str, Any]:
     # LaunchDarkly stores dataset variables as strings.
     variables = {k: as_text(context_vars[k]) for k in PROMPT_AND_JUDGE_VARIABLES[config] if k in context_vars}
+    if "expected_tools" in metadata:
+        # The judge reads variables, not metadata.
+        variables["expected_tools"] = json.dumps(metadata["expected_tools"])
     return {
         "input": user_message(query, context_vars),
         "expected_output": expected,
@@ -200,6 +212,42 @@ SCHEDULER_QUESTIONS = [
      "Acknowledges the frustration, prioritizes the issue, and offers the earliest appointment.", False),
     ("Do you have anything later in the week, in the afternoon?",
      "Offers only afternoon times that appear in the available slots.", False),
+]
+
+# Tools datasets: (question, expected tools, expected behavior, in quick dataset).
+# An empty list is a control row: answering it needs no tool.
+SLOTS = ["get_available_slots"]
+SCHEDULER_TOOL_QUESTIONS = [
+    *((q, SLOTS, "Calls get_available_slots, then " + e[0].lower() + e[1:], quick) for q, e, quick in SCHEDULER_QUESTIONS),
+    ("Thanks, that's everything I needed today. Goodbye!", [],
+     "Closes politely without calling a tool or offering times.", True),
+    ("I don't want an appointment. Is meeting with a banker free of charge?", [],
+     "Answers without calling a tool or offering times, since the customer doesn't want an appointment.", False),
+]
+
+BRANCHES = ["find_branches"]
+BRANCH_TOOL_QUESTIONS = [
+    ("Where's the nearest ToggleBank branch?", BRANCHES,
+     "Calls find_branches for San Francisco and lists only the branches it returns.", True),
+    ("I'm visiting Boston next week. Are there any branches there?", BRANCHES,
+     "Calls find_branches for Boston, not the profile location, and lists only what it returns.", True),
+    ("I'm moving to Denver. Is there a ToggleBank branch there?", BRANCHES,
+     "Calls find_branches for Denver, gets not_found, says there is no branch there and names the cities "
+     "ToggleBank serves, without inventing one.", True),
+    ("Is there an ATM near me that takes cash deposits?", BRANCHES,
+     "Calls find_branches for San Francisco and names only returned locations with a deposit-taking ATM.", False),
+    ("What time do branches close on Saturday?", BRANCHES,
+     "Calls find_branches and gives the Saturday hours it returns, without inventing others.", False),
+    ("Which branch can notarize a document for me?", BRANCHES,
+     "Calls find_branches and names only returned branches that list notary service.", False),
+    ("Is the branch near Union Square wheelchair accessible?", BRANCHES,
+     "Calls find_branches and answers from the Union Square branch's accessibility field.", False),
+    ("Where's the closest drive-up ATM?", BRANCHES,
+     "Calls find_branches and names only returned locations with a drive-up ATM.", False),
+    ("Can I deposit a check without going to a branch?", [],
+     "Mentions mobile deposit in the app without calling a tool.", True),
+    ("Thanks, that's all. Bye!", [],
+     "Closes politely without calling a tool.", False),
 ]
 
 # Brand voice rewrites a specialist's draft: (original question, query type,
@@ -272,6 +320,19 @@ def build() -> dict[str, list[dict[str, Any]]]:
     add("branch_agent", [(row("branch_agent", q, {**branch_vars, "query": q}, e, {}), quick) for q, e, quick in BRANCH_QUESTIONS])
     add("scheduler_agent", [
         (row("scheduler_agent", q, {**scheduler_vars, "query": q}, e, {}), quick) for q, e, quick in SCHEDULER_QUESTIONS
+    ])
+    def tool_meta(tools: list[str]) -> dict[str, Any]:
+        return {"expects_tool_call": bool(tools), "expected_tools": tools}
+
+    # The backend's tool loop sends the scheduler no slots; the model fetches them.
+    scheduler_tool_vars = {k: v for k, v in scheduler_vars.items() if k != "available_slots"}
+    add("scheduler_agent_tools", [
+        (row("scheduler_agent_tools", q, {**scheduler_tool_vars, "query": q}, e, tool_meta(t)), quick)
+        for q, t, e, quick in SCHEDULER_TOOL_QUESTIONS
+    ])
+    add("branch_agent_tools", [
+        (row("branch_agent_tools", q, {**branch_vars, "query": q}, e, tool_meta(t)), quick)
+        for q, t, e, quick in BRANCH_TOOL_QUESTIONS
     ])
     # Brand voice gets no "query" (its user message starts "User query: "), and
     # the draft only inside the context JSON, as agents/brand_voice_agent.py sends it.

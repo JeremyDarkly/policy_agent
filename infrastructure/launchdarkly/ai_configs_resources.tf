@@ -252,14 +252,17 @@ locals {
       {{branch_info}}
     EOT
 
-  branch_agent_tool_keys = [
-    launchdarkly_ai_tool.check_google_calendar_availability.key,
-    launchdarkly_ai_tool.get_provider_ratings_reviews.key,
-    launchdarkly_ai_tool.get_provider_schedule_details.key,
-    launchdarkly_ai_tool.search_snowflake_provider_directory.key,
-    launchdarkly_ai_tool.verify_network_status.key,
-    launchdarkly_ai_tool.verify_prior_authorization.key,
-  ]
+  # Appended to the default instructions on the tool-calling variation (issue #72).
+  branch_agent_tools_paragraph = <<-EOT
+
+      TOOLS:
+      - Call find_branches before naming any branch, ATM, address or hours. Use the place the
+        customer asks about, or their profile location if they don't name one.
+      - Describe only the branches and ATMs find_branches returns, with the details it gives.
+      - If it returns not_found, say ToggleBank has no location there and name the cities it
+        does serve. Try a nearby city or the city of a ZIP code once before giving up.
+      - Don't call it for questions that need no location, such as mobile check deposit.
+    EOT
 }
 
 resource "launchdarkly_ai_config_variation" "branch_agent" {
@@ -270,7 +273,9 @@ resource "launchdarkly_ai_config_variation" "branch_agent" {
   model_config_key = launchdarkly_model_config.claude_haiku_4_5_branch.key
   state            = "published"
   instructions     = local.branch_agent_instructions
-  tool_keys        = local.branch_agent_tool_keys
+  # No tools: this variation answers from the location context (the ToggleHealth tools that
+  # were attached here had no implementation in the backend). See branch_agent_tool_calling.
+  tool_keys = []
 }
 
 # Azure AI Foundry variation (issue #67). Created only when an Azure deployment is configured
@@ -285,14 +290,31 @@ resource "launchdarkly_ai_config_variation" "branch_agent_azure_foundry" {
   name             = "Azure AI Foundry"
   model_config_key = launchdarkly_model_config.azure_foundry_branch[0].key
   state            = "published"
-  instructions     = local.branch_agent_instructions
-  tool_keys        = local.branch_agent_tool_keys
+  # Tools on Azure too (issue #72): the TOOLS paragraph and find_branches, as on tool-calling,
+  # so the employee login (which the Azure demo rule matches) shows Azure calling the tool.
+  # The backend runs the tool loop on ChatOpenAI, through bind_tools.
+  instructions = "${local.branch_agent_instructions}${local.branch_agent_tools_paragraph}"
+  tool_keys    = [launchdarkly_ai_tool.find_branches.key]
 
   # A plan without the Azure variables fails here instead of deleting a variation that
   # targeting may be serving. See launchdarkly_model_config.azure_foundry_branch.
   lifecycle {
     prevent_destroy = true
   }
+}
+
+# Tool-calling variation (issue #72): the model looks branches up with find_branches. The
+# backend runs the tool loop for it (app/backend/src/utils/tool_loop.py). Nothing serves it
+# until a targeting rule does: scripts/set_ai_config_targeting.py --tools-demo adds one.
+resource "launchdarkly_ai_config_variation" "branch_agent_tool_calling" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.branch_agent.key
+  key              = "tool-calling"
+  name             = "Tool calling"
+  model_config_key = launchdarkly_model_config.claude_haiku_4_5_branch.key
+  state            = "published"
+  instructions     = "${local.branch_agent_instructions}${local.branch_agent_tools_paragraph}"
+  tool_keys        = [launchdarkly_ai_tool.find_branches.key]
 }
 
 resource "launchdarkly_ai_config" "scheduler_agent" {
@@ -306,15 +328,9 @@ resource "launchdarkly_ai_config" "scheduler_agent" {
   ]
 }
 
-resource "launchdarkly_ai_config_variation" "scheduler_agent" {
-  project_key      = var.project_key
-  config_key       = launchdarkly_ai_config.scheduler_agent.key
-  key              = "default"
-  name             = "Default"
-  model_config_key = launchdarkly_model_config.nova_pro.key
-  state            = "published"
-
-  instructions = chomp(<<-EOT
+# scheduler_agent's variations share these instructions; tool-calling adds the TOOLS paragraph.
+locals {
+  scheduler_agent_instructions = chomp(<<-EOT
     You are a professional banker-scheduling specialist for {{domain}} customer support.
     ROLE & EXPERTISE:
     - Expert at handling complex or sensitive customer situations
@@ -393,13 +409,42 @@ resource "launchdarkly_ai_config_variation" "scheduler_agent" {
   EOT
   )
 
-  tool_keys = [
-    launchdarkly_ai_tool.book_calendly_appointment.key,
-    launchdarkly_ai_tool.cancel_or_reschedule_appointment.key,
-    launchdarkly_ai_tool.check_google_calendar_availability.key,
-    launchdarkly_ai_tool.get_provider_schedule_details.key,
-    launchdarkly_ai_tool.send_twilio_appointment_reminder.key,
-  ]
+  scheduler_agent_tools_paragraph = <<-EOT
+
+    TOOLS:
+    - Call get_available_slots before offering any appointment time. Offer only the slots it
+      returns, with their slot IDs, and never make up a time or an ID.
+    - Use days_ahead to match the request: 1 or 2 for "tomorrow", 7 for "this week".
+    - Don't call it when the customer doesn't want an appointment or is only saying goodbye.
+  EOT
+}
+
+resource "launchdarkly_ai_config_variation" "scheduler_agent" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.scheduler_agent.key
+  key              = "default"
+  name             = "Default"
+  model_config_key = launchdarkly_model_config.nova_pro.key
+  state            = "published"
+  instructions     = local.scheduler_agent_instructions
+
+  # No tools: the backend prefetches the slots into the context (the ToggleHealth tools that
+  # were attached here had no implementation in the backend). See scheduler_agent_tool_calling.
+  tool_keys = []
+}
+
+# Tool-calling variation (issue #72): the model fetches slots with get_available_slots
+# instead of reading prefetched ones. Nova Pro, like default. Nothing serves it until a
+# targeting rule does: scripts/set_ai_config_targeting.py --tools-demo adds one.
+resource "launchdarkly_ai_config_variation" "scheduler_agent_tool_calling" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.scheduler_agent.key
+  key              = "tool-calling"
+  name             = "Tool calling"
+  model_config_key = launchdarkly_model_config.nova_pro.key
+  state            = "published"
+  instructions     = "${local.scheduler_agent_instructions}\n${local.scheduler_agent_tools_paragraph}"
+  tool_keys        = [launchdarkly_ai_tool.get_available_slots.key]
 }
 
 resource "launchdarkly_ai_config" "brand_agent" {
@@ -790,6 +835,88 @@ resource "launchdarkly_ai_config_variation" "ci_judge_coherence" {
   tool_keys = []
 }
 
+# Offline tool-use judge for evals/ci_eval.py (issue #72). It grades the tool
+# trajectory, which the eval runner puts in {{message_history}}: the tools the
+# assistant could call, each call with its arguments and result or error, and the
+# answer. ci_eval.py runs it only on variations that attach tools, with the row's
+# expected tools as {{ground_truth_context}}.
+
+resource "launchdarkly_ai_config" "ci_judge_tool_use" {
+  project_key = var.project_key
+  key         = "ci-judge-tool-use"
+  name        = "CI Judge: Tool use"
+  mode        = "judge"
+
+  evaluation_metric_key = "$ld:ai:judge:ci-tool-use"
+  # See ai_judge_accuracy: pin is_inverted to dodge the provider's
+  # null-vs-false "inconsistent result after apply" bug.
+  is_inverted = false
+  description = "Offline judge for CI evals: scores whether the agent called the right tools with the right arguments and used what they returned (typical threshold 0.8)."
+  tags = [
+    "demo",
+    "ci-evals",
+  ]
+}
+
+resource "launchdarkly_ai_config_variation" "ci_judge_tool_use" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.ci_judge_tool_use.key
+  key              = "default"
+  name             = "Default"
+  model_config_key = launchdarkly_model_config.claude_sonnet_5.key
+  state            = "published"
+
+  messages = [
+    {
+      role = "system"
+
+      content = <<-EOT
+      You are grading a bank assistant's TOOL USE, not its prose.
+
+      The message history shows the customer's request, the tools the assistant
+      could call, the calls it made with their arguments and each result or
+      error, and its final answer.
+
+      Grade only against the tools listed as available. Do not penalise the
+      assistant for not calling a tool that is not listed, and do not expect a
+      tool that does not exist.
+
+      Score 1.0 when the tool use was right for the request. That INCLUDES
+      calling no tool when the request did not need one: an unused tool is not
+      a mistake.
+
+      Score 0.0 when the assistant needed a tool and did not call it, called the
+      wrong tool, passed arguments the request does not support, offered
+      appointment times, slot IDs or branch details that no tool returned,
+      ignored what a tool returned, or repeated a failing call without adapting.
+
+      Score in between for partial credit.
+
+      Expected tool use for this request (a guide, not a script; another
+      reasonable trajectory can still score 1.0):
+      {{ground_truth_context}}
+
+      Return ONLY valid JSON:
+      {
+          "score": <float 0.0-1.0>,
+          "reasoning": "<2-3 sentences citing the calls, their arguments and results>",
+          "issues": ["<specific tool-use problems>", "<or empty list if none>"]
+      }
+    EOT
+    },
+    {
+      role    = "assistant"
+      content = "MESSAGE HISTORY:\n{{message_history}}"
+    },
+    {
+      role    = "user"
+      content = "RESPONSE TO EVALUATE:\n{{response_to_evaluate}}"
+    },
+  ]
+
+  tool_keys = []
+}
+
 # Keyed maps of the explicit resources above, consumed by outputs.tf.
 locals {
   ai_config_resources = {
@@ -803,8 +930,11 @@ locals {
       launchdarkly_ai_config.ai_judge_coherence,
       launchdarkly_ai_config.ci_judge_accuracy,
       launchdarkly_ai_config.ci_judge_coherence,
+      launchdarkly_ai_config.ci_judge_tool_use,
     ] : r.key => r
   }
+  # One variation per config (keyed by config key), so the second variations
+  # (branch_agent_azure_foundry and the two *_tool_calling ones) aren't listed.
   ai_config_variation_resources = {
     for r in [
       launchdarkly_ai_config_variation.triage_agent,
@@ -816,6 +946,7 @@ locals {
       launchdarkly_ai_config_variation.ai_judge_coherence,
       launchdarkly_ai_config_variation.ci_judge_accuracy,
       launchdarkly_ai_config_variation.ci_judge_coherence,
+      launchdarkly_ai_config_variation.ci_judge_tool_use,
     ] : r.config_key => r
   }
 }

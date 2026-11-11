@@ -53,12 +53,20 @@ Manual runs take three optional inputs:
      more, and the manual **variation** input picks one instead.
    - **Generates a response for each row.** The LaunchDarkly AI SDK reads the variation's model and prompt and
      generates on Bedrock. The app doesn't need to be running.
+   - **Gives the model its tools.** A variation that attaches Library tools the backend implements
+     (`app/backend/src/tools/registry.py`), such as the `tool-calling` variations of `scheduler_agent` and
+     `branch_agent`, gets those tools, backed by the backend's own functions. The model calls them in a loop and the
+     SDK records each call, its arguments and its result. Attached tools the backend doesn't implement aren't given
+     to the model, as in production. Other variations run with no tools.
    - **Scores each row.** Triage checks whether the reply would route to the expected specialist. The other agents are
-     scored by the `ci-judge-accuracy` and `ci-judge-coherence` judges against each target's threshold.
+     scored by the `ci-judge-accuracy` and `ci-judge-coherence` judges against each target's threshold. A variation
+     with tools uses the target's `[<config>.tools]` dataset and judges instead: `ci-judge-tool-use` grades the
+     tool trajectory against the row's `expected_tools`, and gives full marks to a control row that needs no tool
+     when no tool is called.
    - **Compares with `main`.** It matches rows to the downloaded results and lists the ones that newly fail and the
      ones that now pass.
 5. **Reports the results:**
-   - **Job summary:** a table per config and variation with rows passed, the comparison with `main`, and a verdict,
+   - **Job summary:** a table per config and variation with the tools given to the model, rows passed, the comparison with `main`, and a verdict,
      followed by the failing rows with the judge's score and reason.
    - **PR comment:** the same summary in one comment, which later runs update in place.
    - **Results artifact:** the `eval-results-quick` or `eval-results-full` JSON, kept for 90 days. The artifacts from
@@ -135,6 +143,10 @@ Every target has a full dataset and a quick one (the same key with a `_quick` su
 |---|---|---|
 | `triage_agent` | 48 rows | 12 rows |
 | `account_agent`, `branch_agent`, `scheduler_agent`, `brand_agent` | 8 rows each | 3 rows each |
+| `scheduler_agent_tools`, `branch_agent_tools` (variations with tools) | 10 rows each | 4 rows each |
+
+Each tools dataset has control rows that need no tool (`expects_tool_call: false`), and the branch one asks about a
+city the directory doesn't cover, to test the `not_found` result.
 
 PRs and pushes to `main` use the quick datasets, and the nightly run uses the full ones. LaunchDarkly sets a daily
 token limit per member for evaluations, and every generation and judge call counts toward it, even though Bedrock
@@ -152,8 +164,10 @@ file in the LaunchDarkly UI (**Library > Datasets > New dataset**). The triage d
 others are in `ci_datasets/`. Uploading to an existing dataset adds rows rather than replacing them, so create a new
 dataset to replace one. `build_specialist_datasets.py` rebuilds the specialist datasets (see [README.md](README.md#ci-evals)).
 
-**Judges.** `ci-judge-accuracy` and `ci-judge-coherence` are AI Configs defined in
-`infrastructure/launchdarkly/ai_configs_resources.tf`. Apply them with Terraform before the first run.
+**Judges and tools.** `ci-judge-accuracy`, `ci-judge-coherence` and `ci-judge-tool-use` are AI Configs defined in
+`infrastructure/launchdarkly/ai_configs_resources.tf`, and the `get_available_slots` and `find_branches` Library tools
+are in `tools.tf`. Apply them with Terraform before the first run. Tool keys are snake_case: Amazon Nova can't call a
+tool whose name contains a hyphen (JeremyDarkly/policy_agent#74).
 
 **Repository secrets:**
 
@@ -165,6 +179,8 @@ dataset to replace one. `build_specialist_datasets.py` rebuilds the specialist d
 | `LD_SDK_KEY` | The server-side SDK key of `LD_ENVIRONMENT`. Used to evaluate the test contexts. |
 | `LD_ENVIRONMENT` | The environment whose targeting decides the served variation |
 | `LD_API_BASE_URI`, `LD_UI_BASE_URI`, `LD_BASE_URI`, `LD_STREAM_URI`, `LD_EVENTS_URI` | LaunchDarkly endpoints. Leave them unset for production. |
+| `AZURE_FOUNDRY_ENDPOINT`, `AZURE_FOUNDRY_API_KEY` | The Azure AI Foundry resource, for variations on an Azure model config (`branch_agent`'s `azure-foundry`). `ci_eval.py` then calls the deployment through `ChatOpenAI` on the resource's v1 route, as the backend does. Without them, those variations error: the SDK's default for an unknown provider calls OpenAI, which doesn't have the deployment. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Where the run's OpenTelemetry spans go (one per generation and tool call; the evals install `launchdarkly-ai-server[otel]`). Leave it unset for production. Locally, `ci_eval.py` fills it from `LAUNCHDARKLY_OTLP_HTTP_ENDPOINT`. |
 
 **OIDC trust policy.** The role's trust policy must match the repository's OIDC subject format. Check it with
 `gh api repos/<owner>/<repo>/actions/oidc/customization/sub`. If `use_immutable_subject` is true, the subject is
@@ -179,7 +195,11 @@ The same script runs from this folder with an env file:
 ```sh
 uv run python ci_eval.py --env-file ../.env.staging-org --quick
 uv run python ci_eval.py --env-file ../.env.staging-org --config brand_agent --variation default
+uv run python ci_eval.py --env-file ../.env.staging-org --quick --config scheduler_agent --variation tool-calling
+uv run python ci_eval.py --env-file ../.env.staging-org --env-file ../.env.azure --quick --config branch_agent
 ```
+
+`--env-file` is repeatable; the Azure variables are in their own file here.
 
 Local runs use your own AWS credentials and LaunchDarkly token, and count toward your own daily evaluation token limit.
 
@@ -190,5 +210,7 @@ Local runs use your own AWS credentials and LaunchDarkly token, and count toward
 - **"Not authorized to perform sts:AssumeRoleWithWebIdentity"**: the role's trust policy doesn't match the OIDC
   subject. See **OIDC trust policy** above.
 - **A dataset shows as empty after upload**: a row is too long for the upload screen (about 4,096 characters).
+- **`ModelErrorException: Model produced invalid sequence as part of ToolUse`** on a Nova variation: a tool key
+  contains a hyphen. Rename the tool with underscores (JeremyDarkly/policy_agent#74).
 - **Generation errors on a row**: the summary lists them under row errors. A model can reject a parameter combination
   that the backend never sends. Use `drop_parameters` in `ci_targets.toml` to leave those parameters out.

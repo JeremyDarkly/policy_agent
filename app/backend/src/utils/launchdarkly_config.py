@@ -162,6 +162,11 @@ class LaunchDarklyClient:
                     
                     # Store instructions separately (not as messages)
                     config_dict["_instructions"] = agent_dict.get("instructions", "")
+
+                    # Library tools attached to the served variation, as
+                    # {name, description, parameters}. The tool loop
+                    # (utils/tool_loop.py) runs the ones the backend implements.
+                    config_dict["tools"] = list((agent_dict.get("tools") or {}).values())
                     
                     tracker = agent.create_tracker()
                     # Variation logging is now handled by individual agents
@@ -490,6 +495,10 @@ class NoOpTracker:
         """No-op track time to first token."""
         pass
 
+    def track_tool_call(self, tool_key):
+        """No-op track tool call."""
+        pass
+
 
 def token_usage_from(usage: Optional[dict]) -> Optional[TokenUsage]:
     """The ``TokenUsage`` to track for a LangChain ``usage_metadata`` block, or None if there is none.
@@ -587,11 +596,20 @@ class ModelInvoker:
         Returns:
             Model response
         """
+        return self.run_tracked(lambda: self.model.invoke(messages))
+
+    def run_tracked(self, run: Any) -> Any:
+        """Run one generation with tracking: ``run()`` returns the final message.
+
+        The tracker records duration, success, tokens and TTFT once per request, so a
+        generation that takes several model calls (a tool loop) is run through here as one,
+        with its token usage summed on the message it returns.
+        """
         try:
             self._annotate_current_span()
 
             # Track the LLM call
-            result = self.tracker.track_duration_of(lambda: self.model.invoke(messages))
+            result = self.tracker.track_duration_of(run)
 
             # Azure withholds a filtered response and says so in finish_reason; count it as an error, not a reply
             metadata = getattr(result, "response_metadata", None)

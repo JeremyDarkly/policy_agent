@@ -940,7 +940,66 @@ locals {
       launchdarkly_ai_tool.get_provider_schedule_details,
       launchdarkly_ai_tool.cancel_or_reschedule_appointment,
       launchdarkly_ai_tool.search_medical_knowledge_base,
+      launchdarkly_ai_tool.get_available_slots,
+      launchdarkly_ai_tool.find_branches,
     ] : r.key => r
   }
 }
 
+
+# ToggleBank tools (issue #72). The model calls these on the `tool-calling` variations of
+# scheduler_agent and branch_agent; the implementations are in
+# app/backend/src/tools/registry.py, which evals/ci_eval.py also uses. Keys are snake_case
+# because Amazon Nova can't call a tool whose name contains a hyphen (issue #74).
+
+resource "launchdarkly_ai_tool" "get_available_slots" {
+  project_key = var.project_key
+  key         = "get_available_slots"
+  description = "Returns the open appointment slots with a ToggleBank banker over the next few days, each with a slot ID and a readable date and time. Call it before offering the customer any appointment time, and offer only the slots it returns. Don't call it when the customer doesn't want an appointment."
+  schema_json = jsonencode({
+    "type" = "object"
+    "properties" = {
+      "days_ahead" = {
+        "type"        = "integer"
+        "minimum"     = 1
+        "maximum"     = 14
+        "description" = "How many days ahead to look, from tomorrow (1-14, default 7). Use a small number for 'tomorrow' or 'this week'."
+      }
+    }
+    "required" = []
+  })
+
+  custom_parameters = jsonencode({
+    name     = "Get available banker appointment slots"
+    category = "togglebank"
+    returns = {
+      "type"        = "object"
+      "description" = "days_ahead and up to 10 slots as {slot_id, when}"
+    }
+  })
+}
+
+resource "launchdarkly_ai_tool" "find_branches" {
+  project_key = var.project_key
+  key         = "find_branches"
+  description = "Looks up ToggleBank branches and ATMs near a location in the ToggleBank directory: name, type, address, hours, services, accessibility and phone. Call it before naming any branch, ATM, address or hours. Use the location the customer asks about, or their profile location if they don't name one. Returns status not_found when the directory has no locations there."
+  schema_json = jsonencode({
+    "type" = "object"
+    "properties" = {
+      "location" = {
+        "type"        = "string"
+        "description" = "A city (\"Boston\"), ZIP code (\"94110\") or neighborhood (\"Back Bay\")."
+      }
+    }
+    "required" = ["location"]
+  })
+
+  custom_parameters = jsonencode({
+    name     = "Find ToggleBank branches and ATMs"
+    category = "togglebank"
+    returns = {
+      "type"        = "object"
+      "description" = "status found with up to 5 branches, or status not_found with a message"
+    }
+  })
+}

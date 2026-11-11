@@ -2,15 +2,45 @@
 
 import json
 import time
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Union
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from .aws_sso import get_sso_manager
 from .served_model import SOURCE_REQUESTED_FALLBACK, bedrock_served_model
+
+
+def converse_tool_spec(tool: Any) -> Dict[str, Any]:
+    """A Converse ``toolSpec`` for a tool in any form ``bind_tools`` accepts.
+
+    That includes a LaunchDarkly Library tool as ``{"name", "description", "parameters"}``.
+    """
+    function = convert_to_openai_tool(tool)["function"]
+    schema = function.get("parameters") or {"type": "object", "properties": {}}
+    return {
+        "toolSpec": {
+            "name": function["name"],
+            "description": function.get("description") or function["name"],
+            "inputSchema": {"json": schema},
+        }
+    }
+
+
+def _tool_result_content(content: Any) -> List[Dict[str, Any]]:
+    """A ToolMessage's content as Converse toolResult content blocks: JSON when it parses, else text."""
+    if isinstance(content, (dict, list)):
+        value = content
+    else:
+        try:
+            value = json.loads(content)
+        except (TypeError, ValueError):
+            return [{"text": str(content) or "(empty)"}]
+    # Converse takes a JSON object here, not a bare list or scalar.
+    return [{"json": value if isinstance(value, dict) else {"result": value}}]
 
 
 class BedrockConverseLLM(BaseChatModel):
@@ -80,27 +110,82 @@ class BedrockConverseLLM(BaseChatModel):
         Returns:
             Tuple of (messages, system_messages) in Bedrock format
         """
-        converse_messages = []
+        converse_messages: List[Dict[str, Any]] = []
         system_messages = []
+
+        def add(role: str, blocks: List[Dict[str, Any]]) -> None:
+            # Converse needs roles to alternate, so a tool result and the next user turn
+            # (or several tool results) share one user message.
+            if converse_messages and converse_messages[-1]["role"] == role:
+                converse_messages[-1]["content"].extend(blocks)
+            else:
+                converse_messages.append({"role": role, "content": blocks})
 
         for message in messages:
             if isinstance(message, SystemMessage):
                 system_messages.append({"text": message.content})
             elif isinstance(message, HumanMessage):
-                converse_messages.append(
-                    {"role": "user", "content": [{"text": message.content}]}
-                )
+                add("user", [{"text": message.content}])
             elif isinstance(message, AIMessage):
-                converse_messages.append(
-                    {"role": "assistant", "content": [{"text": message.content}]}
-                )
+                blocks: List[Dict[str, Any]] = []
+                text = message.content if isinstance(message.content, str) else ""
+                if text or not message.tool_calls:
+                    blocks.append({"text": text})
+                for call in message.tool_calls:
+                    blocks.append(
+                        {"toolUse": {"toolUseId": call["id"], "name": call["name"], "input": call.get("args") or {}}}
+                    )
+                add("assistant", blocks)
+            elif isinstance(message, ToolMessage):
+                result: Dict[str, Any] = {
+                    "toolUseId": message.tool_call_id,
+                    "content": _tool_result_content(message.content),
+                }
+                if getattr(message, "status", "success") == "error":
+                    result["status"] = "error"
+                add("user", [{"toolResult": result}])
             else:
                 # Default to user message
-                converse_messages.append(
-                    {"role": "user", "content": [{"text": str(message.content)}]}
-                )
+                add("user", [{"text": str(message.content)}])
 
         return converse_messages, system_messages if system_messages else None
+
+    def bind_tools(
+        self,
+        tools: Sequence[Union[Dict[str, Any], type, Callable, Any]],
+        **kwargs: Any,
+    ):
+        """Bind tools: each request then sends them as the Converse ``toolConfig``.
+
+        Accepts what LangChain's ``bind_tools`` does, plus LaunchDarkly Library tools as
+        ``{"name", "description", "parameters"}``. The response's ``toolUse`` blocks come back as
+        ``AIMessage.tool_calls``. Tool calls work through ``invoke``; ``stream`` returns text only.
+        """
+        return self.bind(tools=[converse_tool_spec(t) for t in tools], **kwargs)
+
+    def _request(self, messages: List[BaseMessage], stop: Optional[List[str]], **kwargs: Any) -> Dict[str, Any]:
+        """The Converse request for these messages and options."""
+        converse_messages, system_messages = self._convert_messages_to_converse_format(messages)
+        inference_config: Dict[str, Any] = {
+            "maxTokens": kwargs.get("max_tokens", self.max_tokens),
+        }
+        # Omit temperature when unset: some models (e.g. Claude Sonnet 5)
+        # reject the deprecated `temperature` parameter outright.
+        temperature = kwargs.get("temperature", self.temperature)
+        if temperature is not None:
+            inference_config["temperature"] = temperature
+        if stop:
+            inference_config["stopSequences"] = stop
+        api_params: Dict[str, Any] = {
+            "modelId": self.model_id,
+            "messages": converse_messages,
+            "inferenceConfig": inference_config,
+        }
+        if system_messages:
+            api_params["system"] = system_messages
+        if kwargs.get("tools"):
+            api_params["toolConfig"] = {"tools": kwargs["tools"]}
+        return api_params
 
     def _converse_result(self, response: Dict[str, Any]) -> ChatResult:
         """Build a ChatResult from a Converse response.
@@ -113,6 +198,16 @@ class BedrockConverseLLM(BaseChatModel):
         response_text = "".join(
             block.get("text", "") for block in content_blocks if "text" in block
         )
+        tool_calls = [
+            {
+                "name": block["toolUse"]["name"],
+                "args": block["toolUse"].get("input") or {},
+                "id": block["toolUse"]["toolUseId"],
+                "type": "tool_call",
+            }
+            for block in content_blocks
+            if "toolUse" in block
+        ]
 
         usage = response.get("usage", {})
         token_usage = {
@@ -125,6 +220,7 @@ class BedrockConverseLLM(BaseChatModel):
 
         message = AIMessage(
             content=response_text,
+            tool_calls=tool_calls,
             response_metadata={
                 "model_id": self.model_id,
                 "model_name": served,
@@ -169,32 +265,7 @@ class BedrockConverseLLM(BaseChatModel):
             ChatResult with the response
         """
         bedrock_client = self._bedrock_client
-
-        converse_messages, system_messages = self._convert_messages_to_converse_format(
-            messages
-        )
-
-        inference_config = {
-            "maxTokens": kwargs.get("max_tokens", self.max_tokens),
-        }
-
-        # Omit temperature when unset: some models (e.g. Claude Sonnet 5)
-        # reject the deprecated `temperature` parameter outright.
-        temperature = kwargs.get("temperature", self.temperature)
-        if temperature is not None:
-            inference_config["temperature"] = temperature
-
-        if stop:
-            inference_config["stopSequences"] = stop
-
-        api_params = {
-            "modelId": self.model_id,
-            "messages": converse_messages,
-            "inferenceConfig": inference_config,
-        }
-
-        if system_messages:
-            api_params["system"] = system_messages
+        api_params = self._request(messages, stop, **kwargs)
 
         try:
             response = bedrock_client.converse(**api_params)
