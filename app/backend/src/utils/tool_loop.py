@@ -176,7 +176,9 @@ def run_tool_loop(
                     "failed": failed,
                     "duration_ms": int((time.time() - started) * 1000),
                 })
-                print(f"  🔧 {name}({json.dumps(call.get('args'), default=str)})" + (f" → error: {error}" if error else ""))
+                # The UI terminal (app/ui/src/components/Terminal.tsx) parses this line.
+                outcome = f"error: {error}" if error else ("not_found" if failed else "ok")
+                print(f"  Tool call: {name}({json.dumps(call.get('args'), default=str)}) -> {outcome}")
                 history.append(ToolMessage(content=text, tool_call_id=call["id"], name=name,
                                            status="error" if error else "success"))
         else:

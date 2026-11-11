@@ -451,6 +451,38 @@
 
 /* ---------- RAG strip ---------- */
 
+/* Tool calls on a node (tool-calling variations) */
+.tool-strip {
+  margin-top: 8px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+}
+.tool-calls {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.tool-call {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tool-call-mark { width: 10px; }
+.tool-call.ok .tool-call-mark { color: #4ade80; }
+.tool-call.failed .tool-call-mark,
+.tool-call-outcome { color: #f59e0b; }
+.tool-call-name { font-weight: 600; }
+.tool-call-args { opacity: 0.6; overflow: hidden; text-overflow: ellipsis; }
+
 .rag-strip {
   margin-top: 8px;
   display: flex;

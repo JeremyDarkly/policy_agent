@@ -5,13 +5,20 @@ import './Terminal.css';
 // Types
 // ============================================================================
 
-type NodeKind = 'triage' | 'policy' | 'provider' | 'scheduler' | 'brand';
+type NodeKind = 'triage' | 'policy' | 'provider' | 'scheduler' | 'branch' | 'brand';
 type NodeState = 'running' | 'complete' | 'blocked' | 'healed';
 
 interface RAGState {
   active: boolean;
   count: number;
   scores: number[];
+}
+
+// One call the model made to a Library tool (backend utils/tool_loop.py).
+interface ToolCallInfo {
+  name: string;
+  args: string;
+  outcome: string; // "ok", "not_found" or "error: ..."
 }
 
 interface FallbackInfo {
@@ -42,6 +49,7 @@ interface AgentNode {
   costCents?: number;
   durationMs?: number;
   rag?: RAGState;
+  tools?: ToolCallInfo[];
   guardrail?: GuardrailInfo;
 }
 
@@ -123,6 +131,7 @@ const KIND_LABEL: Record<NodeKind, string> = {
   policy: 'Policy Specialist',
   provider: 'Provider Specialist',
   scheduler: 'Scheduler',
+  branch: 'Branch Specialist',
   brand: 'Brand Voice',
 };
 
@@ -136,19 +145,21 @@ const PAT = {
     policy: /^POLICY SPECIALIST:/i,
     provider: /^PROVIDER SPECIALIST:/i,
     scheduler: /^SCHEDULER AGENT:/i,
+    branch: /^BRANCH SPECIALIST:/i,
     brand: /^BRAND VOICE AGENT:/i,
   } as Record<NodeKind, RegExp>,
   modelPicked:
-    /^(Triage|Policy|Provider|Scheduler|Brand Voice) Agent pulled from LaunchDarkly\s*[-–—]?\s*using\s+(\S+)/i,
+    /^(Triage|Policy|Provider|Scheduler|Branch|Brand Voice) Agent pulled from LaunchDarkly\s*[-–—]?\s*using\s+(\S+)/i,
   ragRetrievingTopic: /^Retrieving (policy|provider) documents via RAG/i,
   ragRetrievingKB: /^Retrieving from Bedrock KB/i,
   ragGotDocs: /^Retrieved\s+(\d+)\s+documents\s+\(top score:\s+([\d.]+)\)/i,
   ragFinalPolicy: /^Retrieved\s+(\d+)\s+policy documents from Bedrock KB$/i,
   ragFinalProvider: /^Using\s+(\d+)\s+provider documents from Bedrock KB$/i,
   ragDoc: /^Doc\s+(\d+):\s+Score\s+([\d.]+)/i,
+  toolCall: /^Tool call:\s+([a-z0-9_]+)\((.*)\)\s+->\s+(.+)$/i,
   agentCost:
-    /^(Triage|Policy|Provider|Scheduler|Brand)\s+agent\s+cost:\s+([\d.]+)¢?\s*\(\$([\d.]+)\)\s*\[in=(\d+),\s*out=(\d+),\s*model=([^\]]+)\]/i,
-  agentDuration: /^(Triage|Policy|Provider|Scheduler|Brand)?\s*agent\s+duration:\s+(\d+)\s*ms/i,
+    /^(Triage|Policy|Provider|Scheduler|Branch|Brand)\s+agent\s+cost:\s+([\d.]+)¢?\s*\(\$([\d.]+)\)\s*\[in=(\d+),\s*out=(\d+),\s*model=([^\]]+)\]/i,
+  agentDuration: /^(Triage|Policy|Provider|Scheduler|Branch|Brand)?\s*agent\s+duration:\s+(\d+)\s*ms/i,
   blocked: /^Response blocked due to policy violation/i,
   policyTypeLine: /^Policy Type:\s+(.+)$/i,
   filterTypeLine: /^Filter Type:\s+(.+)$/i,
@@ -282,6 +293,7 @@ function applyLog(runs: RunSession[], raw: string): RunSession[] {
       policy: 'policy',
       provider: 'provider',
       scheduler: 'scheduler',
+      branch: 'branch',
       'brand voice': 'brand',
     };
     const kind = kindMap[role];
@@ -356,6 +368,20 @@ function applyLog(runs: RunSession[], raw: string): RunSession[] {
     return next;
   }
 
+  // ---- Tool calls ----
+  m = msg.match(PAT.toolCall);
+  if (m && runs.length > 0) {
+    const next = [...runs];
+    const run = { ...next[next.length - 1] };
+    const node = lastNodeOf(run);
+    if (node) {
+      node.tools = [...(node.tools ?? []), { name: m[1], args: m[2], outcome: m[3].trim() }];
+      run.nodes = [...run.nodes];
+      next[next.length - 1] = run;
+    }
+    return next;
+  }
+
   // ---- Cost / completion ----
   m = msg.match(PAT.agentCost);
   if (m && runs.length > 0) {
@@ -369,6 +395,7 @@ function applyLog(runs: RunSession[], raw: string): RunSession[] {
       policy: 'policy',
       provider: 'provider',
       scheduler: 'scheduler',
+      branch: 'branch',
       brand: 'brand',
     };
     const kind = kindMap[role];
@@ -759,6 +786,8 @@ function NodeCard({ node, isLast }: { node: AgentNode; isLast: boolean }) {
             <RAGStrip rag={node.rag} />
           )}
 
+          {node.tools && node.tools.length > 0 && <ToolStrip calls={node.tools} />}
+
           {node.state === 'complete' && (
             <NodeStats
               tokens={fmtTokens(node.inputTokens, node.outputTokens)}
@@ -909,6 +938,24 @@ function RAGStrip({ rag }: { rag: RAGState }) {
     );
   }
   return null;
+}
+
+function ToolStrip({ calls }: { calls: ToolCallInfo[] }) {
+  return (
+    <div className="tool-strip">
+      <div className="rag-label">TOOLS</div>
+      <div className="tool-calls">
+        {calls.map((c, i) => (
+          <div key={i} className={`tool-call ${c.outcome === 'ok' ? 'ok' : 'failed'}`} title={c.outcome}>
+            <span className="tool-call-mark">{c.outcome === 'ok' ? '✓' : '✗'}</span>
+            <span className="tool-call-name">{c.name}</span>
+            <span className="tool-call-args">{truncate(c.args, 48)}</span>
+            {c.outcome !== 'ok' && <span className="tool-call-outcome">{truncate(c.outcome, 40)}</span>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function GuardrailStrip({ g }: { g: GuardrailInfo }) {
