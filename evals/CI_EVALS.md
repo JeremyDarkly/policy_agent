@@ -179,6 +179,7 @@ tool whose name contains a hyphen (JeremyDarkly/policy_agent#74).
 | `LD_SDK_KEY` | The server-side SDK key of `LD_ENVIRONMENT`. Used to evaluate the test contexts. |
 | `LD_ENVIRONMENT` | The environment whose targeting decides the served variation |
 | `LD_API_BASE_URI`, `LD_UI_BASE_URI`, `LD_BASE_URI`, `LD_STREAM_URI`, `LD_EVENTS_URI` | LaunchDarkly endpoints. Leave them unset for production. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Where the run's OpenTelemetry spans go (one per generation and tool call; the evals install `launchdarkly-ai-server[otel]`). Leave it unset for production. Locally, `ci_eval.py` fills it from `LAUNCHDARKLY_OTLP_HTTP_ENDPOINT`. |
 
 **OIDC trust policy.** The role's trust policy must match the repository's OIDC subject format. Check it with
 `gh api repos/<owner>/<repo>/actions/oidc/customization/sub`. If `use_immutable_subject` is true, the subject is

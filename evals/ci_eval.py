@@ -69,6 +69,9 @@ ENV_MAP = {
     "LD_STREAM_URI": "LAUNCHDARKLY_STREAM_URI",
     "LD_EVENTS_URI": "LAUNCHDARKLY_EVENTS_URI",
     "LD_ENVIRONMENT": "LAUNCHDARKLY_ENVIRONMENT",
+    # Where the SDK's otel extra sends the run's spans (one per generation and tool call).
+    # Unset, it sends them to LaunchDarkly production.
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "LAUNCHDARKLY_OTLP_HTTP_ENDPOINT",
 }
 
 

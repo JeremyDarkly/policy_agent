@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Offline evaluations of the ToggleBank policy agent, run from code with the LaunchDarkly AI SDK"
 requires-python = ">=3.12"
 dependencies = [
-  "launchdarkly-ai-server==1.0.0",
+  "launchdarkly-ai-server[otel]==1.0.0",
   "launchdarkly-ai-openai-messages==1.0.0",
   "launchdarkly-ai-langchain-messages==1.0.0",
   "launchdarkly-ai-langchain-agents==1.0.0",
