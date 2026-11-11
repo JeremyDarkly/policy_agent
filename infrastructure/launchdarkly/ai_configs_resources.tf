@@ -287,6 +287,12 @@ resource "launchdarkly_ai_config_variation" "branch_agent_azure_foundry" {
   state            = "published"
   instructions     = local.branch_agent_instructions
   tool_keys        = local.branch_agent_tool_keys
+
+  # A plan without the Azure variables fails here instead of deleting a variation that
+  # targeting may be serving. See launchdarkly_model_config.azure_foundry_branch.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "launchdarkly_ai_config" "scheduler_agent" {
