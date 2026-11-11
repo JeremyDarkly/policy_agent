@@ -1,6 +1,7 @@
 """Live agent scheduler specialist."""
 
 import json
+import re
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -10,6 +11,37 @@ from ..tools.calendar import get_available_slots
 from ..utils.llm_config import get_model_invoker
 from ..utils.served_model import served_model_id_of
 from ..utils.launchdarkly_config import get_ld_client
+from ..utils.tool_loop import run_tool_loop, tools_for
+
+UNLISTED_SLOT_EVENT = "scheduler-unlisted-slot"
+SLOT_ID = re.compile(r"SLOT-\d{8}-\d{4}")
+
+
+def unlisted_slots(reply: str, calls: list[dict[str, Any]]) -> list[str]:
+    """Slot IDs the reply names that no get_available_slots call returned in this request."""
+    returned: set[str] = set()
+    for call in calls:
+        if call.get("tool") == "get_available_slots":
+            returned.update(SLOT_ID.findall(call.get("result") or ""))
+    return sorted(set(SLOT_ID.findall(reply or "")) - returned)
+
+
+def report_unlisted_slots(model_invoker: Any, unlisted: list[str]) -> None:
+    """Send scheduler-unlisted-slot: 1 when the reply names a slot no tool returned, else 0."""
+    if model_invoker.user_context is None:
+        return
+    try:
+        import ldclient
+
+        ldclient.get().track(
+            UNLISTED_SLOT_EVENT,
+            model_invoker.user_context,
+            {"configKey": model_invoker.config_key, "variationKey": model_invoker.variation_key,
+             "slotIds": unlisted},
+            1.0 if unlisted else 0.0,
+        )
+    except Exception as e:
+        print(f"  Failed to send {UNLISTED_SLOT_EVENT}: {e}")
 
 
 def scheduler_specialist_node(state: AgentState) -> dict[str, Any]:
@@ -42,17 +74,6 @@ def scheduler_specialist_node(state: AgentState) -> dict[str, Any]:
     user_context = state.get("user_context", {})
     account_id = user_context.get("account_id", "Not provided")
 
-    # Get available time slots
-    available_slots = get_available_slots(days_ahead=7)
-
-    # Format slots for display
-    slots_str = "\n".join(
-        [
-            f"- {slot['datetime_str']} (ID: {slot['slot_id']})"
-            for slot in available_slots[:10]  # Show first 10 slots
-        ]
-    )
-
     # Get LLM and messages from LaunchDarkly AI Config
     print(f"\n{'─'*80}")
     print(f"  SCHEDULER AGENT: Finding appointments")
@@ -64,22 +85,41 @@ def scheduler_specialist_node(state: AgentState) -> dict[str, Any]:
     provider = ld_config.get("provider", "")
     print(f"  Scheduler Agent pulled from LaunchDarkly — using {model_id}" + (f" ({provider})" if provider else ""))
     print(f"{'─'*80}")
-    
-    # Build LangChain messages from LaunchDarkly config (supports both agent-based and completion-based)
-    ld_client = get_ld_client()
+
+    # A tool-calling variation fetches slots with get_available_slots; otherwise they're
+    # prefetched into the context, as before.
+    tools = tools_for(ld_config)
+    available_slots: list[dict[str, str]] = []
     context_vars = {
         **user_context,
         "query": query,
         "account_id": account_id,
-        "available_slots": slots_str,
     }
+    if not tools:
+        available_slots = get_available_slots(days_ahead=7)[:10]  # Show first 10 slots
+        context_vars["available_slots"] = "\n".join(
+            f"- {slot['datetime_str']} (ID: {slot['slot_id']})" for slot in available_slots
+        )
+
+    # Build LangChain messages from LaunchDarkly config (supports both agent-based and completion-based)
+    ld_client = get_ld_client()
     langchain_messages = ld_client.build_langchain_messages(ld_config, context_vars)
 
     # Track start time for duration measurement
     import time
     start_time = time.time()
-    
-    response = model_invoker.invoke(langchain_messages)
+
+    tool_calls: list[dict[str, Any]] = []
+    if tools:
+        print(f"  Tools: {', '.join(t['name'] for t in tools)}")
+        loop = run_tool_loop(model_invoker, langchain_messages, tools)
+        response, tool_calls = loop.message, loop.calls
+        unlisted = unlisted_slots(response.content, tool_calls)
+        if unlisted:
+            print(f"  ⚠️ reply names slots no tool returned: {', '.join(unlisted)}")
+        report_unlisted_slots(model_invoker, unlisted)
+    else:
+        response = model_invoker.invoke(langchain_messages)
     served_model_id = served_model_id_of(response, model_id)
     
     # Calculate duration
@@ -138,7 +178,8 @@ def scheduler_specialist_node(state: AgentState) -> dict[str, Any]:
             "scheduler_specialist": {
                 "model": model_id,  # Track which model was used
                 "served_model": served_model_id,  # Model the API reported
-                "available_slots": available_slots[:10],
+                "available_slots": available_slots,
+                "tool_calls": tool_calls,
                 "response": response_text,
                 "escalation_reason": state.get("escalation_needed", False),
                 "tokens": tokens,
