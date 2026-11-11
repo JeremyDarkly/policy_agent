@@ -179,6 +179,7 @@ tool whose name contains a hyphen (JeremyDarkly/policy_agent#74).
 | `LD_SDK_KEY` | The server-side SDK key of `LD_ENVIRONMENT`. Used to evaluate the test contexts. |
 | `LD_ENVIRONMENT` | The environment whose targeting decides the served variation |
 | `LD_API_BASE_URI`, `LD_UI_BASE_URI`, `LD_BASE_URI`, `LD_STREAM_URI`, `LD_EVENTS_URI` | LaunchDarkly endpoints. Leave them unset for production. |
+| `AZURE_FOUNDRY_ENDPOINT`, `AZURE_FOUNDRY_API_KEY` | The Azure AI Foundry resource, for variations on an Azure model config (`branch_agent`'s `azure-foundry`). `ci_eval.py` then calls the deployment through `ChatOpenAI` on the resource's v1 route, as the backend does. Without them, those variations error: the SDK's default for an unknown provider calls OpenAI, which doesn't have the deployment. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Where the run's OpenTelemetry spans go (one per generation and tool call; the evals install `launchdarkly-ai-server[otel]`). Leave it unset for production. Locally, `ci_eval.py` fills it from `LAUNCHDARKLY_OTLP_HTTP_ENDPOINT`. |
 
 **OIDC trust policy.** The role's trust policy must match the repository's OIDC subject format. Check it with
@@ -195,7 +196,10 @@ The same script runs from this folder with an env file:
 uv run python ci_eval.py --env-file ../.env.staging-org --quick
 uv run python ci_eval.py --env-file ../.env.staging-org --config brand_agent --variation default
 uv run python ci_eval.py --env-file ../.env.staging-org --quick --config scheduler_agent --variation tool-calling
+uv run python ci_eval.py --env-file ../.env.staging-org --env-file ../.env.azure --quick --config branch_agent
 ```
+
+`--env-file` is repeatable; the Azure variables are in their own file here.
 
 Local runs use your own AWS credentials and LaunchDarkly token, and count toward your own daily evaluation token limit.
 

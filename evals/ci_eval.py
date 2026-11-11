@@ -31,6 +31,7 @@ import re
 import sys
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -311,7 +312,50 @@ def recording_handler(
                 )
         return output
 
-    return ProviderHandler(recorded, provides_for=inner.provides_for, capture_content=inner.capture_content)
+    return ProviderHandler(recorded, provides_for=inner.provides_for, capture_content=inner.capture_content,
+                           providers=inner.providers)
+
+
+# The provider name on the Azure AI Foundry model config (infrastructure/launchdarkly/model_configs.tf).
+AZURE_FOUNDRY_PROVIDERS = ["Azure AI Foundry"]
+
+
+def azure_foundry_base_url(endpoint: str) -> str:
+    """The v1 OpenAI-compatible route of an Azure AI Foundry resource, as the backend builds it
+    (app/backend/src/utils/llm_config.py): only the endpoint's scheme and host are kept."""
+    parts = urllib.parse.urlsplit(endpoint.strip())
+    if not parts.scheme or not parts.netloc:
+        raise ValueError("AZURE_FOUNDRY_ENDPOINT is not a URL")
+    return f"{parts.scheme}://{parts.netloc}/openai/v1/"
+
+
+def azure_foundry_handler() -> ProviderHandler | None:
+    """An agents handler for Azure AI Foundry variations, or None without the Azure variables.
+
+    The SDK's default model for a provider it doesn't know is ChatOpenAI on OpenAI itself, which
+    doesn't have the deployment. This one calls the deployment (the variation's model name) on
+    the resource, as the backend does.
+    """
+    endpoint, api_key = os.getenv("AZURE_FOUNDRY_ENDPOINT"), os.getenv("AZURE_FOUNDRY_API_KEY")
+    if not endpoint or not api_key:
+        return None
+    base_url = azure_foundry_base_url(endpoint)
+
+    def model(config: dict[str, Any]) -> Any:
+        from langchain_openai import ChatOpenAI
+
+        settings = config.get("model") or {}
+        parameters = settings.get("parameters") or {}
+        options: dict[str, Any] = {}
+        if parameters.get("temperature") is not None:
+            options["temperature"] = parameters["temperature"]
+        max_tokens = parameters.get("maxTokens") or parameters.get("max_tokens")
+        if max_tokens:
+            options["max_tokens"] = max_tokens
+        return ChatOpenAI(model=settings.get("name"), base_url=base_url, api_key=api_key, stream_usage=True,
+                          **options)
+
+    return create_langchain_agents_handler(model, providers=AZURE_FOUNDRY_PROVIDERS)
 
 
 
@@ -589,9 +633,12 @@ async def run_target(
             generation=generation_for(target),
             # The agents are agent-mode AI Configs (instructions) and the judges are
             # messages-mode ones; the SDK picks the handler by the config's mode.
+            # The Azure handler is scoped to its provider, so the SDK picks it over the
+            # unscoped agents handler for Azure AI Foundry variations.
             handlers=[
                 recording_handler(handler, result, judges)
-                for handler in (create_langchain_agents_handler(), create_langchain_messages_handler())
+                for handler in (*args.extra_handlers, create_langchain_agents_handler(),
+                                create_langchain_messages_handler())
             ],
             # Replaces the variation's tools: only the ones the backend implements.
             tools=tools,
@@ -734,7 +781,8 @@ def start_ld_client(project_key: str, environment: str) -> Any:
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--env-file", help="load credentials from this env file (CI sets them as env vars)")
+    parser.add_argument("--env-file", action="append", default=[],
+                        help="load credentials from this env file; repeatable (CI sets them as env vars)")
     parser.add_argument("--targets", default=str(EVALS_DIR / "ci_targets.toml"))
     parser.add_argument("--config", action="append", default=[], help="AI Config key to run; repeatable (default: all)")
     parser.add_argument(
@@ -760,8 +808,8 @@ async def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.env_file:
-        load_dotenv(Path(args.env_file))
+    for env_file in args.env_file:
+        load_dotenv(Path(env_file))
     for target, source in ENV_MAP.items():
         if not os.getenv(target) and os.getenv(source):
             os.environ[target] = os.environ[source]
@@ -778,6 +826,8 @@ async def main() -> int:
 
     targets, contexts = load_targets(Path(args.targets), args.config)
     args.tool_registry = load_tool_registry()
+    azure = azure_foundry_handler()
+    args.extra_handlers = [azure] if azure else []
     evals = init_evaluations()
     args.ld_client, args.test_contexts = None, {}
     if contexts and not args.variation and not args.no_contexts:
