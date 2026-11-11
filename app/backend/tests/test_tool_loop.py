@@ -291,3 +291,14 @@ def test_registry_tools_are_offered_with_library_schemas():
     run_tool_loop(invoker(llm, FakeTracker()), [HumanMessage(content="q")], [SLOTS_TOOL, BRANCH_TOOL])
     names = [t["toolSpec"]["name"] for t in client.requests[0]["toolConfig"]["tools"]]
     assert names == ["get_available_slots", "find_branches"] and set(names) <= set(TOOLS)
+
+
+def test_unlisted_slots():
+    import src.graph  # noqa: F401  (src.agents imports through the graph)
+    from src.agents.scheduler_specialist import unlisted_slots
+
+    calls = [{"tool": "get_available_slots", "result": json.dumps({"slots": [{"slot_id": "SLOT-20261112-0900"}]})}]
+    assert unlisted_slots("Book SLOT-20261112-0900?", calls) == []
+    assert unlisted_slots("SLOT-20261112-0900 or SLOT-20261113-1400", calls) == ["SLOT-20261113-1400"]
+    assert unlisted_slots("Tuesday at 10?", []) == []
+    assert unlisted_slots("SLOT-20261112-0900", []) == ["SLOT-20261112-0900"]
