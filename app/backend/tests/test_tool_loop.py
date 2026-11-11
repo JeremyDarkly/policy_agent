@@ -302,3 +302,59 @@ def test_unlisted_slots():
     assert unlisted_slots("SLOT-20261112-0900 or SLOT-20261113-1400", calls) == ["SLOT-20261113-1400"]
     assert unlisted_slots("Tuesday at 10?", []) == []
     assert unlisted_slots("SLOT-20261112-0900", []) == ["SLOT-20261112-0900"]
+
+
+# --- Azure AI Foundry (ChatOpenAI) ---------------------------------------------------------------------------------
+
+
+def openai_response(message, usage, finish="stop"):
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "grok-4.6",
+        "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+        "usage": usage,
+    }
+
+
+def test_loop_on_chat_openai_sums_reasoning_tokens(ld, monkeypatch):
+    from langchain_openai import ChatOpenAI
+
+    responses = [
+        openai_response(
+            {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "function": {"name": "find_branches", "arguments": json.dumps({"location": "Boston"})},
+            }]},
+            {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 150,
+             "completion_tokens_details": {"reasoning_tokens": 40}},
+            finish="tool_calls",
+        ),
+        openai_response(
+            {"role": "assistant", "content": "ToggleBank Back Bay is at 500 Boylston St."},
+            {"prompt_tokens": 300, "completion_tokens": 20, "total_tokens": 340,
+             "completion_tokens_details": {"reasoning_tokens": 20}},
+        ),
+    ]
+    sent = []
+
+    def generate(self, messages, stop=None, run_manager=None, **kwargs):
+        sent.append((messages, kwargs))
+        return self._create_chat_result(responses[len(sent) - 1])
+
+    monkeypatch.setattr(ChatOpenAI, "_generate", generate)
+    llm = ChatOpenAI(model="grok-4.6", api_key="test-key", base_url="https://example.invalid/openai/v1/")
+    tracker = FakeTracker()
+    inv = ModelInvoker(llm, tracker, config_key="branch_agent", is_agent_config=True, user_context=CONTEXT,
+                       variation_key="azure-foundry", provider="azure ai foundry", expected_model="grok-4.6")
+    result = run_tool_loop(inv, [HumanMessage(content="Boston branches?")], [BRANCH_TOOL])
+
+    assert result.message.content.startswith("ToggleBank Back Bay")
+    assert [c["tool"] for c in result.calls] == ["find_branches"] and not result.calls[0]["failed"]
+    assert sent[0][1]["tools"][0]["function"]["name"] == "find_branches"
+    # The second request carries the tool result back.
+    assert isinstance(sent[1][0][-1], ToolMessage) and "Back Bay" in sent[1][0][-1].content
+    # input 400, output 30 + reasoning 60 (inside the 60-token gap to total 490), total 490.
+    assert ("tokens", 400, 90, 490) in tracker.calls
+    assert ("tool_call", "find_branches") in tracker.calls

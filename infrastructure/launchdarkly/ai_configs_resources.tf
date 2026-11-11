@@ -290,10 +290,11 @@ resource "launchdarkly_ai_config_variation" "branch_agent_azure_foundry" {
   name             = "Azure AI Foundry"
   model_config_key = launchdarkly_model_config.azure_foundry_branch[0].key
   state            = "published"
-  instructions     = local.branch_agent_instructions
-  # No tools: this variation answers from the location context (the ToggleHealth tools that
-  # were attached here had no implementation in the backend). See branch_agent_tool_calling.
-  tool_keys = []
+  # Tools on Azure too (issue #72): the TOOLS paragraph and find_branches, as on tool-calling,
+  # so the employee login (which the Azure demo rule matches) shows Azure calling the tool.
+  # The backend runs the tool loop on ChatOpenAI, through bind_tools.
+  instructions = "${local.branch_agent_instructions}${local.branch_agent_tools_paragraph}"
+  tool_keys    = [launchdarkly_ai_tool.find_branches.key]
 
   # A plan without the Azure variables fails here instead of deleting a variation that
   # targeting may be serving. See launchdarkly_model_config.azure_foundry_branch.

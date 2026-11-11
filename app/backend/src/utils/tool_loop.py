@@ -61,7 +61,14 @@ def _add_usage(total: Optional[dict], usage: Optional[dict]) -> Optional[dict]:
     if not total:
         return dict(usage)
     keys = ("input_tokens", "output_tokens", "total_tokens")
-    return {**total, **{k: (total.get(k) or 0) + (usage.get(k) or 0) for k in keys}}
+    summed = {**total, **{k: (total.get(k) or 0) + (usage.get(k) or 0) for k in keys}}
+    # Reasoning models on Azure (Grok) report reasoning tokens apart from output tokens;
+    # token_usage_from counts them, so they're summed too.
+    reasoning = ((total.get("output_token_details") or {}).get("reasoning") or 0) + (
+        (usage.get("output_token_details") or {}).get("reasoning") or 0)
+    if reasoning:
+        summed["output_token_details"] = {**(total.get("output_token_details") or {}), "reasoning": reasoning}
+    return summed
 
 
 def _tool_span(name: str):
