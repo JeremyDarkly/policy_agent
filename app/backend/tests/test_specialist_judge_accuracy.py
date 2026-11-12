@@ -157,3 +157,30 @@ def test_existing_prices_are_unchanged():
     assert calculate_model_cost("us.anthropic.claude-sonnet-5", 1000, 1000) == pytest.approx(0.012)
     assert calculate_model_cost("us.meta.llama4-maverick-17b-instruct-v1:0", 1000, 0) == pytest.approx(0.00024)
     assert calculate_model_cost("unknown-model", 1000, 1000) == 0.0
+
+
+# --- judge-parse-error ---------------------------------------------------------
+
+
+class JudgeInvoker:
+    def __init__(self):
+        self.tracker = ConfigTracker(None, None, track_data_for(
+            "ai-judge-accuracy", {"model": {"name": "gemini-4-carbon"}}, {"variationKey": "gemini-4-carbon"}))
+        self.user_context = object()
+
+
+@pytest.mark.parametrize("parsed, expected", [({"score": 0.9}, 0.0), ({"score": 0.0, "error": True}, 1.0)])
+def test_parse_result_is_sent_on_the_judges_variation(events, parsed, expected):
+    judge._send_parse_result(JudgeInvoker(), parsed)
+    [(event, data, value)] = events
+    assert event == judge.JUDGE_PARSE_ERROR_EVENT and value == expected
+    assert data["configKey"] == "ai-judge-accuracy" and data["variationKey"] == "gemini-4-carbon"
+
+
+def test_parse_result_needs_a_tracker(events):
+    class NoTracker:
+        tracker = None
+        user_context = object()
+
+    judge._send_parse_result(NoTracker(), {"score": 0.9})
+    assert events == []

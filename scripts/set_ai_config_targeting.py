@@ -33,6 +33,12 @@ customer login the old one. The rule goes after existing rules, so on
 branch_agent the Azure demo rule (which also matches the employee login) still
 wins; --tools-demo-first puts it ahead of them instead.
 
+With --gemini-demo it adds a rule to ai-judge-accuracy and ai-judge-coherence
+that serves their `gemini-4-carbon` variation (issue #79) to contexts whose
+`judge_model` is `gemini-4-carbon`. Only evals/run_judge_pilot.py
+--judge-model gemini-4-carbon sets that attribute, so real chats keep the
+default judges.
+
 --rules-only adds the demo rules without moving any fallthrough, for a config
 whose default rule was deliberately moved off `Default` (for example by a
 guarded rollout).
@@ -44,6 +50,7 @@ Usage:
     python scripts/set_ai_config_targeting.py --azure-demo
     python scripts/set_ai_config_targeting.py --config branch_agent --azure-demo   # touch branch_agent only
     python scripts/set_ai_config_targeting.py --config scheduler_agent --config branch_agent --tools-demo --rules-only
+    python scripts/set_ai_config_targeting.py --config ai-judge-accuracy --config ai-judge-coherence --gemini-demo --rules-only
 
 LAUNCHDARKLY_API_HOST selects a non-production instance (default
 https://app.launchdarkly.com).
@@ -134,6 +141,19 @@ def request(method: str, url: str, token: str, body: dict | None = None) -> dict
     except urllib.error.HTTPError as err:
         detail = err.read().decode(errors="replace")[:300]
         raise SystemExit(f"  {method} {url}\n  HTTP {err.code}: {detail}") from err
+
+
+# --gemini-demo: the judges serve gemini-4-carbon to contexts the judge pilot marks.
+GEMINI_DEMO_CONFIGS = ["ai-judge-accuracy", "ai-judge-coherence"]
+GEMINI_DEMO_VARIATION_KEY = "gemini-4-carbon"
+GEMINI_DEMO_RULE_DESCRIPTION = "Gemini 4 Carbon judge pilot: judge_model = gemini-4-carbon"
+GEMINI_DEMO_CLAUSE = {
+    "contextKind": "user",
+    "attribute": "judge_model",
+    "op": "in",
+    "values": ["gemini-4-carbon"],
+    "negate": False,
+}
 
 
 def variation_key(variation: dict) -> str | None:
@@ -228,6 +248,46 @@ def add_tools_demo_rule(api_base: str, project: str, environment: str, token: st
     return True
 
 
+def is_gemini_demo_clause(clause: dict) -> bool:
+    return all(clause.get(field) == GEMINI_DEMO_CLAUSE[field] for field in ("attribute", "op", "values", "negate"))
+
+
+def add_gemini_demo_rule(api_base: str, project: str, environment: str, token: str, key: str,
+                         dry_run: bool) -> bool:
+    """Add the rule that serves gemini-4-carbon to judge_model = gemini-4-carbon on one judge. False on failure."""
+    url = f"{api_base}/projects/{project}/ai-configs/{key}/targeting"
+    targeting = request("GET", url, token)
+
+    variation = next((v for v in targeting.get("variations", []) if variation_key(v) == GEMINI_DEMO_VARIATION_KEY), None)
+    if variation is None:
+        print(f"  {key:<20} SKIP  no '{GEMINI_DEMO_VARIATION_KEY}' variation: run terraform apply")
+        return False
+
+    env_state = targeting.get("environments", {}).get(environment)
+    if env_state is None:
+        print(f"  {key:<20} SKIP  environment '{environment}' not found on this config")
+        return False
+
+    for rule in env_state.get("rules", []):
+        if any(is_gemini_demo_clause(clause) for clause in rule.get("clauses", [])):
+            print(f"  {key:<20} ok    Gemini demo rule already present")
+            return True
+
+    if dry_run:
+        print(f"  {key:<20} would add rule: judge_model is gemini-4-carbon -> {GEMINI_DEMO_VARIATION_KEY}")
+        return True
+
+    instruction = {
+        "kind": "addRule",
+        "description": GEMINI_DEMO_RULE_DESCRIPTION,
+        "clauses": [GEMINI_DEMO_CLAUSE],
+        "variationId": variation["_id"],
+    }
+    request("PATCH", url, token, {"environmentKey": environment, "instructions": [instruction]})
+    print(f"  {key:<20} added rule: judge_model is gemini-4-carbon -> {GEMINI_DEMO_VARIATION_KEY}")
+    return True
+
+
 def request_status(method: str, url: str, token: str, body: dict | None = None) -> tuple[int, str]:
     """A plain JSON request that returns (HTTP status, response body) instead of exiting on an error."""
     data = json.dumps(body).encode() if body is not None else None
@@ -266,6 +326,11 @@ def main() -> int:
         "--tools-demo-first",
         action="store_true",
         help="with --tools-demo, put the rule ahead of existing rules (on branch_agent, the Azure demo rule)",
+    )
+    parser.add_argument(
+        "--gemini-demo",
+        action="store_true",
+        help="also serve the judges' gemini-4-carbon variation to contexts with judge_model = gemini-4-carbon",
     )
     parser.add_argument(
         "--rules-only",
@@ -351,6 +416,11 @@ def main() -> int:
             if key in config_keys and not add_tools_demo_rule(
                 api_base, project, environment, token, key, args.tools_demo_first, args.dry_run
             ):
+                failed += 1
+
+    if args.gemini_demo:
+        for key in GEMINI_DEMO_CONFIGS:
+            if key in config_keys and not add_gemini_demo_rule(api_base, project, environment, token, key, args.dry_run):
                 failed += 1
 
     verb = "would change" if args.dry_run else "changed"

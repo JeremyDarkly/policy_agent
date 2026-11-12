@@ -76,6 +76,9 @@ jobs:
       # Unset, those variations error, since the SDK would call OpenAI instead.
       AZURE_FOUNDRY_ENDPOINT: ${{ secrets.AZURE_FOUNDRY_ENDPOINT }}
       AZURE_FOUNDRY_API_KEY: ${{ secrets.AZURE_FOUNDRY_API_KEY }}
+      # Gemini API, for variations on the Gemini model config (account_agent's gemini-4-carbon).
+      # Unset, those variations error.
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
       # Whose targeting decides which variation is "served".
       LD_ENVIRONMENT: ${{ secrets.LD_ENVIRONMENT }}
     steps:
