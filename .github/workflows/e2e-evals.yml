@@ -107,6 +107,10 @@ jobs:
           LAUNCHDARKLY_OBSERVABILITY_BACKEND_URL: ${{ secrets.LAUNCHDARKLY_OBSERVABILITY_BACKEND_URL }}
           LLM_PROVIDER: bedrock
           AWS_REGION: us-east-1
+          # For variations served on Azure AI Foundry or Gemini, as in evals.yml.
+          AZURE_FOUNDRY_ENDPOINT: ${{ secrets.AZURE_FOUNDRY_ENDPOINT }}
+          AZURE_FOUNDRY_API_KEY: ${{ secrets.AZURE_FOUNDRY_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           DEMO_USER_NAME: CI Customer
         run: |
           nohup python server.py > "$GITHUB_WORKSPACE/backend.log" 2>&1 &
