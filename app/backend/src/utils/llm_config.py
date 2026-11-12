@@ -3,6 +3,7 @@
 import os
 from functools import lru_cache
 from typing import Any, Optional, Tuple
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from langchain_core.language_models import BaseChatModel
@@ -11,6 +12,26 @@ from .launchdarkly_config import ModelInvoker, get_ld_client
 
 # Load environment variables
 load_dotenv()
+
+# Provider names (normalized: lowercased, text after ":" dropped) that select the Azure AI Foundry client.
+# The model config uses "Azure AI Foundry"; the other spellings are accepted so a hand-made config still works.
+AZURE_PROVIDERS = {"azure ai foundry", "azure", "azure openai", "foundry"}
+
+# Provider names that select the Gemini API. LaunchDarkly's model catalog uses "Gemini" (Gemini.gemini-4-carbon).
+GEMINI_PROVIDERS = {"gemini", "google", "google ai studio"}
+
+
+def azure_foundry_base_url(endpoint: str) -> str:
+    """The v1 OpenAI-compatible base URL for an Azure AI Foundry resource.
+
+    ``AZURE_FOUNDRY_ENDPOINT`` may be the bare resource URL or a full request URL copied from the portal (for
+    example ``https://<resource>.services.ai.azure.com/openai/v1/chat/completions``). Only the scheme and host
+    are kept.
+    """
+    parts = urlsplit(endpoint.strip())
+    if not parts.scheme or not parts.netloc:
+        raise ValueError(f"AZURE_FOUNDRY_ENDPOINT is not a URL: {endpoint!r}")
+    return f"{parts.scheme}://{parts.netloc}/openai/v1/"
 
 
 @lru_cache(maxsize=1)
@@ -141,8 +162,9 @@ def get_model_invoker(
     config_key: str,
     context: Optional[dict[str, Any]] = None,
     skip_span_annotation: bool = False,
-    default_config: Optional[Any] = None,
+    default_config: Optional[dict[str, Any]] = None,
     override_guardrail_enabled: Optional[bool] = None,
+    evaluated: Optional[Tuple[dict[str, Any], Any, Any]] = None,
 ) -> Tuple[ModelInvoker, dict[str, Any]]:
     """Get a ModelInvoker with tracking and full config (including messages) from LaunchDarkly.
 
@@ -150,25 +172,22 @@ def get_model_invoker(
         config_key: The AI config key in LaunchDarkly
         context: User/session context for targeting
         skip_span_annotation: If True, skip all span annotation (for background threads like judges)
-        default_config: Default AIConfig to use if LaunchDarkly is unavailable or flag doesn't exist
+        default_config: Fallback config dict served when the AI Config is missing, disabled or invalid
         override_guardrail_enabled: If provided, override guardrail setting (True=enable, False=disable, None=use config)
+        evaluated: An already-evaluated (config, tracker, ld_context) from
+            ``get_ld_client().get_ai_config``. When given, the AI Config is not
+            evaluated again, so a caller that inspects the config first (the
+            triage node checks for a TypeSafe variation) evaluates it once.
 
     Returns:
         Tuple of (ModelInvoker instance with tracking, full config dict including messages)
     """
-    ld_client = get_ld_client()
-    # Get config once from LaunchDarkly (now returns context too)
-    # Convert AIConfig to dict if provided
-    default_config_dict = None
-    if default_config:
-        # default_config may be a plain dict (already in the shape get_ai_config
-        # expects) or an SDK AIConfig object that needs converting.
-        if isinstance(default_config, dict):
-            default_config_dict = default_config
-        else:
-            default_config_dict = ld_client._ai_config_to_dict(default_config)
-
-    config, tracker, ld_context = ld_client.get_ai_config(config_key, context, default_config_dict)
+    if evaluated is not None:
+        config, tracker, ld_context = evaluated
+    else:
+        ld_client = get_ld_client()
+        # Get config once from LaunchDarkly (now returns context too)
+        config, tracker, ld_context = ld_client.get_ai_config(config_key, context, default_config)
 
     # Create LLM directly from the config (don't call get_llm_from_config which would retrieve again)
     provider = config.get("provider") or "bedrock"
@@ -204,6 +223,8 @@ def get_model_invoker(
             skip_span_annotation=skip_span_annotation,
             variation_key=config.get("_variation", ""),
             provider=provider,
+            # An Azure AI Foundry model ID is a deployment name; the model config says which model it runs
+            expected_model=(model_config.get("custom") or {}).get("baseModel") or "",
         ),
         config,
     )
@@ -276,8 +297,48 @@ def _create_llm_for_provider(
             api_key=api_key,
         )
 
+    elif provider_normalized in AZURE_PROVIDERS:
+        # Azure AI Foundry through its OpenAI-compatible v1 route. This serves OpenAI and non-OpenAI deployments
+        # (Grok, Llama, DeepSeek) with plain ChatOpenAI and needs no api-version. model_name is the deployment name.
+        from langchain_openai import ChatOpenAI
+
+        endpoint = os.getenv("AZURE_FOUNDRY_ENDPOINT")
+        if not endpoint:
+            raise ValueError("AZURE_FOUNDRY_ENDPOINT not set in environment (needed for Azure AI Foundry variations)")
+        api_key = os.getenv("AZURE_FOUNDRY_API_KEY")
+        if not api_key:
+            raise ValueError("AZURE_FOUNDRY_API_KEY not set in environment (needed for Azure AI Foundry variations)")
+
+        return ChatOpenAI(
+            model=model_name,
+            base_url=azure_foundry_base_url(endpoint),
+            api_key=api_key,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream_usage=True,
+        )
+
+    elif provider_normalized in GEMINI_PROVIDERS:
+        # The Gemini API (Google AI Studio). model_name is the API model code, e.g. gemini-4-carbon.
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("GOOGLE_API_KEY not set in environment (needed for Gemini variations)")
+
+        options: dict[str, Any] = {}
+        # Only when the variation sets it, as BedrockConverseLLM does
+        if temperature is not None:
+            options["temperature"] = temperature
+        return ChatGoogleGenerativeAI(
+            model=model_name,
+            google_api_key=api_key,
+            max_output_tokens=max_tokens,
+            **options,
+        )
+
     else:
         raise ValueError(
             f"Unsupported LLM provider: {provider} (normalized: {provider_normalized}). "
-            f"Supported providers: bedrock, openai, anthropic"
+            f"Supported providers: bedrock, openai, anthropic, azure ai foundry, gemini"
         )

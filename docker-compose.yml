@@ -35,6 +35,11 @@ services:
       # API Keys (if using OpenAI/Anthropic directly)
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Azure AI Foundry, for variations whose model config has provider "Azure AI Foundry"
+      AZURE_FOUNDRY_ENDPOINT: ${AZURE_FOUNDRY_ENDPOINT:-}
+      AZURE_FOUNDRY_API_KEY: ${AZURE_FOUNDRY_API_KEY:-}
+      # TypeSafe Jev, for triage_agent's jev-choice variation
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
       # (PYTHONUNBUFFERED / PYTHONDONTWRITEBYTECODE are set in the Dockerfile)
 
     volumes:
@@ -93,6 +98,9 @@ services:
       TF_VAR_target_environment: ${LAUNCHDARKLY_ENVIRONMENT:-test}
       # Empty falls back to the variable's production default
       TF_VAR_launchdarkly_api_host: ${LAUNCHDARKLY_API_HOST:-https://app.launchdarkly.com}
+      # Azure AI Foundry deployment for branch_agent's azure-foundry variation; empty skips it
+      TF_VAR_azure_foundry_branch_deployment: ${AZURE_FOUNDRY_DEPLOYMENT:-}
+      TF_VAR_azure_foundry_branch_base_model: ${AZURE_FOUNDRY_BASE_MODEL:-}
       # State workspace per LaunchDarkly instance (e.g. staging), so a production
       # run can never pick up another instance's state. "default" is production.
       TF_WORKSPACE: ${TF_WORKSPACE:-default}

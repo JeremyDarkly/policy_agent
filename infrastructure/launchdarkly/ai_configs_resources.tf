@@ -195,6 +195,21 @@ resource "launchdarkly_ai_config_variation" "account_agent" {
   ]
 }
 
+# Gemini 4 Carbon variation (issue #79): the default variation's instructions and tools,
+# read from it so they can't drift apart; only the model differs. Nothing serves it.
+# evals/ci_targets.toml lists it, so the CI evals run it on the account dataset next to
+# whatever the default rule serves.
+resource "launchdarkly_ai_config_variation" "account_agent_gemini_4_carbon" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.account_agent.key
+  key              = "gemini-4-carbon"
+  name             = "Gemini 4 Carbon"
+  model_config_key = launchdarkly_model_config.gemini_4_carbon.key
+  state            = "published"
+  instructions     = launchdarkly_ai_config_variation.account_agent.instructions
+  tool_keys        = launchdarkly_ai_config_variation.account_agent.tool_keys
+}
+
 resource "launchdarkly_ai_config" "branch_agent" {
   project_key = var.project_key
   key         = "branch_agent"
@@ -207,6 +222,64 @@ resource "launchdarkly_ai_config" "branch_agent" {
   ]
 }
 
+# branch_agent's variations share instructions and tools, so the Bedrock and Azure AI Foundry
+# variations differ only in their model config.
+locals {
+  branch_agent_instructions = <<-EOT
+      You are an expert {{domain}} branch and ATM locator specialist.
+      ROLE & EXPERTISE:
+      - Expert at helping customers find nearby branches and ATMs
+      - Knowledgeable about branch services, hours, and ATM capabilities
+      - Helpful guide for in-person and self-service banking
+
+      SEARCH PRIORITIES:
+      1. LOCATION
+         - Prioritize geographic proximity to the customer's location
+         - If the customer names a specific place (e.g. "find an ATM in Boston" even though their
+           profile location is San Francisco), treat the customer's stated location as truth
+         - Consider accessibility needs (wheelchair access, drive-up)
+      2. SERVICES
+         - Distinguish full-service branches from ATM-only locations
+         - Note deposit-taking ATMs, cash/coin, notary, safe-deposit, and banker availability
+      3. HOURS & AVAILABILITY
+         - Provide typical lobby and drive-up hours when known
+         - Note holiday closures and 24-hour ATM access
+
+      GUIDANCE:
+      - Be honest when you do not have the customer's exact local branch list; offer to look it up
+        in the ToggleBank app or website, or to connect them with a banker
+      - Never fabricate specific addresses, hours, or ATM IDs you were not given
+      - For deposits, transfers, or account changes, remind the customer these can often be done in
+        the app without visiting a branch
+
+      RESPONSE FORMAT:
+      For each suggested branch or ATM, include (when known):
+      - Name / label
+      - Type (full-service branch or ATM)
+      - Address / area
+      - Key services and hours
+
+      Customer Context:
+      - Name: {{name}}
+      - Account type: {{account_type}}
+      - Location: {{location}}
+      Location Information:
+      {{branch_info}}
+    EOT
+
+  # Appended to the default instructions on the tool-calling variation (issue #72).
+  branch_agent_tools_paragraph = <<-EOT
+
+      TOOLS:
+      - Call find_branches before naming any branch, ATM, address or hours. Use the place the
+        customer asks about, or their profile location if they don't name one.
+      - Describe only the branches and ATMs find_branches returns, with the details it gives.
+      - If it returns not_found, say ToggleBank has no location there and name the cities it
+        does serve. Try a nearby city or the city of a ZIP code once before giving up.
+      - Don't call it for questions that need no location, such as mobile check deposit.
+    EOT
+}
+
 resource "launchdarkly_ai_config_variation" "branch_agent" {
   project_key      = var.project_key
   config_key       = launchdarkly_ai_config.branch_agent.key
@@ -214,57 +287,49 @@ resource "launchdarkly_ai_config_variation" "branch_agent" {
   name             = "Default"
   model_config_key = launchdarkly_model_config.claude_haiku_4_5_branch.key
   state            = "published"
+  instructions     = local.branch_agent_instructions
+  # No tools: this variation answers from the location context (the ToggleHealth tools that
+  # were attached here had no implementation in the backend). See branch_agent_tool_calling.
+  tool_keys = []
+}
 
-  instructions = <<-EOT
-    You are an expert {{domain}} branch and ATM locator specialist.
-    ROLE & EXPERTISE:
-    - Expert at helping customers find nearby branches and ATMs
-    - Knowledgeable about branch services, hours, and ATM capabilities
-    - Helpful guide for in-person and self-service banking
+# Azure AI Foundry variation (issue #67). Created only when an Azure deployment is configured
+# (var.azure_foundry_branch_deployment, from AZURE_FOUNDRY_DEPLOYMENT). Nothing serves it until a
+# targeting rule does: scripts/set_ai_config_targeting.py --azure-demo adds one.
+resource "launchdarkly_ai_config_variation" "branch_agent_azure_foundry" {
+  count = local.azure_foundry_enabled ? 1 : 0
 
-    SEARCH PRIORITIES:
-    1. LOCATION
-       - Prioritize geographic proximity to the customer's location
-       - If the customer names a specific place (e.g. "find an ATM in Boston" even though their
-         profile location is San Francisco), treat the customer's stated location as truth
-       - Consider accessibility needs (wheelchair access, drive-up)
-    2. SERVICES
-       - Distinguish full-service branches from ATM-only locations
-       - Note deposit-taking ATMs, cash/coin, notary, safe-deposit, and banker availability
-    3. HOURS & AVAILABILITY
-       - Provide typical lobby and drive-up hours when known
-       - Note holiday closures and 24-hour ATM access
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.branch_agent.key
+  key              = "azure-foundry"
+  name             = "Azure AI Foundry"
+  model_config_key = launchdarkly_model_config.azure_foundry_branch[0].key
+  state            = "published"
+  # Tools on Azure too (issue #72): the TOOLS paragraph and find_branches, as on tool-calling,
+  # so the employee login (which the Azure demo rule matches) shows Azure calling the tool.
+  # The backend runs the tool loop on ChatOpenAI, through bind_tools.
+  instructions = "${local.branch_agent_instructions}${local.branch_agent_tools_paragraph}"
+  tool_keys    = [launchdarkly_ai_tool.find_branches.key]
 
-    GUIDANCE:
-    - Be honest when you do not have the customer's exact local branch list; offer to look it up
-      in the ToggleBank app or website, or to connect them with a banker
-    - Never fabricate specific addresses, hours, or ATM IDs you were not given
-    - For deposits, transfers, or account changes, remind the customer these can often be done in
-      the app without visiting a branch
+  # A plan without the Azure variables fails here instead of deleting a variation that
+  # targeting may be serving. See launchdarkly_model_config.azure_foundry_branch.
+  lifecycle {
+    prevent_destroy = true
+  }
+}
 
-    RESPONSE FORMAT:
-    For each suggested branch or ATM, include (when known):
-    - Name / label
-    - Type (full-service branch or ATM)
-    - Address / area
-    - Key services and hours
-
-    Customer Context:
-    - Name: {{name}}
-    - Account type: {{account_type}}
-    - Location: {{location}}
-    Location Information:
-    {{branch_info}}
-  EOT
-
-  tool_keys = [
-    launchdarkly_ai_tool.check_google_calendar_availability.key,
-    launchdarkly_ai_tool.get_provider_ratings_reviews.key,
-    launchdarkly_ai_tool.get_provider_schedule_details.key,
-    launchdarkly_ai_tool.search_snowflake_provider_directory.key,
-    launchdarkly_ai_tool.verify_network_status.key,
-    launchdarkly_ai_tool.verify_prior_authorization.key,
-  ]
+# Tool-calling variation (issue #72): the model looks branches up with find_branches. The
+# backend runs the tool loop for it (app/backend/src/utils/tool_loop.py). Nothing serves it
+# until a targeting rule does: scripts/set_ai_config_targeting.py --tools-demo adds one.
+resource "launchdarkly_ai_config_variation" "branch_agent_tool_calling" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.branch_agent.key
+  key              = "tool-calling"
+  name             = "Tool calling"
+  model_config_key = launchdarkly_model_config.claude_haiku_4_5_branch.key
+  state            = "published"
+  instructions     = "${local.branch_agent_instructions}${local.branch_agent_tools_paragraph}"
+  tool_keys        = [launchdarkly_ai_tool.find_branches.key]
 }
 
 resource "launchdarkly_ai_config" "scheduler_agent" {
@@ -278,15 +343,9 @@ resource "launchdarkly_ai_config" "scheduler_agent" {
   ]
 }
 
-resource "launchdarkly_ai_config_variation" "scheduler_agent" {
-  project_key      = var.project_key
-  config_key       = launchdarkly_ai_config.scheduler_agent.key
-  key              = "default"
-  name             = "Default"
-  model_config_key = launchdarkly_model_config.nova_pro.key
-  state            = "published"
-
-  instructions = chomp(<<-EOT
+# scheduler_agent's variations share these instructions; tool-calling adds the TOOLS paragraph.
+locals {
+  scheduler_agent_instructions = chomp(<<-EOT
     You are a professional banker-scheduling specialist for {{domain}} customer support.
     ROLE & EXPERTISE:
     - Expert at handling complex or sensitive customer situations
@@ -365,13 +424,42 @@ resource "launchdarkly_ai_config_variation" "scheduler_agent" {
   EOT
   )
 
-  tool_keys = [
-    launchdarkly_ai_tool.book_calendly_appointment.key,
-    launchdarkly_ai_tool.cancel_or_reschedule_appointment.key,
-    launchdarkly_ai_tool.check_google_calendar_availability.key,
-    launchdarkly_ai_tool.get_provider_schedule_details.key,
-    launchdarkly_ai_tool.send_twilio_appointment_reminder.key,
-  ]
+  scheduler_agent_tools_paragraph = <<-EOT
+
+    TOOLS:
+    - Call get_available_slots before offering any appointment time. Offer only the slots it
+      returns, with their slot IDs, and never make up a time or an ID.
+    - Use days_ahead to match the request: 1 or 2 for "tomorrow", 7 for "this week".
+    - Don't call it when the customer doesn't want an appointment or is only saying goodbye.
+  EOT
+}
+
+resource "launchdarkly_ai_config_variation" "scheduler_agent" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.scheduler_agent.key
+  key              = "default"
+  name             = "Default"
+  model_config_key = launchdarkly_model_config.nova_pro.key
+  state            = "published"
+  instructions     = local.scheduler_agent_instructions
+
+  # No tools: the backend prefetches the slots into the context (the ToggleHealth tools that
+  # were attached here had no implementation in the backend). See scheduler_agent_tool_calling.
+  tool_keys = []
+}
+
+# Tool-calling variation (issue #72): the model fetches slots with get_available_slots
+# instead of reading prefetched ones. Nova Pro, like default. Nothing serves it until a
+# targeting rule does: scripts/set_ai_config_targeting.py --tools-demo adds one.
+resource "launchdarkly_ai_config_variation" "scheduler_agent_tool_calling" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.scheduler_agent.key
+  key              = "tool-calling"
+  name             = "Tool calling"
+  model_config_key = launchdarkly_model_config.nova_pro.key
+  state            = "published"
+  instructions     = "${local.scheduler_agent_instructions}\n${local.scheduler_agent_tools_paragraph}"
+  tool_keys        = [launchdarkly_ai_tool.get_available_slots.key]
 }
 
 resource "launchdarkly_ai_config" "brand_agent" {
@@ -398,7 +486,7 @@ resource "launchdarkly_ai_config_variation" "brand_agent" {
 
       You are {{domain}}'s brand voice specialist, responsible for transforming specialist responses into polished, customer-facing communications.
 
- 
+
       BRAND VOICE:
       - **Friendly & Approachable**: Warm, conversational tone (not corporate or stiff)
       - **Empathetic**: Acknowledge concerns, show understanding of customer needs
@@ -603,6 +691,33 @@ resource "launchdarkly_ai_config_variation" "ai_judge_coherence" {
   tool_keys = []
 }
 
+# Gemini 4 Carbon judge variations (issue #79). The same messages as each judge's default
+# variation, read from it so the rubrics can't drift apart; only the model differs. Nothing
+# serves them until a rule does: scripts/set_ai_config_targeting.py --gemini-demo serves
+# them to contexts with judge_model = "gemini-4-carbon", which only
+# evals/run_judge_pilot.py --judge-model gemini-4-carbon sets.
+resource "launchdarkly_ai_config_variation" "ai_judge_accuracy_gemini_4_carbon" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.ai_judge_accuracy.key
+  key              = "gemini-4-carbon"
+  name             = "Gemini 4 Carbon"
+  model_config_key = launchdarkly_model_config.gemini_4_carbon.key
+  state            = "published"
+  messages         = launchdarkly_ai_config_variation.ai_judge_accuracy.messages
+  tool_keys        = []
+}
+
+resource "launchdarkly_ai_config_variation" "ai_judge_coherence_gemini_4_carbon" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.ai_judge_coherence.key
+  key              = "gemini-4-carbon"
+  name             = "Gemini 4 Carbon"
+  model_config_key = launchdarkly_model_config.gemini_4_carbon.key
+  state            = "published"
+  messages         = launchdarkly_ai_config_variation.ai_judge_coherence.messages
+  tool_keys        = []
+}
+
 # Offline judges for evals/ci_eval.py. Same rubrics and models as the two online
 # judges above, but they read the SDK's offline-eval variables instead of the
 # names the app fills in at runtime: {{response_to_evaluate}} (the generated
@@ -762,6 +877,88 @@ resource "launchdarkly_ai_config_variation" "ci_judge_coherence" {
   tool_keys = []
 }
 
+# Offline tool-use judge for evals/ci_eval.py (issue #72). It grades the tool
+# trajectory, which the eval runner puts in {{message_history}}: the tools the
+# assistant could call, each call with its arguments and result or error, and the
+# answer. ci_eval.py runs it only on variations that attach tools, with the row's
+# expected tools as {{ground_truth_context}}.
+
+resource "launchdarkly_ai_config" "ci_judge_tool_use" {
+  project_key = var.project_key
+  key         = "ci-judge-tool-use"
+  name        = "CI Judge: Tool use"
+  mode        = "judge"
+
+  evaluation_metric_key = "$ld:ai:judge:ci-tool-use"
+  # See ai_judge_accuracy: pin is_inverted to dodge the provider's
+  # null-vs-false "inconsistent result after apply" bug.
+  is_inverted = false
+  description = "Offline judge for CI evals: scores whether the agent called the right tools with the right arguments and used what they returned (typical threshold 0.8)."
+  tags = [
+    "demo",
+    "ci-evals",
+  ]
+}
+
+resource "launchdarkly_ai_config_variation" "ci_judge_tool_use" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.ci_judge_tool_use.key
+  key              = "default"
+  name             = "Default"
+  model_config_key = launchdarkly_model_config.claude_sonnet_5.key
+  state            = "published"
+
+  messages = [
+    {
+      role = "system"
+
+      content = <<-EOT
+      You are grading a bank assistant's TOOL USE, not its prose.
+
+      The message history shows the customer's request, the tools the assistant
+      could call, the calls it made with their arguments and each result or
+      error, and its final answer.
+
+      Grade only against the tools listed as available. Do not penalise the
+      assistant for not calling a tool that is not listed, and do not expect a
+      tool that does not exist.
+
+      Score 1.0 when the tool use was right for the request. That INCLUDES
+      calling no tool when the request did not need one: an unused tool is not
+      a mistake.
+
+      Score 0.0 when the assistant needed a tool and did not call it, called the
+      wrong tool, passed arguments the request does not support, offered
+      appointment times, slot IDs or branch details that no tool returned,
+      ignored what a tool returned, or repeated a failing call without adapting.
+
+      Score in between for partial credit.
+
+      Expected tool use for this request (a guide, not a script; another
+      reasonable trajectory can still score 1.0):
+      {{ground_truth_context}}
+
+      Return ONLY valid JSON:
+      {
+          "score": <float 0.0-1.0>,
+          "reasoning": "<2-3 sentences citing the calls, their arguments and results>",
+          "issues": ["<specific tool-use problems>", "<or empty list if none>"]
+      }
+    EOT
+    },
+    {
+      role    = "assistant"
+      content = "MESSAGE HISTORY:\n{{message_history}}"
+    },
+    {
+      role    = "user"
+      content = "RESPONSE TO EVALUATE:\n{{response_to_evaluate}}"
+    },
+  ]
+
+  tool_keys = []
+}
+
 # Keyed maps of the explicit resources above, consumed by outputs.tf.
 locals {
   ai_config_resources = {
@@ -775,8 +972,11 @@ locals {
       launchdarkly_ai_config.ai_judge_coherence,
       launchdarkly_ai_config.ci_judge_accuracy,
       launchdarkly_ai_config.ci_judge_coherence,
+      launchdarkly_ai_config.ci_judge_tool_use,
     ] : r.key => r
   }
+  # One variation per config (keyed by config key), so the second variations
+  # (branch_agent_azure_foundry and the two *_tool_calling ones) aren't listed.
   ai_config_variation_resources = {
     for r in [
       launchdarkly_ai_config_variation.triage_agent,
@@ -788,6 +988,7 @@ locals {
       launchdarkly_ai_config_variation.ai_judge_coherence,
       launchdarkly_ai_config_variation.ci_judge_accuracy,
       launchdarkly_ai_config_variation.ci_judge_coherence,
+      launchdarkly_ai_config_variation.ci_judge_tool_use,
     ] : r.config_key => r
   }
 }

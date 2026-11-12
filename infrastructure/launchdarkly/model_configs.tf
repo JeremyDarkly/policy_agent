@@ -87,16 +87,81 @@ resource "launchdarkly_model_config" "claude_sonnet_4" {
   tags = ["managed-by-terraform"]
 }
 
-# Keyed map of the model configs above, consumed by outputs.tf.
+# Gemini 4 Carbon on the Gemini API (issue #79), for the judges' and account_agent's
+# gemini-4-carbon variations. The backend picks ChatGoogleGenerativeAI from the "Gemini"
+# provider (GEMINI_PROVIDERS in app/backend/src/utils/llm_config.py) and needs GOOGLE_API_KEY.
+# Not affected by model_override, which is a Bedrock model ID.
+# max_tokens: Carbon thinks before answering, and its reasoning tokens count against the
+# limit (about 350-510 on short prompts, measured 2026-11-12); the backend default is 2000.
+# Costs are the list price, $4 / $20 per 1M tokens, which applies from 2026-12-01 (the
+# introductory $2 / $10 ends on 2026-11-30), so Monitoring doesn't understate the cost.
+resource "launchdarkly_model_config" "gemini_4_carbon" {
+  project_key    = var.project_key
+  key            = "gemini-4-carbon"
+  name           = "Gemini 4 Carbon"
+  model_id       = "gemini-4-carbon"
+  model_provider = "Gemini"
+
+  cost_per_input_token  = 0.000004
+  cost_per_output_token = 0.00002
+
+  params = jsonencode({
+    max_tokens = 8000
+  })
+
+  tags = ["managed-by-terraform"]
+}
+
+# Azure AI Foundry deployment for branch_agent's azure-foundry variation (issue #67).
+# The global model catalog has no Azure provider, so this is a project model config with a
+# free-text provider. The backend picks its Azure client from that provider string
+# (AZURE_PROVIDERS in app/backend/src/utils/llm_config.py). model_id is the deployment name;
+# baseModel is the model the deployment runs, which ai-model-mismatch compares the served
+# model with. Not affected by model_override. No costs: the Monitoring tab shows none (#69).
+resource "launchdarkly_model_config" "azure_foundry_branch" {
+  count = local.azure_foundry_enabled ? 1 : 0
+
+  project_key    = var.project_key
+  key            = "azure-foundry-branch"
+  name           = "Azure AI Foundry (Branch)"
+  model_id       = var.azure_foundry_branch_deployment
+  model_provider = "Azure AI Foundry"
+
+  custom_parameters = local.azure_foundry_base_model == "" ? null : jsonencode({
+    baseModel = local.azure_foundry_base_model
+  })
+
+  params = jsonencode({
+    temperature = 0.1
+  })
+
+  tags = ["managed-by-terraform"]
+
+  # Once created, an empty AZURE_FOUNDRY_DEPLOYMENT (for example, a run without the Azure
+  # variables loaded) would plan to delete this config and the azure-foundry variation, even
+  # while targeting serves that variation. prevent_destroy makes that plan fail instead.
+  # To remove the Azure resources on purpose, see "Removing the Azure resources" in the README.
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 locals {
+  # Null and "" both mean unset. coalesce() can't be used here: it errors when every
+  # argument is null or "", which is what docker-compose passes for an unset env var.
+  azure_foundry_enabled    = trimspace(var.azure_foundry_branch_deployment == null ? "" : var.azure_foundry_branch_deployment) != ""
+  azure_foundry_base_model = trimspace(var.azure_foundry_branch_base_model == null ? "" : var.azure_foundry_branch_base_model)
+
+  # Keyed map of the model configs above, consumed by outputs.tf.
   model_config_resources = {
-    for r in [
+    for r in concat([
       launchdarkly_model_config.claude_sonnet_5,
       launchdarkly_model_config.llama_3_1_70b_accounts,
       launchdarkly_model_config.claude_haiku_4_5_branch,
       launchdarkly_model_config.nova_pro,
       launchdarkly_model_config.claude_haiku_4_5_brand_voice,
       launchdarkly_model_config.claude_sonnet_4,
-    ] : r.key => r
+      launchdarkly_model_config.gemini_4_carbon,
+    ], launchdarkly_model_config.azure_foundry_branch) : r.key => r
   }
 }

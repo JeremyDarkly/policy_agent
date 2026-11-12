@@ -10,11 +10,22 @@ for the same user, from the row's expected specialist.
 and prints a comparison, without sending any events. Use it to check the
 variations before spending experiment traffic.
 
+The non-pilot mode needs no experiment: it only needs triage_agent to be
+evaluated for each user, so it also drives a guarded rollout's guardrails.
+
+A variation on a TypeSafe model config (jev-choice) routes with Jev instead of
+an LLM and needs TYPESAFE_API_KEY. --fault replaces that key with a bad one for
+the run, so every Jev call fails, escalates and sends triage-error = 1: use it
+to show a guarded rollout rolling back on triage-error-rate.
+
 Usage (from the repo root; needs AWS credentials for Bedrock):
     uv run --no-project --with-requirements app/backend/requirements.txt \\
         python evals/run_triage_experiment.py --env-file .env.staging-org --pilot
     uv run --no-project --with-requirements app/backend/requirements.txt \\
         python evals/run_triage_experiment.py --env-file .env.staging-org --users 600
+    uv run --no-project --with-requirements app/backend/requirements.txt \\
+        python evals/run_triage_experiment.py --env-file .env.staging-org --pilot \\
+        --variations default,haiku-current-prompt,jev-choice --show-misses
 """
 
 from __future__ import annotations
@@ -61,16 +72,16 @@ def init_ld(offline: bool) -> None:
 
 
 def capture_served_variation(triage_router) -> None:
-    """Record which variation each call was served, per thread."""
-    original = triage_router.get_model_invoker
+    """Record which variation each call was served, and its LD context, per thread."""
+    original = triage_router._evaluate_triage_config
 
-    def wrapped(*args, **kwargs):
-        invoker, config = original(*args, **kwargs)
+    def wrapped(user_context):
+        config, tracker, ld_context = original(user_context)
         _served.variation = config.get("_variation", "")
-        _served.invoker = invoker
-        return invoker, config
+        _served.ld_context = ld_context
+        return config, tracker, ld_context
 
-    triage_router.get_model_invoker = wrapped
+    triage_router._evaluate_triage_config = wrapped
 
 
 def pin_variation(triage_router, variation: dict, model_config: dict) -> None:
@@ -85,6 +96,17 @@ def pin_variation(triage_router, variation: dict, model_config: dict) -> None:
         "model": {"name": model_config["id"], "parameters": params},
         "provider": model_config.get("provider", "Bedrock"),
     }
+    custom = (variation.get("model") or {}).get("custom")
+    if custom:
+        config["model"]["custom"] = custom
+
+    def fake_evaluate(user_context):
+        _served.variation = variation["key"]
+        return config, NoOpTracker(), None
+
+    triage_router._evaluate_triage_config = fake_evaluate
+    if triage_router.is_jev_config(config):
+        return  # Jev is called over HTTP; there is no LLM to build
 
     def fake_get_model_invoker(config_key, context=None, **_):
         llm = _create_llm_for_provider(
@@ -127,7 +149,7 @@ def run_one(triage_router, row: dict, user_key: str) -> dict:
     return {
         "user_key": user_key,
         "variation": getattr(_served, "variation", ""),
-        "invoker": getattr(_served, "invoker", None),
+        "ld_context": getattr(_served, "ld_context", None),
         "input": row["input"],
         "difficulty": row["metadata"].get("difficulty", ""),
         "expected": expected,
@@ -137,6 +159,7 @@ def run_one(triage_router, row: dict, user_key: str) -> dict:
         "duration_ms": data["duration_ms"],
         "tokens": data["tokens"],
         "model": data["model"],
+        "confidence": data["confidence"],
     }
 
 
@@ -158,10 +181,16 @@ def summarize(results: list[dict]) -> None:
             f"{variation:<24}{len(rows):>5}"
             f"{sum(r['correct'] for r in rows) / len(rows):>8.0%}"
             f"{(sum(r['correct'] for r in hard) / len(hard)) if hard else 0:>10.0%}"
-            f"{sum(costs) / len(costs):>9.3f}"
+            f"{sum(costs) / len(costs):>9.4f}"
             f"{latencies[len(latencies) // 2]:>9}"
             f"{sum(r['escalated'] for r in rows) / len(rows):>8.0%}"
         )
+    for variation, rows in sorted(groups.items()):
+        if "jev" not in rows[0]["model"].lower():
+            continue
+        conf = sorted(float(r["confidence"]) for r in rows)
+        q = [conf[min(len(conf) - 1, int(p * len(conf)))] for p in (0.0, 0.25, 0.5, 0.75)] + [conf[-1]]
+        print(f"\n{variation} confidence (min / q1 / median / q3 / max): " + " / ".join(f"{v:.2f}" for v in q))
     errors = [r for r in results if "error" in r]
     if errors:
         print(f"\n{len(errors)} calls failed; first error: {errors[0]['error'][:300]}")
@@ -177,8 +206,13 @@ def main() -> None:
     parser.add_argument("--run-id", default=time.strftime("%m%d%H%M"), help="prefix that keeps user keys unique")
     parser.add_argument("--out", help="write per-call results as JSONL here")
     parser.add_argument("--show-misses", action="store_true")
+    parser.add_argument(
+        "--fault", action="store_true", help="use a bad TYPESAFE_API_KEY for this run, so Jev triage calls fail"
+    )
     args = parser.parse_args()
 
+    if args.fault:
+        os.environ["TYPESAFE_API_KEY"] = "invalid-key-for-fault-run"
     load_env(args.env_file)
     os.environ["LAUNCHDARKLY_ENABLED"] = "true"
     rows = [json.loads(line) for line in DATASET.read_text().splitlines() if line.strip()]
@@ -232,7 +266,7 @@ def main() -> None:
                         sys.exit(f"Triage was served '{r['variation']}', not a real variation; stopping.")
                     client.track(
                         "triage-routed-correctly",
-                        r["invoker"].user_context,
+                        r["ld_context"],
                         metric_value=1.0 if r["correct"] else 0.0,
                     )
                 results.append(r)
@@ -244,7 +278,7 @@ def main() -> None:
 
     quiet.__exit__(None, None, None)
     for r in results:
-        r.pop("invoker", None)
+        r.pop("ld_context", None)
     summarize(results)
     if args.show_misses:
         print("\nMisses:")

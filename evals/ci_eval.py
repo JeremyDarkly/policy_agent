@@ -5,6 +5,11 @@ prompt from LaunchDarkly, generates an answer for every row of the target's
 stored dataset on Bedrock, and runs the target's scorers and judges. The app
 doesn't need to be running.
 
+A variation that attaches Library tools the backend implements
+(app/backend/src/tools/registry.py) is run with those tools, backed by the
+backend's own implementations, and with the target's [<config>.tools] dataset
+and judges, so its tool trajectory is graded. Other variations run with no tools.
+
 Results are advisory: a failed verdict is reported, not raised. The script
 exits non-zero only when a run can't be completed (missing credentials or
 dataset, API errors). It writes a Markdown summary to --summary-file, which
@@ -28,6 +33,7 @@ import sys
 import time
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -55,6 +61,7 @@ from launchdarkly_ai_server import (
 )
 
 EVALS_DIR = Path(__file__).resolve().parent
+BACKEND_DIR = EVALS_DIR.parent / "app" / "backend"
 
 # The app's .env uses LAUNCHDARKLY_* names; the AI SDK reads LD_* names.
 ENV_MAP = {
@@ -67,6 +74,9 @@ ENV_MAP = {
     "LD_STREAM_URI": "LAUNCHDARKLY_STREAM_URI",
     "LD_EVENTS_URI": "LAUNCHDARKLY_EVENTS_URI",
     "LD_ENVIRONMENT": "LAUNCHDARKLY_ENVIRONMENT",
+    # Where the SDK's otel extra sends the run's spans (one per generation and tool call).
+    # Unset, it sends them to LaunchDarkly production.
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "LAUNCHDARKLY_OTLP_HTTP_ENDPOINT",
 }
 
 
@@ -94,6 +104,8 @@ class TargetResult:
     context_errors: list[str] = field(default_factory=list)
     # Set when there was nothing to evaluate, with the reason.
     skipped: str = ""
+    # Library tool keys the run gave the model (the variation's tools the backend implements).
+    tools: list[str] = field(default_factory=list)
     key: str = ""
     passed: bool | None = None
     url: str = ""
@@ -305,6 +317,52 @@ def ld_get(path: str) -> Any:
         raise EvaluationsError(f"LaunchDarkly API GET {path} failed with {error.code}: {body}") from None
 
 
+def load_tool_registry() -> dict[str, Any]:
+    """The backend's TOOLS (Library tool key -> implementation).
+
+    The tool modules use only the standard library, so CI needs none of the
+    backend's dependencies.
+    """
+    if str(BACKEND_DIR) not in sys.path:
+        sys.path.insert(0, str(BACKEND_DIR))
+    from src.tools.registry import TOOLS
+
+    return TOOLS
+
+
+def eval_implementation(implementation: Any) -> Any:
+    """Adapt a registry implementation to the eval runner.
+
+    The runner calls a tool with one dict of arguments; the registry takes them
+    as keyword arguments. A bad argument becomes an {"error"} result the model
+    sees, as in the backend's tool loop, instead of failing the row.
+    """
+
+    def call(arguments: dict[str, Any] | None = None) -> Any:
+        try:
+            return implementation(**(arguments or {}))
+        except (TypeError, ValueError) as error:
+            return {"error": str(error)}
+
+    return call
+
+
+def attached_tools(evals: Any, config: str, variation: str) -> list[str]:
+    """The Library tool keys the variation attaches."""
+    data = ld_get(f"projects/{evals.project_key}/ai-configs/{config}")
+    for v in data.get("variations") or []:
+        if v.get("key") == variation:
+            return [t["key"] for t in v.get("tools") or [] if t.get("key")]
+    raise EvaluationsError(f"variation {variation!r} not found in {config}")
+
+
+def target_for_tools(target: dict[str, Any], tool_keys: list[str]) -> dict[str, Any]:
+    """The target's [<config>.tools] settings layered on its own, for a variation with tools."""
+    if not tool_keys or "tools" not in target:
+        return target
+    return {**target, **target["tools"]}
+
+
 def judge_lookup(evals: Any, target: dict[str, Any]) -> dict[str, JudgeInfo]:
     """evaluationMetricKey -> judge, since a judge call's config carries only the metric key."""
     lookup = {}
@@ -348,7 +406,80 @@ def recording_handler(
                 )
         return output
 
-    return ProviderHandler(recorded, provides_for=inner.provides_for, capture_content=inner.capture_content)
+    return ProviderHandler(recorded, provides_for=inner.provides_for, capture_content=inner.capture_content,
+                           providers=inner.providers)
+
+
+# The provider name on the Azure AI Foundry model config (infrastructure/launchdarkly/model_configs.tf).
+AZURE_FOUNDRY_PROVIDERS = ["Azure AI Foundry"]
+
+
+def azure_foundry_base_url(endpoint: str) -> str:
+    """The v1 OpenAI-compatible route of an Azure AI Foundry resource, as the backend builds it
+    (app/backend/src/utils/llm_config.py): only the endpoint's scheme and host are kept."""
+    parts = urllib.parse.urlsplit(endpoint.strip())
+    if not parts.scheme or not parts.netloc:
+        raise ValueError("AZURE_FOUNDRY_ENDPOINT is not a URL")
+    return f"{parts.scheme}://{parts.netloc}/openai/v1/"
+
+
+def azure_foundry_handler() -> ProviderHandler | None:
+    """An agents handler for Azure AI Foundry variations, or None without the Azure variables.
+
+    The SDK's default model for a provider it doesn't know is ChatOpenAI on OpenAI itself, which
+    doesn't have the deployment. This one calls the deployment (the variation's model name) on
+    the resource, as the backend does.
+    """
+    endpoint, api_key = os.getenv("AZURE_FOUNDRY_ENDPOINT"), os.getenv("AZURE_FOUNDRY_API_KEY")
+    if not endpoint or not api_key:
+        return None
+    base_url = azure_foundry_base_url(endpoint)
+
+    def model(config: dict[str, Any]) -> Any:
+        from langchain_openai import ChatOpenAI
+
+        settings = config.get("model") or {}
+        parameters = settings.get("parameters") or {}
+        options: dict[str, Any] = {}
+        if parameters.get("temperature") is not None:
+            options["temperature"] = parameters["temperature"]
+        max_tokens = parameters.get("maxTokens") or parameters.get("max_tokens")
+        if max_tokens:
+            options["max_tokens"] = max_tokens
+        return ChatOpenAI(model=settings.get("name"), base_url=base_url, api_key=api_key, stream_usage=True,
+                          **options)
+
+    return create_langchain_agents_handler(model, providers=AZURE_FOUNDRY_PROVIDERS)
+
+
+# The provider name on the Gemini model config (infrastructure/launchdarkly/model_configs.tf).
+GEMINI_PROVIDERS = ["Gemini"]
+
+
+def gemini_handler() -> ProviderHandler | None:
+    """An agents handler for Gemini variations (gemini-4-carbon), or None without GOOGLE_API_KEY.
+
+    Builds ChatGoogleGenerativeAI as the backend does (app/backend/src/utils/llm_config.py): the
+    variation's model name, max_tokens as max_output_tokens, and temperature only when set.
+    """
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        return None
+
+    def model(config: dict[str, Any]) -> Any:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        settings = config.get("model") or {}
+        parameters = settings.get("parameters") or {}
+        options: dict[str, Any] = {}
+        if parameters.get("temperature") is not None:
+            options["temperature"] = parameters["temperature"]
+        max_tokens = parameters.get("maxTokens") or parameters.get("max_tokens")
+        if max_tokens:
+            options["max_output_tokens"] = max_tokens
+        return ChatGoogleGenerativeAI(model=settings.get("name"), google_api_key=api_key, **options)
+
+    return create_langchain_agents_handler(model, providers=GEMINI_PROVIDERS)
 
 
 
@@ -479,6 +610,11 @@ def select_variations(
     for key in target.get("variations", []):
         if key not in {k for k, _ in selected}:
             selected.append((key, "listed"))
+    excluded = [k for k, _ in selected if k in set(target.get("exclude_variations", []))]
+    if excluded:
+        selected = [(k, source) for k, source in selected if k not in excluded]
+        names = ", ".join(f"`{k}`" for k in excluded)
+        notes.append(f"Not evaluated: {names}, listed in `exclude_variations` in ci_targets.toml.")
 
     # The AI Config targeting API leaves out the variation a rule serves, so read
     # rules from the flag the AI Config is stored as. This only feeds the note below.
@@ -487,7 +623,7 @@ def select_variations(
     except EvaluationsError:
         others = targeted_variations(targeting, environment)
         notes.append("Couldn't read targeting rules, so variations only rules serve may be missing below.")
-    uncovered = sorted(others - {k for k, _ in selected})
+    uncovered = sorted(others - {k for k, _ in selected} - set(excluded))
     if uncovered:
         names = ", ".join(f"`{k}`" for k in uncovered)
         notes.append(f"Targeting rules or individual targets also serve {names}, which no test context reaches. "
@@ -589,7 +725,7 @@ async def run_config(evals: Any, config: str, target: dict[str, Any], args: argp
         result.source = source
         result.contexts = selection.contexts.get(variation, [])
         if index == 0:
-            result.notes = selection.notes
+            result.notes = selection.notes + result.notes
             result.uncovered = selection.uncovered
             result.context_errors = selection.context_errors
         results.append(result)
@@ -600,13 +736,31 @@ async def run_target(
     evals: Any, config: str, target: dict[str, Any], variation: str, args: argparse.Namespace
 ) -> TargetResult:
     global current
+    registry = args.tool_registry
+    try:
+        attached = attached_tools(evals, config, variation)
+    except Exception as error:  # report every target, then exit non-zero
+        return TargetResult(config=config, variation=variation, dataset=dataset_for(target, args),
+                            error=f"reading tools: {type(error).__name__}: {error}")
+    tool_keys = [key for key in attached if key in registry]
+    target = target_for_tools(target, tool_keys)
     dataset = dataset_for(target, args)
-    result = TargetResult(config=config, variation=variation, dataset=dataset)
-    print(f"running {config}/{variation} on dataset {dataset}", flush=True)
+    result = TargetResult(config=config, variation=variation, dataset=dataset, tools=tool_keys)
+    unimplemented = [key for key in attached if key not in registry]
+    if unimplemented:
+        names = ", ".join(f"`{k}`" for k in unimplemented)
+        result.notes.append(f"`{variation}` attaches {names}, which the backend doesn't implement, so the "
+                            "model isn't given them (as in production).")
+    if tool_keys and "tools" not in target:
+        result.notes.append(f"`{variation}` has tools but ci_targets.toml has no `[{config}.tools]`, so its "
+                            "trajectory isn't judged.")
+    print(f"running {config}/{variation} on dataset {dataset}"
+          + (f" with tools {', '.join(tool_keys)}" if tool_keys else ""), flush=True)
     current = result
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     result.key = f"ci-{args.label}-{config}-{variation}-{stamp}".lower()
     try:
+        tools = [await evals.tools.get(key, implementation=eval_implementation(registry[key])) for key in tool_keys]
         judges = judge_lookup(evals, target)
         run = await evals.run(
             key=result.key,
@@ -615,11 +769,15 @@ async def run_target(
             generation=generation_for(target),
             # The agents are agent-mode AI Configs (instructions) and the judges are
             # messages-mode ones; the SDK picks the handler by the config's mode.
+            # The Azure and Gemini handlers are scoped to their providers, so the SDK picks
+            # them over the unscoped agents handler for those variations.
             handlers=[
                 recording_handler(handler, result, judges)
-                for handler in (create_langchain_agents_handler(), create_langchain_messages_handler())
+                for handler in (*args.extra_handlers, create_langchain_agents_handler(),
+                                create_langchain_messages_handler())
             ],
-            tools=[],
+            # Replaces the variation's tools: only the ones the backend implements.
+            tools=tools,
             criteria=criteria_for(target),
             concurrency=args.concurrency,
             poll_timeout_seconds=600,
@@ -843,15 +1001,16 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
     lines = [
         f"### LaunchDarkly {kind} ({mode}, advisory)",
         "",
-        "| AI Config | Variation | Served to | Dataset | Rows passed | vs `main` | Verdict | Run |",
-        "|---|---|---|---|---|---|---|---|",
+        "| AI Config | Variation | Served to | Tools | Dataset | Rows passed | vs `main` | Verdict | Run |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
         variation = f"`{r.variation}`" + (f" ({r.source})" if r.source else "")
         served_to = ", ".join(f"{c['name']} ({c['reason']})" for c in r.contexts) or "–"
+        tools = ", ".join(f"`{t}`" for t in r.tools) or "–"
         if r.error or r.skipped:
             verdict = "error" if r.error else "skipped"
-            lines.append(f"| `{r.config}` | {variation} | {served_to} | `{r.dataset}` | – | – | {verdict} | – |")
+            lines.append(f"| `{r.config}` | {variation} | {served_to} | {tools} | `{r.dataset}` | – | – | {verdict} | – |")
             continue
         s = r.summary
         counts = f"{s['passed']}/{s['total']}" + (f" ({s['error']} errors)" if s["error"] else "")
@@ -864,14 +1023,15 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
         verdict = "passed" if r.passed else "failed"
         run = f"[open]({r.url})" if links else f"`{r.key}`"
         lines.append(
-            f"| `{r.config}` | {variation} | {served_to} | `{r.dataset}` | {counts} | {delta} | {verdict} | {run} |"
+            f"| `{r.config}` | {variation} | {served_to} | {tools} | `{r.dataset}` | {counts} | {delta} | {verdict} | {run} |"
         )
     if any(r.source for r in results):
         lines += ["", "*served*: what the default rule serves in the environment. *context*: what LaunchDarkly "
                   "serves a test context from `[contexts]` in ci_targets.toml. *listed*: from `variations` in "
                   "ci_targets.toml. *chosen*: from `--variation`. *e2e*: whatever the running backend served "
                   "each agent; see the rows below. *Served to*: the test contexts LaunchDarkly "
-                  "serves the variation to, and why."]
+                  "serves the variation to, and why. *Tools*: the Library tools the run gave the model, backed by "
+                  "the backend's implementations."]
     if not links:
         lines += ["", "Find a run in LaunchDarkly under **Evaluations** by the name in the Run column."]
     if compared is False:
@@ -940,7 +1100,8 @@ def start_ld_client(project_key: str, environment: str) -> Any:
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--env-file", help="load credentials from this env file (CI sets them as env vars)")
+    parser.add_argument("--env-file", action="append", default=[],
+                        help="load credentials from this env file; repeatable (CI sets them as env vars)")
     parser.add_argument("--targets", default=str(EVALS_DIR / "ci_targets.toml"))
     parser.add_argument("--config", action="append", default=[], help="AI Config key to run; repeatable (default: all)")
     parser.add_argument(
@@ -971,8 +1132,8 @@ async def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.env_file:
-        load_dotenv(Path(args.env_file))
+    for env_file in args.env_file:
+        load_dotenv(Path(env_file))
     for target, source in ENV_MAP.items():
         if not os.getenv(target) and os.getenv(source):
             os.environ[target] = os.environ[source]
@@ -988,6 +1149,8 @@ async def main() -> int:
         return 1
 
     targets, contexts = load_targets(Path(args.targets), args.config, args.e2e)
+    args.tool_registry = load_tool_registry()
+    args.extra_handlers = [h for h in (azure_foundry_handler(), gemini_handler()) if h]
     evals = init_evaluations()
     args.ld_client, args.test_contexts = None, {}
     # The backend resolves its own variations in an e2e run.

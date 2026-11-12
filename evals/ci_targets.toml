@@ -5,12 +5,20 @@
 #   (Library > Datasets > New dataset) with that key. --quick uses quick_dataset.
 # scorers: names of local scorers defined in ci_eval.py (SCORERS).
 # judges: keys of LaunchDarkly judge configs to run on every row.
+# exclude_variations: variation keys never evaluated, even when targeting or a
+#   test context serves them (for variations the eval runner can't call).
 #
 # [e2e] at the end is the end-to-end target: `ci_eval.py --e2e` runs only it
 # against the running backend, and other runs skip it.
 #
-# Tools: the backend doesn't give the model the tools attached to these
-# variations, so ci_eval.py runs every target with no tools, as production does.
+# Tools: a variation is run with the Library tools it attaches that the backend
+# implements (app/backend/src/tools/registry.py), backed by those
+# implementations, as the backend's tool loop runs it. Attached tools the
+# backend doesn't implement aren't given to the model, as in production. For a
+# variation with tools, the target's [<config>.tools] table replaces its
+# dataset, quick_dataset, scorers and judges, so the tool-use judge
+# (ci-judge-tool-use) grades the trajectory only where there is one. Variations
+# without tools keep the target's own settings.
 
 # --- Test contexts -------------------------------------------------------------
 # For each target, ci_eval.py asks LaunchDarkly (with the server SDK) which
@@ -59,6 +67,12 @@ dataset = "triage_routing_dataset"
 quick_dataset = "triage_routing_dataset_quick"
 scorers = ["routed-to-expected-specialist"]
 judges = []
+# jev-choice routes with Jev (TypeSafe's decision model) over its own HTTP API,
+# not an LLM. The AI SDK's eval runner generates through LangChain and drops
+# model.custom, where the variation keeps its Jev question, so it can't run it.
+# Compare it with run_triage_experiment.py --pilot instead. Excluded even when
+# targeting serves it (the demo target, or a guarded rollout of the default rule).
+exclude_variations = ["jev-choice"]
 
 # The specialist and brand voice datasets are built by build_specialist_datasets.py
 # into ci_datasets/. Judges read the row's variables; ground_truth is a template
@@ -67,6 +81,9 @@ judges = []
 [account_agent]
 dataset = "account_agent_dataset"
 quick_dataset = "account_agent_dataset_quick"
+# gemini-4-carbon (issue #79) isn't served by any rule; listing it runs it next to
+# the served variation. It needs GOOGLE_API_KEY (ci_eval.py's Gemini handler).
+variations = ["gemini-4-carbon"]
 judges = [
   { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = "{{account_info}}" },
 ]
@@ -78,11 +95,31 @@ judges = [
   { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = "{{branch_info}}" },
 ]
 
+# For tool-calling (find_branches). The branch details come from the tool, so the
+# accuracy judge's location context isn't the ground truth any more.
+[branch_agent.tools]
+dataset = "branch_agent_tools_dataset"
+quick_dataset = "branch_agent_tools_dataset_quick"
+judges = [
+  { key = "ci-judge-tool-use", threshold = 0.8, ground_truth = "Expected tool calls (an empty list means no tool is needed): {{expected_tools}}" },
+  { key = "ci-judge-coherence", threshold = 0.7 },
+]
+
 [scheduler_agent]
 dataset = "scheduler_agent_dataset"
 quick_dataset = "scheduler_agent_dataset_quick"
 judges = [
   { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = "Available appointment slots (offer only these):\n{{available_slots}}" },
+  { key = "ci-judge-coherence", threshold = 0.7 },
+]
+
+# For tool-calling (get_available_slots). The slots come from the tool in the run,
+# so the tool-use judge checks them against the trajectory, not a stored list.
+[scheduler_agent.tools]
+dataset = "scheduler_agent_tools_dataset"
+quick_dataset = "scheduler_agent_tools_dataset_quick"
+judges = [
+  { key = "ci-judge-tool-use", threshold = 0.8, ground_truth = "Expected tool calls (an empty list means no tool is needed): {{expected_tools}}" },
   { key = "ci-judge-coherence", threshold = 0.7 },
 ]
 

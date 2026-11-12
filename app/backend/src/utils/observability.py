@@ -14,6 +14,7 @@ Usage:
     initialize_observability()  # Call before any LLM imports
 """
 
+import json
 import os
 import logging
 from contextvars import ContextVar
@@ -83,6 +84,38 @@ def bind_conversation_id(conversation_id: str) -> None:
     span = trace.get_current_span()
     if span.is_recording():
         span.set_attribute(CONVERSATION_ID_ATTRIBUTE, conversation_id)
+
+
+# LaunchDarkly's conversation view and its trace review read message content
+# from these attributes. The LangChain instrumentation only writes the older
+# indexed gen_ai.prompt.N / gen_ai.completion.N attributes, so the agent spans
+# carry the messages in this format as well.
+INPUT_MESSAGES_ATTRIBUTE = "gen_ai.input.messages"
+OUTPUT_MESSAGES_ATTRIBUTE = "gen_ai.output.messages"
+
+
+def _text_messages(role: str, text: str) -> str:
+    message: dict = {"role": role, "parts": [{"type": "text", "content": text}]}
+    if role == "assistant":
+        message["finish_reason"] = "stop"
+    return json.dumps([message], ensure_ascii=False)
+
+
+def set_input_message(span, text: str) -> None:
+    """Record the user's message on a span as gen_ai.input.messages."""
+    if text and span.is_recording():
+        span.set_attribute(INPUT_MESSAGES_ATTRIBUTE, _text_messages("user", text))
+
+
+def set_agent_turn(span, agent_name: str, input_text: str, output_text: str) -> None:
+    """Mark a span as one agent turn and record its input and reply."""
+    if not span.is_recording():
+        return
+    span.set_attribute("gen_ai.operation.name", "invoke_agent")
+    span.set_attribute("gen_ai.agent.name", agent_name)
+    set_input_message(span, input_text)
+    if output_text:
+        span.set_attribute(OUTPUT_MESSAGES_ATTRIBUTE, _text_messages("assistant", output_text))
 
 
 def initialize_observability(

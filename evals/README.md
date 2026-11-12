@@ -73,7 +73,7 @@ It imports from [`launchdarkly-ai-python`](https://pypi.org/project/launchdarkly
 internal notebook is pinned to. Customers install from PyPI into any Python 3.12+ environment:
 
 ```sh
-pip install launchdarkly-ai-python launchdarkly-ai-openai-messages launchdarkly-ai-langchain-messages langchain-aws
+pip install launchdarkly-ai-python==1.0.0 launchdarkly-ai-openai-messages==1.0.0 launchdarkly-ai-langchain-messages==1.0.0 langchain-aws
 ```
 
 Build the blank copy to share it. Rerun this after any edit to the `.py`:
@@ -133,6 +133,103 @@ $RUN --users 800                                                              # 
 ```
 
 While the experiment runs, every `triage_agent` evaluation is randomized, including chats in the UI.
+
+### Jev triage
+
+`jev-choice` is a fifth `triage_agent` variation that routes with Jev, TypeSafe's decision model, instead of an LLM.
+It is on model config `TypeSafe.jev-1.14.0`, pinned rather than `jev-latest` so the model can't change during a
+rollout. When it is served, `triage_node` asks Jev one `choice` question over HTTP
+(`app/backend/src/utils/typesafe_client.py`) and maps the answer onto the same `query_type` and `confidence_score`
+the LLM path produces. The question is the variation's content, edited in LaunchDarkly:
+
+| Variation field | Use |
+|---|---|
+| `instructions` | The question's instructions |
+| `model.custom.criteria` | One description per route; the keys are the `query_type` strings |
+| `model.custom.criteria_order` | The order the options are sent in. LaunchDarkly stores `criteria` with sorted keys, and Jev leans toward the first option, so `schedule_agent` (the safe direction) goes first |
+| `model.custom.choice_confidence_min` | Below this, a non-general query escalates to `scheduler_specialist` (0.7, as on the LLM path) |
+
+The backend needs `TYPESAFE_API_KEY`. Any Jev failure (no key, timeout, 4xx/5xx, a response missing a field)
+escalates the query to `scheduler_specialist` and sends `triage-error` = 1. Every triage call, LLM or Jev, sends
+`triage-error`, so the `triage-error-rate` metric is a rate.
+
+No experiment is used: `jev-choice` is not an arm of `triage-routing-cost-vs-accuracy`, and the scripts below don't
+create or start one. It is shown and released in three steps.
+
+```sh
+python3 evals/setup_jev_variation.py --env-file .env.staging-org     # variation + triage-error-rate; no targeting change
+RUN="uv run --no-project --with-requirements app/backend/requirements.txt python evals/run_triage_experiment.py --env-file .env.staging-org"
+$RUN --pilot --variations default,haiku-current-prompt,jev-choice --show-misses   # 1. offline side by side, no events
+```
+
+On 2026-10-31 that pilot gave:
+
+| Variation | Correct | Hard rows | Cost per query | p50 |
+|---|---|---|---|---|
+| `default` (Sonnet 5) | 47/48 | 28/29 | 0.4783 ¢ | 3,856 ms |
+| `haiku-current-prompt` | 48/48 | 29/29 | 0.1945 ¢ | 2,561 ms |
+| `jev-choice` | 48/48 | 29/29 | 0.0024 ¢ | 80 ms |
+
+2. **Live demo.** In `triage_agent`'s targeting for `test`, add an individual target that serves `jev-choice` to the
+   demo user's context key (`<name>-commercial-plan`). Chats as that user show `jev-1.14.0` in the agent-flow panel;
+   everyone else keeps the default rule's LLM. Remove the target afterwards: it is the "off" state, and a leftover
+   target keeps the demo user on Jev in later demos.
+3. **Guarded rollout.** Move the `test` default rule from `haiku-current-prompt` to `jev-choice` as a guarded
+   rollout with automatic rollback. Use these guardrails: `triage-routing-accuracy`, `triage-cost-cents`,
+   `triage-latency-ms`, `triage-escalation-rate` and `triage-error-rate`. Drive it with `$RUN --users 1000`. The
+   non-pilot mode only needs `triage_agent` to be evaluated for each user, not an experiment. To show a rollback, run
+   `$RUN --users 1000 --fault` during a second rollout. `--fault` uses a bad `TYPESAFE_API_KEY`, so every Jev call
+   fails and `triage-error-rate` goes to 100% on `jev-choice`.
+
+`ci_eval.py` doesn't evaluate `jev-choice`. The eval runner generates through LangChain and drops `model.custom`, so
+`ci_targets.toml` lists it in `exclude_variations`.
+
+### Jev judge
+
+`ai-judge-jev` is a judge-mode AI Config that grades each brand voice reply with Jev. One request answers five
+questions (`accuracy`, `hallucination`, `answers_question`, `coherence`, `tone`), and each answer is its own metric.
+Its variations and what they do are in the [README](../README.md#judges). `setup_jev_judge.py` creates the config,
+its `jev-alongside` and `jev-only` variations (from one question definition, so they can't drift), and eight
+metrics. It points the default rule at `disabled` and adds one rule that serves `jev-alongside` to contexts with
+`judge_pilot` = true, which only the pilot sets.
+
+```sh
+python3 evals/setup_jev_judge.py --env-file .env.staging-org     # config, variations, metrics, pilot rule
+PILOT="uv run --no-project --with-requirements app/backend/requirements.txt python evals/run_judge_pilot.py --env-file .env.staging-org"
+$PILOT                          # 1. LLM judges and Jev over the labeled set; no events (needs AWS credentials)
+$PILOT --skip-llm --send        #    Jev only, and send its events so the metrics get traffic
+$PILOT --skip-llm --send --fault  #  every Jev call fails: jev-judge-error-rate goes to 100%
+```
+
+`judge_labeled_dataset.jsonl` has 48 hand-written replies: 12 questions over two account profiles, four replies each.
+`good` is accurate and well written. `halluc` is well written with one invented or contradicted fact. `incoh` has
+correct facts but is garbled or jargon-heavy. `both` has an invented fact and is curt or rude. So accuracy should pass
+on `good` and `incoh`, and coherence on `good` and `halluc`. The labels were written before any judge ran.
+
+The pilot runs each row as a simulated user through the backend's own code: `BrandVoiceEvaluator` for the LLM judges
+and `jev_judge` for Jev, on whatever `ai-judge-jev` serves that user. On 2026-11-03 it gave:
+
+| Judge | Accuracy correct | Planted inaccuracies missed | Accurate replies failed | Coherence correct | Bad writing missed | Good writing failed | p50 latency | Cost per reply |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| LLM judges (Claude Sonnet 5 on Bedrock), thresholds 0.8 / 0.7 | 39/48 | 0 | 9 | 30/48 | 0 | 18 | 4,060 ms / 4,718 ms | 0.922 ¢ (both) |
+| Jev `jev-1.14.0`, as the app decides (`accuracy` and `hallucination`; `coherence` and `tone`) | 41/48 | 0 | 7 | 43/48 | 0 | 5 | 108 ms | 0.0040 ¢ |
+| Jev, `accuracy` alone; `coherence` alone | 41/48 | 0 | 7 | 41/48 | 3 | 4 | same call | same call |
+| Jev, `hallucination` alone; `tone` alone | 45/48 | 0 | 3 | 46/48 | 0 | 2 | same call | same call |
+
+`answers_question` passed on all 12 `good` replies. Jev and the LLM judges disagreed on 23 of 48 replies (accuracy or
+coherence), mostly where an LLM judge failed a good reply. That is the baseline for `jev-judge-disagreement`, which
+counts a reply once if either verdict differs. `coherence` alone passed three short, rude replies that `tone` caught.
+
+The thresholds are today's (accuracy 0.8, coherence 0.7, noul 0.5). Both judges catch every planted failure; they
+differ in how many good replies they fail. 48 rows on two profiles is a small set, and the replies are more clear-cut
+than real brand voice output. `jev-alongside` and `jev-judge-disagreement` are how Jev is watched on real chats.
+
+**Live demo.** In `ai-judge-jev`'s targeting for `test`, add an individual target that serves `jev-alongside` to the
+demo user's context key (`<name>-commercial-plan`). A chat as that user shows the LLM scores and, under them, Jev's
+five results with `jev-1.14.0`, its latency and its cost. Switch the target to `jev-only` and the LLM judge calls
+stop. Remove the target afterwards; the user is back on `disabled`.
+
+`ci_eval.py` doesn't use `ai-judge-jev`: the SDK's `Judge` parses one LLM score, so a Jev judge can't run there.
 
 ## CI evals
 

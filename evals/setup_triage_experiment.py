@@ -183,9 +183,9 @@ def ensure_variations(api: Api) -> dict:
     return api.must("GET", base)
 
 
-def ensure_metrics(api: Api) -> None:
+def ensure_metrics(api: Api, metrics: list[dict] = METRICS, tags: tuple[str, ...] = ("triage-experiment",)) -> None:
     base = f"/api/v2/metrics/{api.project}"
-    for metric in METRICS:
+    for metric in metrics:
         status, _ = api.call("GET", f"{base}/{metric['key']}")
         if status == 200:
             print(f"  metric {metric['key']}: exists")
@@ -200,7 +200,7 @@ def ensure_metrics(api: Api) -> None:
                 "unitAggregationType": "average",
                 "analysisType": "mean",
                 "randomizationUnits": ["user"],
-                "tags": ["triage-experiment"],
+                "tags": list(tags),
             },
         )
         print(f"  metric {metric['key']}: created")
