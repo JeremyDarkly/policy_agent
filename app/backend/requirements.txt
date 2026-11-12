@@ -3,6 +3,7 @@ langgraph>=0.2.0
 langchain>=0.2.0
 langchain-openai>=0.1.0
 langchain-anthropic>=0.1.0
+langchain-google-genai>=4.4.0
 langchain-core>=0.2.0
 
 # AWS Bedrock & LangChain AWS

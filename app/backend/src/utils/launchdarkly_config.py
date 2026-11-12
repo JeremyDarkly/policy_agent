@@ -393,6 +393,35 @@ def token_usage_from(usage: Optional[dict]) -> Optional[TokenUsage]:
     return TokenUsage(input=input_tokens, output=output_tokens, total=total)
 
 
+def _text_of_block(block: Any) -> Optional[str]:
+    """A content block's text, or None if it isn't a text block."""
+    if isinstance(block, str):
+        return block
+    if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+        return block["text"]
+    return None
+
+
+def flatten_text_content(message: Any) -> None:
+    """Join a reply's content into one string when it is a list of text blocks only.
+
+    ChatGoogleGenerativeAI returns gemini-4-carbon's reply as ``[{"type": "text", "text": ...}]``
+    (langchain-google-genai 4.5.0, checked 2026-11-12), and callers such as the judges' JSON
+    parser and the brand voice prompt expect a string. A list with any other block (a tool call,
+    a reasoning block) is left as it is.
+    """
+    content = getattr(message, "content", None)
+    if not isinstance(content, list) or not content:
+        return
+    texts = [_text_of_block(b) for b in content]
+    if any(t is None for t in texts):
+        return
+    try:
+        message.content = "".join(texts)
+    except Exception:
+        pass
+
+
 class ModelInvoker:
     """Helper class to invoke models with tracking.
     
@@ -513,7 +542,8 @@ class ModelInvoker:
                     logging.debug(f"Failed to track TTFT: {e}")
             
             self.report_served_model_of(getattr(result, "response_metadata", None))
-            
+
+            flatten_text_content(result)
             return result
 
         except Exception as e:
