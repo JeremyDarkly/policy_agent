@@ -11,6 +11,15 @@ every model call (see ModelInvoker in launchdarkly_config.py):
                        Foundry). Summed per user, it is the number of blocked
                        calls. Lower is better.
 
+and from app/backend/src/evaluation/judge.py after each chat's judges run:
+
+  specialist-judge-accuracy  The accuracy judge's score (0-1), on the config
+                       and variation of the specialist that answered.
+                       Averaged. Higher is better.
+  judge-parse-error    1 when an LLM judge's reply didn't parse as JSON, 0
+                       when it did, on the judge's config and variation.
+                       Averaged, it is the parse error rate. Lower is better.
+
 LaunchDarkly records custom events without a metric, but a guarded rollout or
 experiment can only use a metric. This script creates the metrics through the
 REST API, so a fresh clone can repeat it after `terraform apply`.
@@ -66,6 +75,39 @@ METRICS = [
         "successCriteria": "LowerThanBaseline",
         "randomizationUnits": ["user"],
         "tags": ["AI", "azure-foundry"],
+    },
+    {
+        "key": "specialist-judge-accuracy",
+        "name": "Specialist judge accuracy",
+        "description": (
+            "The accuracy judge's score (0-1) for each reply, sent on the config and variation of the "
+            "specialist that answered (account_agent, branch_agent or scheduler_agent), averaged. "
+            "Not sent when the judge failed."
+        ),
+        "kind": "custom",
+        "eventKey": "specialist-judge-accuracy",
+        "isNumeric": True,
+        "unit": "score",
+        "unitAggregationType": "average",
+        "successCriteria": "HigherThanBaseline",
+        "randomizationUnits": ["user"],
+        "tags": ["AI", "judge"],
+    },
+    {
+        "key": "judge-parse-error",
+        "name": "Judge parse error rate",
+        "description": (
+            "Share of LLM judge replies (ai-judge-accuracy, ai-judge-coherence) that didn't parse as the JSON "
+            "their prompt asks for (1 = parse error, 0 = parsed, averaged), on the judge config and variation."
+        ),
+        "kind": "custom",
+        "eventKey": "judge-parse-error",
+        "isNumeric": True,
+        "unit": "error",
+        "unitAggregationType": "average",
+        "successCriteria": "LowerThanBaseline",
+        "randomizationUnits": ["user"],
+        "tags": ["AI", "judge"],
     },
 ]
 

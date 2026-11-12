@@ -106,7 +106,7 @@ def _track_jev_call(tracker, duration_ms: int, tokens: dict, ok: bool) -> None:
     try:
         tracker.track_duration(duration_ms)
         if ok:
-            from ldai.tracker import TokenUsage
+            from ..utils.ai_tracking import TokenUsage
 
             tracker.track_success()
             tracker.track_tokens(

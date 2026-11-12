@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from ..graph.state import AgentState
 from ..tools.calendar import get_available_slots
 from ..utils.llm_config import get_model_invoker
+from ..utils.ai_tracking import track_data_of
 from ..utils.served_model import served_model_id_of
 from ..utils import spend_ledger
 from ..utils.launchdarkly_config import get_ld_client
@@ -187,6 +188,8 @@ def scheduler_specialist_node(state: AgentState) -> dict[str, Any]:
                 "tokens": tokens,
                 "ttft_ms": ttft_ms,
                 "duration_ms": duration_ms,
+                # The judges send specialist-judge-accuracy on this config and variation
+                "track_data": track_data_of(model_invoker),
             },
         },
     }

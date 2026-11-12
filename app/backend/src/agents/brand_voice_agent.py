@@ -1,12 +1,12 @@
 """Brand voice synthesis agent for customer-facing responses."""
 
 import asyncio
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 import ldclient
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from opentelemetry import trace
-from ldai.client import LDMessage
 
 from ..graph.state import AgentState
 from ..utils.llm_config import get_model_invoker
@@ -42,8 +42,8 @@ Transform the specialist's response into a customer-facing message that:
 
 Provide ONLY the final customer-facing response. Do not include meta-commentary."""
 
-# Passed to LDClientManager.get_ai_config as the `default_config` fallback, which
-# expects a plain dict (see _dict_to_ai_config in launchdarkly_config.py).
+# Passed to LDClientManager.get_ai_config as the `default_config` fallback (see
+# _default_config_dict in launchdarkly_config.py).
 DEFAULT_BRAND_AGENT_CONFIG = {
     "key": "brand_agent",
     "enabled": True,
@@ -52,7 +52,7 @@ DEFAULT_BRAND_AGENT_CONFIG = {
         "parameters": {"maxTokens": 2000},
     },
     "provider": "bedrock",
-    "messages": [LDMessage(role="system", content=DEFAULT_BRAND_VOICE_SYSTEM_PROMPT)],
+    "messages": [{"role": "system", "content": DEFAULT_BRAND_VOICE_SYSTEM_PROMPT}],
 }
 
 
@@ -82,16 +82,16 @@ def track_agent_graph_traversal(
     The app orchestrates in code (LangGraph), so nothing drives the SDK's
     agent-graph runner and the LaunchDarkly agent graph view shows no usage.
     This mirrors the traversal onto the graph so the view populates:
-      - graph-level: invocation, path, handoffs, total tokens/duration (AIGraphTracker)
-      - per-node: success, duration, tokens on each node's graph-scoped tracker
-        (obtained from the graph definition, so metrics land on the node cards)
+      - graph-level: each node entered, handoffs, invocation, total tokens/duration,
+        as the AI SDK's graph() runner sends them (utils/ai_tracking.GraphTracker)
+      - per-node: success, duration, tokens and TTFT on each node's config, with the
+        graph's key and run ID so the metrics land on the node cards
     Best-effort; never raises.
     """
     try:
         import ldclient
         from ldclient import Context
-        from ldai.client import LDAIClient
-        from ldai.tracker import AIGraphTracker, TokenUsage
+        from ..utils.ai_tracking import ConfigTracker, GraphTracker, TokenUsage, track_data_for
 
         agent_data = state.get("agent_data", {})
 
@@ -125,26 +125,24 @@ def track_agent_graph_traversal(
         if context is None:
             context = Context.builder(user_context.get("user_key", "anonymous")).kind("user").build()
 
-        # --- Graph-level metrics (mirrors LDAIClient.agent_graph internals) ---
-        variation = raw.variation(AGENT_GRAPH_KEY, context, {})
-        meta = variation.get("_ldMeta", {}) if isinstance(variation, dict) else {}
-        gtracker = AIGraphTracker(raw, meta.get("variationKey", ""), AGENT_GRAPH_KEY, int(meta.get("version", 1) or 1), context)
-        gtracker.track_invocation_success()
-        gtracker.track_path(path)
+        # --- Graph-level metrics, as the AI SDK's graph() runner sends them ---
+        gtracker = GraphTracker(raw, context, AGENT_GRAPH_KEY)
+        for index, ck in enumerate(path):
+            gtracker.track_node(ck, index)
         for src, tgt in zip(path, path[1:]):
             gtracker.track_handoff_success(src, tgt)
-        if total_in or total_out:
-            gtracker.track_total_tokens(TokenUsage(total=total_in + total_out, input=total_in, output=total_out))
+        gtracker.track_total_tokens(total_in + total_out)
         if total_dur:
             gtracker.track_duration(total_dur)
+        gtracker.track_invocation_success()
 
-        # --- Per-node metrics via each node's graph-scoped config tracker ---
-        defn = LDAIClient(raw).agent_graph(AGENT_GRAPH_KEY, context)
+        # --- Per-node metrics on each node's config, scoped to this graph run ---
         for ck, data in ran:
-            node = defn.get_node(ck)
-            if not node:
+            variation = raw.variation(ck, context, None)
+            if not isinstance(variation, dict):
                 continue
-            nt = node.get_config().create_tracker()
+            nt = ConfigTracker(raw, context, track_data_for(
+                ck, variation, variation.get("_ldMeta"), graph_key=AGENT_GRAPH_KEY, run_id=gtracker.run_id))
             nt.track_success()
             dur = int(data.get("duration_ms") or 0)
             if dur:
@@ -164,34 +162,50 @@ def track_agent_graph_traversal(
         print(f"  (agent graph tracking skipped: {e})")
 
 
-def calculate_model_cost(model_id: str, input_tokens: int, output_tokens: int) -> float:
+# Gemini 4 Carbon's introductory price ($2 / $10 per 1M tokens) ends on 2026-11-30; from
+# 2026-12-01 it is $4 / $20 (Google's launch post, 2026-11-10).
+GEMINI_4_CARBON_INTRO_ENDS = date(2026, 12, 1)
+
+
+def calculate_model_cost(
+    model_id: str, input_tokens: int, output_tokens: int, today: Optional[date] = None
+) -> float:
     """Calculate cost for a model based on token usage.
-    
+
     Args:
         model_id: The model identifier (e.g., 'us.anthropic.claude-haiku-4-5-20251001-v1:0')
         input_tokens: Number of input tokens
         output_tokens: Number of output tokens
-    
+        today: The date whose price applies (UTC today by default); only Gemini 4 Carbon's varies
+
     Returns:
         Total cost in dollars
     """
+    today = today or datetime.now(timezone.utc).date()
     # Pricing per 1000 tokens
     pricing = {
         "haiku": {"input": 0.001, "output": 0.005},
         "sonnet-5": {"input": 0.002, "output": 0.010},
         "sonnet-4": {"input": 0.003, "output": 0.015},
         "llama4-maverick": {"input": 0.00024, "output": 0.00097},
-        # Bedrock on-demand list price, us-east-1. Same value as the
-        # llama-3-1-70b-accounts model config in model_configs.tf (#59).
+        # Bedrock on-demand list price, us-east-1, $0.72 per 1M input and output tokens. Same
+        # value as the llama-3-1-70b-accounts model config in model_configs.tf (#59).
         "llama3-1-70b": {"input": 0.00072, "output": 0.00072},
         "nova-pro": {"input": 0.0008, "output": 0.0032},
+        "gemini-4-carbon": (
+            {"input": 0.002, "output": 0.010}
+            if today < GEMINI_4_CARBON_INTRO_ENDS
+            else {"input": 0.004, "output": 0.020}
+        ),
         # TypeSafe Jev: the model catalog's costPerInputToken (4.2e-08); output is not billed
         "jev": {"input": 0.000042, "output": 0.0},
     }
 
     # Determine model type from model_id
     model_lower = model_id.lower()
-    if "haiku" in model_lower:
+    if "gemini-4-carbon" in model_lower:
+        rates = pricing["gemini-4-carbon"]
+    elif "haiku" in model_lower:
         rates = pricing["haiku"]
     elif "sonnet-5" in model_lower or "sonnet5" in model_lower:
         rates = pricing["sonnet-5"]
@@ -557,7 +571,14 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
                 if ctx:
                     account_context = ctx
                     break
-        
+
+        # The judges send the accuracy score on the answering specialist's config too
+        specialist_track_data = next(
+            (agent_data[s].get("track_data") for s in ("account_specialist", "branch_specialist",
+                                                       "scheduler_specialist") if s in agent_data),
+            None,
+        )
+
         # Get request_id and results_store from state for evaluation tracking
         request_id = state.get("request_id")
         results_store = state.get("evaluation_results_store")
@@ -617,7 +638,8 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
                     user_context=user_context,
                     brand_tracker=model_invoker,  # Pass full ModelInvoker (contains tracker + context)
                     request_id=request_id,
-                    results_store=results_store
+                    results_store=results_store,
+                    specialist_track_data=specialist_track_data,
                 )
             )
         except RuntimeError:
@@ -635,7 +657,8 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
                         user_context=user_context,
                         brand_tracker=model_invoker,  # Pass full ModelInvoker (contains tracker + context)
                         request_id=request_id,
-                        results_store=results_store
+                        results_store=results_store,
+                        specialist_track_data=specialist_track_data,
                     )
                 )
 

@@ -86,6 +86,9 @@ exclude_variations = ["jev-choice"]
 [account_agent]
 dataset = "account_agent_dataset"
 quick_dataset = "account_agent_dataset_quick"
+# gemini-4-carbon (issue #79) isn't served by any rule; listing it runs it next to
+# the served variation. It needs GOOGLE_API_KEY (ci_eval.py's Gemini handler).
+variations = ["gemini-4-carbon"]
 judges = [
   { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = "{{account_info}}" },
 ]

@@ -1,39 +1,41 @@
+import asyncio
 import json
-import os
 
 import boto3
-import ldclient
-from ldai import AIAgentConfigDefault, LDAIClient, ModelConfig
-from ldai.tracker import TokenUsage
-from ldclient import Context
-from ldclient.config import Config
+from launchdarkly_ai_server import config, create_handler, parse_template
 
 bedrock = boto3.client("bedrock-runtime")
-ldclient.set_config(Config(os.environ["LAUNCHDARKLY_SDK_KEY"]))
-ai_client = LDAIClient(ldclient.get())
 
 MODEL_ID = "us.anthropic.claude-sonnet-5"
 SYSTEM_PROMPT = """You are the triage agent for ToggleBank's customer support.
 Classify the message as account_question, branch_lookup, schedule_agent or general_question.
 Respond with only JSON: {"query_type": "...", "confidence_score": 0.0}"""
 
-# Used only if LaunchDarkly can't be reached
-FALLBACK = AIAgentConfigDefault(enabled=True, model=ModelConfig(MODEL_ID), instructions=SYSTEM_PROMPT)
+
+def converse(model_id: str, system_prompt: str, message: str) -> dict:
+    return bedrock.converse(
+        modelId=model_id,
+        system=[{"text": system_prompt}],
+        messages=[{"role": "user", "content": [{"text": message}]}],
+    )
+
+
+# The existing Bedrock call, as the handler for the config's Bedrock variations
+async def call_bedrock(ld_config, message, tools, variables, history=None):
+    instructions = parse_template(ld_config["instructions"], variables)
+    response = await asyncio.to_thread(converse, ld_config["model"]["name"], instructions, message)
+    return {"output": response["output"]["message"]["content"][0]["text"], "usage": response["usage"]}
+
+
+triage = config(key="triage_agent", handler=create_handler(("Bedrock", "agent"), call_bedrock))
 
 
 def route(user_id: str, message: str) -> dict:
-    context = Context.builder(user_id).build()
-    config = ai_client.agent_config("triage_agent", context, FALLBACK, {"domain": "ToggleBank"})
-    tracker = config.create_tracker()
-
-    response = tracker.track_duration_of(lambda: bedrock.converse(
-        modelId=config.model.name,
-        system=[{"text": config.instructions}],
-        messages=[{"role": "user", "content": [{"text": message}]}],
-    ))
-    usage = response["usage"]
-    tracker.track_tokens(TokenUsage(usage["totalTokens"], usage["inputTokens"], usage["outputTokens"]))
-    tracker.track_success()
-
-    text = response["output"]["message"]["content"][0]["text"]
+    try:
+        result = asyncio.run(triage.invoke(message, {"kind": "user", "key": user_id}, {"domain": "ToggleBank"}))
+        text = result.response
+    except Exception:
+        # LaunchDarkly can't be reached or the config is off: behave exactly as before
+        response = converse(MODEL_ID, SYSTEM_PROMPT, message)
+        text = response["output"]["message"]["content"][0]["text"]
     return json.loads(text.strip().removeprefix("```json").removesuffix("```"))

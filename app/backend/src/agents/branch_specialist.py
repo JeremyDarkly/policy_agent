@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from ..graph.state import AgentState
 from ..utils.llm_config import get_model_invoker
+from ..utils.ai_tracking import track_data_of
 from ..utils.served_model import served_model_id_of
 from ..utils import spend_ledger
 from ..utils.launchdarkly_config import get_ld_client
@@ -176,6 +177,8 @@ def branch_specialist_node(state: AgentState) -> dict[str, Any]:
                 "tokens": tokens,
                 "ttft_ms": ttft_ms,  # Time to first token from Bedrock streaming
                 "duration_ms": duration_ms,  # Total time to generate response
+                # The judges send specialist-judge-accuracy on this config and variation
+                "track_data": track_data_of(model_invoker),
             },
         },
     }

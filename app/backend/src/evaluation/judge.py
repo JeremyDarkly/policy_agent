@@ -28,6 +28,29 @@ from .jev_judge import (
     send_jev_events,
 )
 
+# The accuracy judge's score on the answering specialist's config and variation. Registered as a
+# metric by scripts/register_metrics.py, so a specialist's guarded rollout can use it.
+SPECIALIST_ACCURACY_EVENT = "specialist-judge-accuracy"
+
+# 1 when a judge's reply didn't parse as the JSON its prompt asks for, 0 when it did. Sent on the
+# judge config and variation that replied, so a new judge model whose output format differs shows up
+# as a rate instead of as scores of 0. Registered by scripts/register_metrics.py.
+JUDGE_PARSE_ERROR_EVENT = "judge-parse-error"
+
+
+def _send_parse_result(model_invoker: Any, result: Dict[str, Any]) -> None:
+    """Send judge-parse-error (1 or 0) on the judge's own tracker data. Never raises."""
+    data = getattr(getattr(model_invoker, "tracker", None), "track_data", None)
+    context = getattr(model_invoker, "user_context", None)
+    if not isinstance(data, dict) or context is None:
+        return
+    try:
+        import ldclient
+
+        ldclient.get().track(JUDGE_PARSE_ERROR_EVENT, context, dict(data), 1.0 if result.get("error") else 0.0)
+    except Exception as e:
+        print(f"⚠️  Failed to send {JUDGE_PARSE_ERROR_EVENT}: {e}")
+
 
 def _print_jev(block: Dict[str, Any]) -> None:
     print(f"🔍 Jev judge ({block['mode']}, {block['model']}): {block['duration_ms']}ms, {block['cost_cents']:.4f}¢")
@@ -65,6 +88,7 @@ class BrandVoiceEvaluator:
         brand_voice_output: str,
         user_context: Dict[str, Any],
         brand_tracker: Any,
+        specialist_track_data: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Evaluate brand voice output asynchronously.
@@ -75,6 +99,8 @@ class BrandVoiceEvaluator:
             brand_voice_output: Final output from brand voice agent (full system output)
             user_context: User context for LaunchDarkly targeting
             brand_tracker: The tracker from brand_agent for sending judgment metrics
+            specialist_track_data: Track data of the specialist that answered (agent_data's
+                ``track_data``), so its accuracy score lands on that config and variation
 
         Returns:
             Dict with evaluation results
@@ -170,6 +196,9 @@ class BrandVoiceEvaluator:
                 self._send_judgment_to_ld(
                     user_context, accuracy_result, coherence_result, brand_tracker
                 )
+                # Not on the fallback config: its accuracy score above is a fixed 0.95
+                if not user_context.get("is_fallback", False):
+                    self._send_specialist_accuracy(accuracy_result, brand_tracker, specialist_track_data)
 
             jev_block = None
             if run_jev:
@@ -309,6 +338,7 @@ class BrandVoiceEvaluator:
 
         # Parse result
         result = self._parse_eval_response(response.content, threshold=0.8)
+        _send_parse_result(model_invoker, result)
         return result, model_name, tokens
 
     async def _evaluate_coherence(
@@ -359,6 +389,7 @@ class BrandVoiceEvaluator:
 
         # Parse result
         result = self._parse_eval_response(response.content, threshold=0.7)
+        _send_parse_result(model_invoker, result)
         return result, model_name, tokens
 
     def _parse_eval_response(self, response: str, threshold: float) -> Dict[str, Any]:
@@ -382,6 +413,44 @@ class BrandVoiceEvaluator:
         except Exception as e:
             print(f"⚠️  Failed to parse evaluation response: {e}")
             return {"score": 0.0, "passed": False, "reason": f"Parse error: {e}", "issues": [], "error": True}
+
+    def _send_specialist_accuracy(
+        self,
+        accuracy_result: Dict[str, Any],
+        brand_tracker: Any,
+        specialist_track_data: Optional[Dict[str, Any]],
+    ) -> None:
+        """Send the accuracy score on the config and variation of the specialist that answered.
+
+        The judge events in ``_send_judgment_to_ld`` carry no config, so a guarded rollout on a
+        specialist (account_agent, branch_agent, scheduler_agent) can only see them through the
+        context. This one carries the specialist's track data (configKey, variationKey, runId)
+        plus ``judgeConfigKey``, as the AI SDK's judges send scores, so the score is tied to the
+        variation that produced the answer. Skipped when the judge failed: a failed judge's
+        score of 0 isn't a measurement.
+        """
+        context = getattr(brand_tracker, "user_context", None)
+        if not specialist_track_data or context is None or accuracy_result.get("error"):
+            return
+        try:
+            import ldclient
+
+            from ..utils.ai_tracking import ConfigTracker, JudgeResult
+
+            ConfigTracker(ldclient.get(), context, specialist_track_data).track_judge_result(
+                JudgeResult(
+                    judge_config_key="ai-judge-accuracy",
+                    metric_key=SPECIALIST_ACCURACY_EVENT,
+                    score=float(accuracy_result["score"]),
+                )
+            )
+            print(
+                f"📊 Sent {SPECIALIST_ACCURACY_EVENT} to {specialist_track_data.get('configKey')}"
+                f" ({specialist_track_data.get('variationKey') or 'no variation'}):"
+                f" {float(accuracy_result['score']):.2f}"
+            )
+        except Exception as e:
+            print(f"⚠️  Failed to send {SPECIALIST_ACCURACY_EVENT}: {e}")
 
     def _send_judgment_to_ld(
         self,
@@ -545,6 +614,7 @@ async def evaluate_brand_voice_async(
     brand_tracker: Any,
     request_id: Optional[str] = None,
     results_store: Optional[Dict[str, Any]] = None,
+    specialist_track_data: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Evaluate system output asynchronously without blocking.
@@ -559,6 +629,7 @@ async def evaluate_brand_voice_async(
         user_context: User context for LaunchDarkly
         brand_tracker: The ModelInvoker from brand_agent (contains tracker + LD context)
         request_id: Optional request ID to store results for later retrieval
+        specialist_track_data: Track data of the specialist that answered, if one did
     """
     evaluator = get_evaluator()
 
@@ -567,7 +638,8 @@ async def evaluate_brand_voice_async(
         # caller passes its context along (see brand_voice_agent)
         with _tracer.start_as_current_span("evaluate brand_voice") as span:
             results = await evaluator.evaluate_async(
-                original_query, account_context, brand_voice_output, user_context, brand_tracker
+                original_query, account_context, brand_voice_output, user_context, brand_tracker,
+                specialist_track_data=specialist_track_data,
             )
             _add_evaluation_events(span, results)
 

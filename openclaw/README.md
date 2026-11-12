@@ -133,7 +133,7 @@ same data as the backend's (see [Served model](../README.md#served-model)), with
 API named the model and `message_model` when it didn't. Both send `ai-model-mismatch`: a `message_model` that
 isn't the variation's model means OpenClaw itself switched models. OpenAI Completions, Mistral and Google only report a model
 that differs from the request; CLI-backed runs never do. OpenClaw itself logs a dated snapshot as a "model route
-change"; the plugin uses the backend's rule and doesn't count it as a mismatch. Tests: `node --test openclaw/plugin/served_model.test.ts`.
+change"; the plugin uses the backend's rule and doesn't count it as a mismatch. Tests: `node --test openclaw/plugin/served_model.test.ts openclaw/plugin/ai_config.test.ts`.
 
 The LaunchDarkly context is a `user` keyed by the sender, or `openclaw-local-operator` for command-line runs. It has
 the attributes `agentId`, `channel` and `trigger`.
@@ -221,7 +221,9 @@ Found on 2026-10-13 while building and testing this, and on 2026-10-14 while add
 - the LaunchDarkly REST API with `LD-API-Version: beta`
 
 The SDK gaps were rechecked on 2026-10-31 after upgrading to `@launchdarkly/ai-server` 1.0.0 and
-`@launchdarkly/server-sdk-ai` 2.0.16. Each one says what changed. Recheck these after upgrading any of them.
+`@launchdarkly/server-sdk-ai` 2.0.16, and again on 2026-11-11, when the plugin dropped the legacy
+`@launchdarkly/server-sdk-ai` for `@launchdarkly/ai-node` 1.0.0 (which re-exports `@launchdarkly/ai-server` 1.0.0).
+Each one says what changed. Recheck these after upgrading any of them.
 
 ### LaunchDarkly AI SDK
 
@@ -233,6 +235,9 @@ The SDK gaps were rechecked on 2026-10-31 after upgrading to `@launchdarkly/ai-s
   - Still the case in `server-sdk-ai` 2.0.16. `ai-server` 1.0.0 doesn't close it either: its `inspectConfig()`
     returns `{ enabled: false, config: null, meta: null }` for a bad key, a network failure and a disabled config
     alike.
+  - Since 2026-11-11 the plugin reads the config from the base SDK's `variationDetail()` (`servedConfig()` in
+    `ai_config.ts`), so the same evaluation gives the config and the `ERROR` reason. That's one evaluation per run
+    where there were two.
 - **Metrics have to be recorded by hand when the app doesn't make the model call.** `trackMetricsOf` wraps a call
   the app makes itself. OpenClaw makes the calls here.
   - Workaround: the plugin adds up the usage from OpenClaw's `llm_output` hook and calls `trackTokens`,
@@ -240,7 +245,11 @@ The SDK gaps were rechecked on 2026-10-31 after upgrading to `@launchdarkly/ai-s
   - OpenClaw reports cached prompt tokens separately, and the plugin counts them as input. Before that fix, a run
     showed 358 input tokens against a total of 27,888.
   - Still the case in 1.0.0. `@launchdarkly/ai-server` records metrics only for calls its own handlers make, and
-    has no public tracker for a call made elsewhere, so the plugin keeps `server-sdk-ai`'s tracker for this.
+    has no public tracker for a call made elsewhere. Since 2026-11-11 the plugin sends the SDK's `$ld:ai:*` events
+    itself (`ConfigTracker` in `ai_config.ts`), with the SDK's track data from `makeRunTrackData()`. It still sends
+    time to first token (`$ld:ai:tokens:ttf`), which the 1.0.0 SDK no longer sends.
+  - The plugin doesn't call `initClient()`, which `inspectConfig()` needs: given a client, `initClient()` also
+    registers a global OpenTelemetry tracer provider, which would export the gateway's own spans to LaunchDarkly.
 
 ### LaunchDarkly skills
 
@@ -252,19 +261,19 @@ The SDK gaps were rechecked on 2026-10-31 after upgrading to `@launchdarkly/ai-s
     per run.
   - Still the case in `server-sdk-ai` 2.0.16. `ai-server` 1.0.0 can read the pins without the base SDK
     (`inspectConfig()` then `skillRefs()`), and `configSkills()` follows a config's pins as they change. The plugin
-    still needs `server-sdk-ai` for the tracker, and the raw evaluation also gives the trace its variation index, so
-    it keeps the raw `variationDetail()`.
+    keeps the raw `variationDetail()`, which since 2026-11-11 also gives it the config, and gives the trace its
+    variation index.
 - **Skill content needs a second SDK.** Only `@launchdarkly/ai-server` can fetch skills (`LaunchDarklySkillStore`,
   `getSkillResult`).
   - **Closed in 1.0.0:** skills are no longer experimental. They're exported from the package root, and their names
     change only in a major release. The plugin now pins `@launchdarkly/ai-server` 1.0.0 and imports from the root.
     `FDv2SkillStore` was renamed `LaunchDarklySkillStore`; the old name remains as a deprecated alias. Up to 0.5.0
     it was only in `@launchdarkly/ai-server/experimental`, which the plugin pinned to exactly 0.4.0.
-  - It's still a second SDK alongside `server-sdk-ai`, and it opens its own connection to LaunchDarkly, alongside
-    the main SDK's.
+  - **Closed on 2026-11-11:** the plugin no longer uses `server-sdk-ai`, so this is the only AI SDK. The skill store
+    still opens its own connection to LaunchDarkly, alongside the base SDK's.
   - Its `mode` takes `"stream"` or `"poll"`. It throws on `"streaming"` or `"polling"`.
   - Delivery worked in both modes on the non-production instance, unlike flag streaming (see below).
-- **Skill use isn't recorded on the tracker.** The 2.0.13 tracker has no skill events, so skill loads appear only in
+- **Skill use isn't recorded in LaunchDarkly's metrics.** The 2.0.13 tracker has no skill events, so skill loads appear only in
   the plugin's decision log, not in LaunchDarkly's metrics.
   - Still the case in 2.0.16 and in `ai-server` 1.0.0, whose docs say skills emit no LaunchDarkly telemetry. The one
     exception is `configSkills()`, which sends a single SDK usage event.

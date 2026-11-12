@@ -73,7 +73,7 @@ It imports from [`launchdarkly-ai-python`](https://pypi.org/project/launchdarkly
 internal notebook is pinned to. Customers install from PyPI into any Python 3.12+ environment:
 
 ```sh
-pip install launchdarkly-ai-python launchdarkly-ai-openai-messages launchdarkly-ai-langchain-messages langchain-aws
+pip install launchdarkly-ai-python==1.0.0 launchdarkly-ai-openai-messages==1.0.0 launchdarkly-ai-langchain-messages==1.0.0 langchain-aws
 ```
 
 Build the blank copy to share it. Rerun this after any edit to the `.py`:

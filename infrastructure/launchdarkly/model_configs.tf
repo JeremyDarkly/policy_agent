@@ -87,6 +87,31 @@ resource "launchdarkly_model_config" "claude_sonnet_4" {
   tags = ["managed-by-terraform"]
 }
 
+# Gemini 4 Carbon on the Gemini API (issue #79), for the judges' and account_agent's
+# gemini-4-carbon variations. The backend picks ChatGoogleGenerativeAI from the "Gemini"
+# provider (GEMINI_PROVIDERS in app/backend/src/utils/llm_config.py) and needs GOOGLE_API_KEY.
+# Not affected by model_override, which is a Bedrock model ID.
+# max_tokens: Carbon thinks before answering, and its reasoning tokens count against the
+# limit (about 350-510 on short prompts, measured 2026-11-12); the backend default is 2000.
+# Costs are the list price, $4 / $20 per 1M tokens, which applies from 2026-12-01 (the
+# introductory $2 / $10 ends on 2026-11-30), so Monitoring doesn't understate the cost.
+resource "launchdarkly_model_config" "gemini_4_carbon" {
+  project_key    = var.project_key
+  key            = "gemini-4-carbon"
+  name           = "Gemini 4 Carbon"
+  model_id       = "gemini-4-carbon"
+  model_provider = "Gemini"
+
+  cost_per_input_token  = 0.000004
+  cost_per_output_token = 0.00002
+
+  params = jsonencode({
+    max_tokens = 8000
+  })
+
+  tags = ["managed-by-terraform"]
+}
+
 # Azure AI Foundry deployment for branch_agent's azure-foundry variation (issue #67).
 # The global model catalog has no Azure provider, so this is a project model config with a
 # free-text provider. The backend picks its Azure client from that provider string
@@ -136,6 +161,7 @@ locals {
       launchdarkly_model_config.nova_pro,
       launchdarkly_model_config.claude_haiku_4_5_brand_voice,
       launchdarkly_model_config.claude_sonnet_4,
+      launchdarkly_model_config.gemini_4_carbon,
     ], launchdarkly_model_config.azure_foundry_branch) : r.key => r
   }
 }
