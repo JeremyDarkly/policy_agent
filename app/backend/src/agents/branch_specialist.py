@@ -8,6 +8,7 @@ from ..graph.state import AgentState
 from ..utils.llm_config import get_model_invoker
 from ..utils.ai_tracking import track_data_of
 from ..utils.served_model import served_model_id_of
+from ..utils import spend_ledger
 from ..utils.launchdarkly_config import get_ld_client
 from ..utils.tool_loop import run_tool_loop, tools_for
 
@@ -124,6 +125,7 @@ def branch_specialist_node(state: AgentState) -> dict[str, Any]:
         output_tokens=tokens["output"]
     )
     branch_cost_cents = round(branch_cost_usd * 100.0, 2)
+    spend_ledger.record(user_context, branch_cost_usd)
 
     # Send cost and duration metrics to LaunchDarkly
     try:

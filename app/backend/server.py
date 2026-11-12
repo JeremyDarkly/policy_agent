@@ -41,6 +41,7 @@ from datetime import datetime
 from src.graph.workflow import run_workflow
 from src.utils.user_profile import create_user_profile
 from src.utils.chat_trace import build_trace
+from src.utils import spend_ledger
 from src.utils.aws_token_monitor import AWSTokenMonitor
 
 # Configure logging
@@ -332,6 +333,32 @@ class ChatResponse(BaseModel):
     trace: Optional[Dict[str, Any]] = None
 
 
+class SpendResetRequest(BaseModel):
+    # Omit to reset every user's spend.
+    userKey: Optional[str] = None
+
+
+def finish_running_spend(user_context: Dict[str, Any]) -> float:
+    """Read the user's spend after this request and send it as `running-spend-cents`.
+
+    Sent once per request on the request's context, so LaunchDarkly's event
+    stream shows the total crossing a targeting rule's threshold.
+    """
+    total = spend_ledger.get(spend_ledger.user_key_of(user_context))
+    try:
+        import ldclient
+        from ldclient import Context
+
+        builder = Context.builder(spend_ledger.user_key_of(user_context)).kind("user")
+        if user_context.get("plan"):
+            builder.set("plan", user_context["plan"])
+        builder.set(spend_ledger.ATTRIBUTE, total)
+        ldclient.get().track("running-spend-cents", builder.build(), metric_value=round(total, 4))
+    except Exception as e:
+        logger.warning(f"Failed to send running-spend-cents: {e}")
+    return total
+
+
 class FeedbackRequest(BaseModel):
     requestId: str
     feedback: str  # 'positive' or 'negative'
@@ -503,6 +530,7 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
             "agent_count": len(agent_flow),
             "rag_enabled": any(a.get("rag_docs", 0) > 0 for a in agent_flow),
             "total_duration_ms": total_duration,
+            "runningSpendCents": round(finish_running_spend(user_context), 4),
         }
 
         # Add evaluation metrics if available
@@ -727,6 +755,8 @@ async def chat_stream(request: ChatRequest):
                 f"[{request_id}] Response generated: {len(final_response)} chars, {len(agent_flow)} agents, {total_duration}ms"
             )
 
+            running_spend_cents = round(finish_running_spend(user_context), 4)
+
             # Send final event with metrics (including total_duration_ms)
             yield f"data: {json.dumps({
                 'type': 'complete',
@@ -737,7 +767,8 @@ async def chat_stream(request: ChatRequest):
                     'confidence': float(confidence) if confidence else 0.0,
                     'agent_count': len(agent_flow),
                     'rag_enabled': any(a.get('rag_docs', 0) > 0 for a in agent_flow),
-                    'total_duration_ms': total_duration
+                    'total_duration_ms': total_duration,
+                    'runningSpendCents': running_spend_cents
                 }
             })}\n\n"
 
@@ -785,6 +816,20 @@ async def chat_stream(request: ChatRequest):
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "ToggleBank Multi-Agent Assistant"}
+
+
+@app.get("/api/spend/{user_key}")
+async def get_spend(user_key: str):
+    """A user's running model spend in cents (the `running_spend_cents` attribute)."""
+    return {"userKey": user_key, "runningSpendCents": round(spend_ledger.get(user_key), 4)}
+
+
+@app.post("/api/spend/reset")
+async def reset_spend(request: SpendResetRequest):
+    """Set one user's spend (or everyone's, when userKey is omitted) back to 0."""
+    spend_ledger.reset(request.userKey)
+    logger.info(f"Running spend reset for {request.userKey or 'all users'}")
+    return {"userKey": request.userKey, "runningSpendCents": 0.0}
 
 
 @app.get("/api/token-status")

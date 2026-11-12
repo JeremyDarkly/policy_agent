@@ -17,8 +17,21 @@ from launchdarkly_ai_server import parse_ai_config, parse_template
 from .ai_tracking import ConfigTracker, TokenUsage, track_data_for
 from .served_model import CONTENT_FILTER_MESSAGE, is_content_filtered
 
+from . import spend_ledger
+
 # Load environment variables
 load_dotenv()
+
+
+def with_running_spend(context: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Return a copy of `context` with the user's ledger total as `running_spend_cents`.
+
+    The value is a float: a targeting rule's numeric operators (`>=`) do not
+    match a string.
+    """
+    merged = dict(context or {})
+    merged[spend_ledger.ATTRIBUTE] = float(spend_ledger.get(spend_ledger.user_key_of(merged)))
+    return merged
 
 
 def _fill(template: str, variables: dict[str, Any]) -> str:
@@ -109,7 +122,10 @@ class LaunchDarklyClient:
         Raises:
             RuntimeError: If the config can't be served and there is no default_config
         """
-        ld_context = self._create_context(context or {})
+        # Every evaluation carries the user's running spend, read now so a
+        # config evaluated later in the same request sees the calls before it.
+        context = with_running_spend(context)
+        ld_context = self._create_context(context)
         try:
             raw = self.client.variation(config_key, ld_context, None)
         except Exception as e:

@@ -11,6 +11,7 @@ from opentelemetry import trace
 from ..graph.state import AgentState
 from ..utils.llm_config import get_model_invoker
 from ..utils.served_model import served_model_id_of
+from ..utils import spend_ledger
 from ..utils.launchdarkly_config import get_ld_client
 from ..evaluation.judge import evaluate_brand_voice_async
 
@@ -187,7 +188,8 @@ def calculate_model_cost(
         "sonnet-5": {"input": 0.002, "output": 0.010},
         "sonnet-4": {"input": 0.003, "output": 0.015},
         "llama4-maverick": {"input": 0.00024, "output": 0.00097},
-        # Bedrock on-demand, $0.72 per 1M input and output tokens
+        # Bedrock on-demand list price, us-east-1, $0.72 per 1M input and output tokens. Same
+        # value as the llama-3-1-70b-accounts model config in model_configs.tf (#59).
         "llama3-1-70b": {"input": 0.00072, "output": 0.00072},
         "nova-pro": {"input": 0.0008, "output": 0.0032},
         "gemini-4-carbon": (
@@ -209,10 +211,10 @@ def calculate_model_cost(
         rates = pricing["sonnet-5"]
     elif "sonnet-4" in model_lower or "sonnet4" in model_lower:
         rates = pricing["sonnet-4"]
-    elif "llama4" in model_lower or "maverick" in model_lower:
-        rates = pricing["llama4-maverick"]
     elif "llama3-1-70b" in model_lower:
         rates = pricing["llama3-1-70b"]
+    elif "llama4" in model_lower or "maverick" in model_lower:
+        rates = pricing["llama4-maverick"]
     elif "nova-pro" in model_lower:
         rates = pricing["nova-pro"]
     elif "jev" in model_lower:
@@ -598,6 +600,7 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
         # Convert to cents for better precision in LaunchDarkly metrics
         # Round to 2 decimal places (LaunchDarkly only accepts 2 decimal places)
         brand_cost_cents = round(brand_cost_usd * 100.0, 2)
+        spend_ledger.record(user_context, brand_cost_usd)
         
         # Send cost metric to LaunchDarkly (in cents, rounded to 2 decimal places)
         try:
