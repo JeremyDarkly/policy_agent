@@ -306,6 +306,53 @@ different variations depending on who is signed in:
 `<name>` is `DEMO_USER_NAME` as a slug: `Jane Doe` gives `jane-doe-commercial-plan`. With no name set, the keys
 start with `demo-user`.
 
+### Spend-based model downgrade
+
+Once a customer's running model spend passes a threshold, `triage_agent` serves a cheaper model. A targeting
+rule in LaunchDarkly makes the switch, not app code, so you can change the threshold in the UI without a redeploy.
+
+- **The attribute.** The backend keeps each `user_key`'s total spend in cents in memory
+  (`app/backend/src/utils/spend_ledger.py`). Triage, account, branch, scheduler and brand voice each add their
+  cost as their call finishes; judges don't count. Every AI Config evaluation carries the current total as the
+  number `running_spend_cents`, so a config evaluated later in the same request sees the calls before it. Each
+  request also sends a `running-spend-cents` event with the new total, and returns it as
+  `metrics.runningSpendCents`.
+- **The rules.** `scripts/setup_spend_rule.py` adds two rules to `triage_agent`, above the default rule:
+
+  | Rule | If | Serves |
+  |---|---|---|
+  | A | `plan` is `commercial` and `running_spend_cents >= 3` (and `kind` is `user`) | `Haiku 4.5, tuned prompt` |
+  | B | `plan` is `commercial` | `Default` (Claude Sonnet 5) |
+
+  Only the Customer demo login sends `plan: commercial`, so other users, and the eval scripts unless they set
+  it, keep the default rule.
+
+  ```bash
+  python scripts/setup_spend_rule.py --env-file .env.staging-org --dry-run
+  python scripts/setup_spend_rule.py --env-file .env.staging-org                     # Rule A serves Haiku now
+  python scripts/setup_spend_rule.py --env-file .env.staging-org --release guarded   # or release it with a guarded rollout
+  python scripts/setup_spend_rule.py --env-file .env.staging-org --threshold-cents 10
+  python scripts/setup_spend_rule.py --env-file .env.staging-org --status
+  python scripts/setup_spend_rule.py --env-file .env.staging-org --remove
+  ```
+
+  `--release guarded` points Rule A at `Default`, then starts a guarded release from `Default` to Haiku, with
+  `triage-routing-accuracy`, `triage-escalation-rate`, `triage-error-rate` and `triage-latency-ms` as
+  guardrails and automatic rollback. LaunchDarkly refuses the release until `triage_agent` has recent
+  evaluations, so chat once or run the load script below first. `--stop-release` stops it and rolls back.
+- **The demo.** Sign in as the Customer and ask branch questions in one chat. At current token counts a branch
+  turn costs about 1.07¢, so turns 1–3 show `claude-sonnet-5` on the triage node and turn 4 shows
+  `claude-haiku-4-5`. The chat's Response Metrics line shows the running spend. **Reset spend** in the user
+  menu (or `POST /api/spend/reset`) starts the demo again. Change the threshold in the rule and the switch
+  moves on the next request.
+- **Load.** `evals/run_triage_experiment.py --users 50 --turns-per-user 10` sends simulated commercial users
+  through the triage node, 10 questions each. They cross the threshold partway through, so both sides of Rule A
+  get routing-accuracy events. The script prints which variation each turn number was served.
+- **Caveats.** The ledger is per backend process. It is lost on restart, isn't shared across replicas, and only
+  goes up until reset. It uses the app's own prices (`calculate_model_cost`), not LaunchDarkly's. The AI Config
+  Monitoring tab's cost column reads 0 for these configs (#48), so don't use it to show the savings; use the
+  `triage-cost-cents` metric instead.
+
 ### Serving from Azure AI Foundry
 
 `branch_agent` can serve a model hosted in Azure AI Foundry alongside its Bedrock `default` variation. Targeting
@@ -470,6 +517,8 @@ and Conversations views) through `ObservabilityPlugin` from `ldobserve`. It is s
 | `GET` | `/api/logs/stream` | SSE feed of pipeline logs (drives the UI terminal) |
 | `GET` | `/api/evaluation/{request_id}` | Judge scores for a completed request |
 | `POST` | `/api/feedback` | Send thumbs up/down to LaunchDarkly as feedback |
+| `GET` | `/api/spend/{user_key}` | A user's running model spend in cents |
+| `POST` | `/api/spend/reset` | Set one user's spend (`{"userKey": ...}`) or everyone's (`{}`) back to 0 |
 | `GET` | `/api/token-status` | AWS SSO token expiry status |
 | `GET` | `/health` | Health check |
 

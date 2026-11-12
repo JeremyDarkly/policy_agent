@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from ..graph.state import AgentState, QueryType
 from ..utils.llm_config import get_model_invoker
+from ..utils import spend_ledger
 from ..utils.launchdarkly_config import get_ld_client
 from ..utils.typesafe_client import is_jev_config
 
@@ -272,6 +273,7 @@ def triage_node(state: AgentState) -> dict[str, Any]:
             output_tokens=tokens["output"],
         )
         triage_cost_cents = round(triage_cost_usd * 100.0, 4)
+        spend_ledger.record(user_context, triage_cost_usd)
         print(
             f"  Triage agent cost: {triage_cost_cents:.4f}¢ (${triage_cost_usd:.6f}) "
             f"[in={tokens['input']}, out={tokens['output']}, "

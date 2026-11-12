@@ -41,6 +41,14 @@ role = "customer"
 user_type = "customer"
 plan = "commercial"
 
+# The customer after spending past the spend rule's threshold
+# (scripts/setup_spend_rule.py), so CI also evaluates the variation that rule serves.
+[contexts.customer-over-budget]
+role = "customer"
+user_type = "customer"
+plan = "commercial"
+running_spend_cents = 5.0
+
 [contexts.employee]
 role = "employee"
 user_type = "internal"

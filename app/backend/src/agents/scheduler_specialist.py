@@ -11,6 +11,7 @@ from ..tools.calendar import get_available_slots
 from ..utils.llm_config import get_model_invoker
 from ..utils.ai_tracking import track_data_of
 from ..utils.served_model import served_model_id_of
+from ..utils import spend_ledger
 from ..utils.launchdarkly_config import get_ld_client
 from ..utils.tool_loop import run_tool_loop, tools_for
 
@@ -149,6 +150,7 @@ def scheduler_specialist_node(state: AgentState) -> dict[str, Any]:
             output_tokens=tokens["output"],
         )
         scheduler_cost_cents = round(scheduler_cost_usd * 100.0, 2)
+        spend_ledger.record(user_context, scheduler_cost_usd)
         print(
             f"  Scheduler agent cost: {scheduler_cost_cents:.2f}¢ (${scheduler_cost_usd:.6f}) "
             f"[in={tokens['input']}, out={tokens['output']}, "

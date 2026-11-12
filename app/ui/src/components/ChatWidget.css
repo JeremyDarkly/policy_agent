@@ -717,6 +717,22 @@
   }
 }
 
+.cw-running-spend {
+  font-weight: 500;
+  color: var(--cw-accent);
+}
+
+.cw-spend-reset {
+  background: none;
+  border: none;
+  padding: 0;
+  margin-left: 0.35rem;
+  color: var(--cw-accent);
+  font-size: 0.72rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 /* Jev judge results, under the LLM judges (or alone on jev-only) */
 .cw-jev-judge {
   margin-top: 0.5rem;
