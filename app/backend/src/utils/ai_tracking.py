@@ -132,6 +132,16 @@ class ConfigTracker:
         self._track("$ld:ai:feedback:user:positive" if positive else "$ld:ai:feedback:user:negative", 1)
 
 
+def track_data_of(model_invoker: Any) -> Optional[dict[str, Any]]:
+    """A copy of the track data of ``model_invoker``'s tracker, or None when it has none.
+
+    A specialist stores this in agent_data so the judges can later send scores on its config
+    and variation (see ``BrandVoiceEvaluator._send_specialist_accuracy``).
+    """
+    data = getattr(getattr(model_invoker, "tracker", None), "track_data", None)
+    return dict(data) if isinstance(data, dict) else None
+
+
 class GraphTracker:
     """Sends one traversal's graph metrics, as the AI SDK's ``graph()`` runner does."""
 
