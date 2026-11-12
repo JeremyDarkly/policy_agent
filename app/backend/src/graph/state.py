@@ -55,6 +55,9 @@ class AgentState(TypedDict):
     # Guardrail settings
     guardrail_enabled: Annotated[bool, "Whether to use guardrails on brand agent (default True)"]
 
+    # Background judges
+    online_judges: Annotated[bool, "Whether brand voice starts its background judges (default True)"]
+
 
 def create_initial_state(
     user_message: str,
@@ -64,6 +67,7 @@ def create_initial_state(
     brand_trackers_store: dict[str, Any] | None = None,
     evaluate_agent: str | None = None,
     guardrail_enabled: bool = True,
+    online_judges: bool = True,
 ) -> dict[str, Any]:
     """Create an initial state for the workflow.
 
@@ -75,6 +79,7 @@ def create_initial_state(
         brand_trackers_store: Optional shared dict for storing brand voice trackers
         evaluate_agent: Optional agent to evaluate (stops after this agent executes)
         guardrail_enabled: Whether to use guardrails on brand agent (default True)
+        online_judges: Whether brand voice starts its background judges (default True)
 
     Returns:
         Initial state dictionary
@@ -95,4 +100,5 @@ def create_initial_state(
         "brand_trackers_store": brand_trackers_store,
         "evaluate_agent": evaluate_agent,
         "guardrail_enabled": guardrail_enabled,
+        "online_judges": online_judges,
     }
