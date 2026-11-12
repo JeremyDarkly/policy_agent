@@ -180,7 +180,9 @@ The backend starts with `python server.py` and the session credentials from the 
 mounts `~/.aws`. It uses `LD_ENVIRONMENT`, the same environment as the config-level run, so it sees the targeting
 that run evaluates. Each request sends:
 
-- `userKey` `ci-e2e-customer` and the attributes of `[contexts.customer]`
+- `userKey` `ci-e2e-customer-<random>`, new for each row, and the attributes of `[contexts.customer]`. The backend
+  keeps a running spend per user key, and the spend rule serves a cheaper triage variation past its threshold, so
+  one key for the whole run would change what later rows are served.
 - `conversationId` `ci-e2e-<label>`
 - `includeTrace: true`, which adds each agent's variation, model and output to the response
 - `onlineJudges: false`, which skips the app's background judges

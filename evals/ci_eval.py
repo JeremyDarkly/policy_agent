@@ -35,6 +35,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -833,12 +834,20 @@ def e2e_url(target: dict[str, Any]) -> str:
 
 
 def e2e_request(row_input: str, variables: dict[str, Any], context: tuple[str, dict[str, Any]], label: str) -> dict:
-    """The /api/chat body for one row, sent as the named test context."""
+    """The /api/chat body for one row, sent as the named test context.
+
+    Each row gets its own user key. The backend adds every call's cost to a
+    running total per user key, and the spend rule (scripts/setup_spend_rule.py)
+    serves a cheaper triage variation once that total passes its threshold. With
+    one key for the whole run, rows after the first few would get that variation,
+    and results would depend on row order.
+    """
     name, attributes = context
+    base_key = str(attributes.get("key", f"ci-e2e-{name}"))
     body = {
         "userInput": row_input,
         "domain": variables.get("domain", "togglebank"),
-        "userKey": str(attributes.get("key", f"ci-e2e-{name}")),
+        "userKey": f"{base_key}-{uuid.uuid4().hex[:12]}",
         "includeTrace": True,
         "onlineJudges": False,
         "conversationId": f"ci-e2e-{label}",
