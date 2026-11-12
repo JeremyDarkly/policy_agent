@@ -17,6 +17,9 @@ load_dotenv()
 # The model config uses "Azure AI Foundry"; the other spellings are accepted so a hand-made config still works.
 AZURE_PROVIDERS = {"azure ai foundry", "azure", "azure openai", "foundry"}
 
+# Provider names that select the Gemini API. LaunchDarkly's model catalog uses "Gemini" (Gemini.gemini-4-carbon).
+GEMINI_PROVIDERS = {"gemini", "google", "google ai studio"}
+
 
 def azure_foundry_base_url(endpoint: str) -> str:
     """The v1 OpenAI-compatible base URL for an Azure AI Foundry resource.
@@ -315,8 +318,27 @@ def _create_llm_for_provider(
             stream_usage=True,
         )
 
+    elif provider_normalized in GEMINI_PROVIDERS:
+        # The Gemini API (Google AI Studio). model_name is the API model code, e.g. gemini-4-carbon.
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("GOOGLE_API_KEY not set in environment (needed for Gemini variations)")
+
+        options: dict[str, Any] = {}
+        # Only when the variation sets it, as BedrockConverseLLM does
+        if temperature is not None:
+            options["temperature"] = temperature
+        return ChatGoogleGenerativeAI(
+            model=model_name,
+            google_api_key=api_key,
+            max_output_tokens=max_tokens,
+            **options,
+        )
+
     else:
         raise ValueError(
             f"Unsupported LLM provider: {provider} (normalized: {provider_normalized}). "
-            f"Supported providers: bedrock, openai, anthropic, azure ai foundry"
+            f"Supported providers: bedrock, openai, anthropic, azure ai foundry, gemini"
         )
