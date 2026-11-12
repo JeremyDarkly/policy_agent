@@ -62,7 +62,9 @@ Manual runs take three optional inputs:
      scored by the `ci-judge-accuracy` and `ci-judge-coherence` judges against each target's threshold. A variation
      with tools uses the target's `[<config>.tools]` dataset and judges instead: `ci-judge-tool-use` grades the
      tool trajectory against the row's `expected_tools`, and gives full marks to a control row that needs no tool
-     when no tool is called.
+     when no tool is called. Each accuracy and coherence judge (Claude Sonnet 5) is followed by a Gemini 4 Carbon
+     copy, `ci-judge-accuracy-gemini` and `ci-judge-coherence-gemini`, from `[judge_companions]` in
+     `ci_targets.toml`. A row has to pass both. The summary's "Rows each judge passed" table compares the two.
    - **Compares with `main`.** It matches rows to the downloaded results and lists the ones that newly fail and the
      ones that now pass.
 5. **Reports the results:**
@@ -164,7 +166,8 @@ file in the LaunchDarkly UI (**Library > Datasets > New dataset**). The triage d
 others are in `ci_datasets/`. Uploading to an existing dataset adds rows rather than replacing them, so create a new
 dataset to replace one. `build_specialist_datasets.py` rebuilds the specialist datasets (see [README.md](README.md#ci-evals)).
 
-**Judges and tools.** `ci-judge-accuracy`, `ci-judge-coherence` and `ci-judge-tool-use` are AI Configs defined in
+**Judges and tools.** `ci-judge-accuracy`, `ci-judge-coherence`, their `-gemini` copies and `ci-judge-tool-use` are
+AI Configs defined in
 `infrastructure/launchdarkly/ai_configs_resources.tf`, and the `get_available_slots` and `find_branches` Library tools
 are in `tools.tf`. Apply them with Terraform before the first run. Tool keys are snake_case: Amazon Nova can't call a
 tool whose name contains a hyphen (JeremyDarkly/policy_agent#74).

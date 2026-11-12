@@ -79,6 +79,8 @@ CONFIG_KEYS = [
     "ai-judge-coherence",
     "ci-judge-accuracy",
     "ci-judge-coherence",
+    "ci-judge-accuracy-gemini",
+    "ci-judge-coherence-gemini",
     "ai-judge-jev",
 ]
 

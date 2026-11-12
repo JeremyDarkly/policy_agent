@@ -107,6 +107,8 @@ class TargetResult:
     url: str = ""
     summary: dict[str, int] = field(default_factory=dict)
     misses: list[ScoredRow] = field(default_factory=list)
+    # Judge key -> [rows scored, rows at or above the threshold], to compare judges on the same rows.
+    judge_counts: dict[str, list[int]] = field(default_factory=dict)
     error: str = ""
     # Distinct errors raised while generating or judging rows. The SDK counts
     # those rows as errors but doesn't say why.
@@ -302,6 +304,10 @@ def recording_handler(
             except ValueError:
                 return output  # the SDK reports it as an invalid judge output
             score = numeric_score(raw)
+            if score is not None:
+                counts = result.judge_counts.setdefault(judge.key, [0, 0])
+                counts[0] += 1
+                counts[1] += judge.threshold is None or score >= judge.threshold
             if score is not None and judge.threshold is not None and score < judge.threshold:
                 result.misses.append(
                     ScoredRow(
@@ -362,15 +368,16 @@ def azure_foundry_handler() -> ProviderHandler | None:
 GEMINI_PROVIDERS = ["Gemini"]
 
 
-def gemini_handler() -> ProviderHandler | None:
-    """An agents handler for Gemini variations (gemini-4-carbon), or None without GOOGLE_API_KEY.
+def gemini_handlers() -> list[ProviderHandler]:
+    """Handlers for Gemini variations (gemini-4-carbon), or none without GOOGLE_API_KEY.
 
-    Builds ChatGoogleGenerativeAI as the backend does (app/backend/src/utils/llm_config.py): the
+    An agents handler for agent variations and a messages handler for the Gemini judges. Both
+    build ChatGoogleGenerativeAI as the backend does (app/backend/src/utils/llm_config.py): the
     variation's model name, max_tokens as max_output_tokens, and temperature only when set.
     """
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        return None
+        return []
 
     def model(config: dict[str, Any]) -> Any:
         from langchain_google_genai import ChatGoogleGenerativeAI
@@ -385,7 +392,10 @@ def gemini_handler() -> ProviderHandler | None:
             options["max_output_tokens"] = max_tokens
         return ChatGoogleGenerativeAI(model=settings.get("name"), google_api_key=api_key, **options)
 
-    return create_langchain_agents_handler(model, providers=GEMINI_PROVIDERS)
+    return [
+        create_langchain_agents_handler(model, providers=GEMINI_PROVIDERS),
+        create_langchain_messages_handler(model, providers=GEMINI_PROVIDERS),
+    ]
 
 
 
@@ -543,12 +553,16 @@ def load_targets(path: Path, only: list[str]) -> tuple[dict[str, dict[str, Any]]
     """The targets to run, and the [contexts] table of test contexts."""
     targets = tomllib.loads(path.read_text())
     contexts = targets.pop("contexts", {})
+    companions = targets.pop("judge_companions", {})
     if only:
         unknown = sorted(set(only) - set(targets))
         if unknown:
             raise SystemExit(f"error: {', '.join(unknown)} not in {path.name}")
         targets = {key: targets[key] for key in only}
     for key, target in targets.items():
+        for table in (target, target.get("tools", {})):
+            if "judges" in table:
+                table["judges"] = with_companions(table["judges"], companions)
         for name in target.get("scorers", []):
             if name not in SCORERS:
                 raise SystemExit(f"error: {key} uses unknown scorer {name!r}")
@@ -556,6 +570,20 @@ def load_targets(path: Path, only: list[str]) -> tuple[dict[str, dict[str, Any]]
         if unknown:
             raise SystemExit(f"error: {key} uses unknown context {', '.join(unknown)}")
     return targets, contexts
+
+
+def with_companions(judges: list[str | dict[str, Any]], companions: dict[str, list[str]]) -> list[str | dict[str, Any]]:
+    """The judges, each followed by its companions from [judge_companions] in ci_targets.toml.
+
+    A companion runs with the same threshold and ground truth as the judge it follows.
+    """
+    expanded: list[str | dict[str, Any]] = []
+    for entry in judges:
+        expanded.append(entry)
+        key = entry if isinstance(entry, str) else entry["key"]
+        for companion in companions.get(key, []):
+            expanded.append(companion if isinstance(entry, str) else {**entry, "key": companion})
+    return expanded
 
 
 def contexts_for(target: dict[str, Any], contexts: dict[str, Context]) -> dict[str, Context]:
@@ -768,6 +796,12 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
                   "ci_targets.toml. *chosen*: from `--variation`. *Served to*: the test contexts LaunchDarkly "
                   "serves the variation to, and why. *Tools*: the Library tools the run gave the model, backed by "
                   "the backend's implementations."]
+    judged = [r for r in results if r.judge_counts]
+    if judged:
+        lines += ["", "**Rows each judge passed**", "", "| AI Config | Variation | Judges |", "|---|---|---|"]
+        for r in judged:
+            counts = " · ".join(f"`{key}` {passed}/{scored}" for key, (scored, passed) in r.judge_counts.items())
+            lines.append(f"| `{r.config}` | `{r.variation}` | {counts} |")
     if not links:
         lines += ["", "Find a run in LaunchDarkly under **Evaluations** by the name in the Run column."]
     if compared is False:
@@ -856,7 +890,8 @@ async def main() -> int:
 
     targets, contexts = load_targets(Path(args.targets), args.config)
     args.tool_registry = load_tool_registry()
-    args.extra_handlers = [h for h in (azure_foundry_handler(), gemini_handler()) if h]
+    azure = azure_foundry_handler()
+    args.extra_handlers = ([azure] if azure else []) + gemini_handlers()
     evals = init_evaluations()
     args.ld_client, args.test_contexts = None, {}
     if contexts and not args.variation and not args.no_contexts:

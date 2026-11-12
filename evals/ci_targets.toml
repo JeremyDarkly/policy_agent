@@ -67,6 +67,17 @@ user_type = "customer"
 plan = "platinum"
 customer_tier = "platinum"
 
+# --- Judge companions ----------------------------------------------------------
+# Each judge listed here runs next to the judge it's keyed by, on every target
+# and [<config>.tools] table that lists that judge, with the same threshold and
+# ground truth. A row passes only if it passes both. The Gemini 4 Carbon copies
+# of the accuracy and coherence judges run beside the Sonnet 5 ones until further
+# notice, to compare the two judge models (issue #79). They need GOOGLE_API_KEY.
+# Remove an entry to stop running its companion.
+[judge_companions]
+ci-judge-accuracy = ["ci-judge-accuracy-gemini"]
+ci-judge-coherence = ["ci-judge-coherence-gemini"]
+
 [triage_agent]
 dataset = "triage_routing_dataset"
 quick_dataset = "triage_routing_dataset_quick"
