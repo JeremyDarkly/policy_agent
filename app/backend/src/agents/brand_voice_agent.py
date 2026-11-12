@@ -1,6 +1,7 @@
 """Brand voice synthesis agent for customer-facing responses."""
 
 import asyncio
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 import ldclient
 
@@ -160,31 +161,49 @@ def track_agent_graph_traversal(
         print(f"  (agent graph tracking skipped: {e})")
 
 
-def calculate_model_cost(model_id: str, input_tokens: int, output_tokens: int) -> float:
+# Gemini 4 Carbon's introductory price ($2 / $10 per 1M tokens) ends on 2026-11-30; from
+# 2026-12-01 it is $4 / $20 (Google's launch post, 2026-11-10).
+GEMINI_4_CARBON_INTRO_ENDS = date(2026, 12, 1)
+
+
+def calculate_model_cost(
+    model_id: str, input_tokens: int, output_tokens: int, today: Optional[date] = None
+) -> float:
     """Calculate cost for a model based on token usage.
-    
+
     Args:
         model_id: The model identifier (e.g., 'us.anthropic.claude-haiku-4-5-20251001-v1:0')
         input_tokens: Number of input tokens
         output_tokens: Number of output tokens
-    
+        today: The date whose price applies (UTC today by default); only Gemini 4 Carbon's varies
+
     Returns:
         Total cost in dollars
     """
+    today = today or datetime.now(timezone.utc).date()
     # Pricing per 1000 tokens
     pricing = {
         "haiku": {"input": 0.001, "output": 0.005},
         "sonnet-5": {"input": 0.002, "output": 0.010},
         "sonnet-4": {"input": 0.003, "output": 0.015},
         "llama4-maverick": {"input": 0.00024, "output": 0.00097},
+        # Bedrock on-demand, $0.72 per 1M input and output tokens
+        "llama3-1-70b": {"input": 0.00072, "output": 0.00072},
         "nova-pro": {"input": 0.0008, "output": 0.0032},
+        "gemini-4-carbon": (
+            {"input": 0.002, "output": 0.010}
+            if today < GEMINI_4_CARBON_INTRO_ENDS
+            else {"input": 0.004, "output": 0.020}
+        ),
         # TypeSafe Jev: the model catalog's costPerInputToken (4.2e-08); output is not billed
         "jev": {"input": 0.000042, "output": 0.0},
     }
 
     # Determine model type from model_id
     model_lower = model_id.lower()
-    if "haiku" in model_lower:
+    if "gemini-4-carbon" in model_lower:
+        rates = pricing["gemini-4-carbon"]
+    elif "haiku" in model_lower:
         rates = pricing["haiku"]
     elif "sonnet-5" in model_lower or "sonnet5" in model_lower:
         rates = pricing["sonnet-5"]
@@ -192,6 +211,8 @@ def calculate_model_cost(model_id: str, input_tokens: int, output_tokens: int) -
         rates = pricing["sonnet-4"]
     elif "llama4" in model_lower or "maverick" in model_lower:
         rates = pricing["llama4-maverick"]
+    elif "llama3-1-70b" in model_lower:
+        rates = pricing["llama3-1-70b"]
     elif "nova-pro" in model_lower:
         rates = pricing["nova-pro"]
     elif "jev" in model_lower:
@@ -548,7 +569,14 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
                 if ctx:
                     account_context = ctx
                     break
-        
+
+        # The judges send the accuracy score on the answering specialist's config too
+        specialist_track_data = next(
+            (agent_data[s].get("track_data") for s in ("account_specialist", "branch_specialist",
+                                                       "scheduler_specialist") if s in agent_data),
+            None,
+        )
+
         # Get request_id and results_store from state for evaluation tracking
         request_id = state.get("request_id")
         results_store = state.get("evaluation_results_store")
@@ -607,7 +635,8 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
                     user_context=user_context,
                     brand_tracker=model_invoker,  # Pass full ModelInvoker (contains tracker + context)
                     request_id=request_id,
-                    results_store=results_store
+                    results_store=results_store,
+                    specialist_track_data=specialist_track_data,
                 )
             )
         except RuntimeError:
@@ -625,7 +654,8 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
                         user_context=user_context,
                         brand_tracker=model_invoker,  # Pass full ModelInvoker (contains tracker + context)
                         request_id=request_id,
-                        results_store=results_store
+                        results_store=results_store,
+                        specialist_track_data=specialist_track_data,
                     )
                 )
 
