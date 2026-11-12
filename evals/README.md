@@ -236,7 +236,9 @@ stop. Remove the target afterwards; the user is back on `disabled`.
 `ci_eval.py` evaluates AI Config variations directly: the AI SDK reads each variation's model and prompt from
 LaunchDarkly and generates on Bedrock, so the app doesn't need to be running. Each target in `ci_targets.toml` names a
 dataset stored in LaunchDarkly. Upload the matching `.jsonl` file in the LaunchDarkly UI (**Library > Datasets > New
-dataset**) with that key first. Results are advisory: the script exits non-zero only when a run can't complete.
+dataset**) with that key first. The script exits non-zero when a run can't complete or a result fails the merge gate
+(row errors, a pass rate under the target's `min_pass_rate`, or more than `max_regression_rows` fewer passing rows than
+`main`; see `CI_EVALS.md`, "The merge gate").
 
 ```sh
 uv run python ci_eval.py --env-file ../.env.staging-org --quick          # quick datasets

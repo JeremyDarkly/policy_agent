@@ -10,10 +10,12 @@ A variation that attaches Library tools the backend implements
 backend's own implementations, and with the target's [<config>.tools] dataset
 and judges, so its tool trajectory is graded. Other variations run with no tools.
 
-Results are advisory: a failed verdict is reported, not raised. The script
-exits non-zero only when a run can't be completed (missing credentials or
-dataset, API errors). It writes a Markdown summary to --summary-file, which
-defaults to $GITHUB_STEP_SUMMARY in GitHub Actions.
+Results gate the merge. The script exits non-zero when a run can't be
+completed (missing credentials or dataset, API errors), and when any result
+fails the gate (see apply_gate): a row errored, the pass rate is below the
+target's min_pass_rate, or it passes more than max_regression_rows fewer rows
+than the --baseline result from main. It writes a Markdown summary to
+--summary-file, which defaults to $GITHUB_STEP_SUMMARY in GitHub Actions.
 
 Usage:
     cd evals && uv run python ci_eval.py --env-file ../.env.staging-org --quick
@@ -83,6 +85,11 @@ class ScoredRow:
     actual: str
 
 
+# The merge gate, when a target in ci_targets.toml doesn't set its own.
+DEFAULT_MIN_PASS_RATE = 1.0
+DEFAULT_MAX_REGRESSION_ROWS = 1
+
+
 @dataclass
 class TargetResult:
     config: str
@@ -114,8 +121,13 @@ class TargetResult:
     # Set by compare_with_baseline when a baseline result for the same
     # config, variation and dataset exists.
     baseline_passed: int | None = None
+    baseline_total: int | None = None
     newly_failing: list[ScoredRow] = field(default_factory=list)
     now_passing: list[ScoredRow] = field(default_factory=list)
+    # The gate this result is held to (from ci_targets.toml), and why it failed it.
+    min_pass_rate: float = DEFAULT_MIN_PASS_RATE
+    max_regression_rows: int = DEFAULT_MAX_REGRESSION_ROWS
+    gate_failures: list[str] = field(default_factory=list)
 
 
 # --- Scorers -----------------------------------------------------------------
@@ -555,6 +567,13 @@ def load_targets(path: Path, only: list[str]) -> tuple[dict[str, dict[str, Any]]
         unknown = sorted(set(target.get("contexts", [])) - set(contexts))
         if unknown:
             raise SystemExit(f"error: {key} uses unknown context {', '.join(unknown)}")
+        for where, table in ((key, target), (f"{key}.tools", target.get("tools", {}))):
+            rate = table.get("min_pass_rate", 0.0)
+            if not isinstance(rate, (int, float)) or not 0 <= rate <= 1:
+                raise SystemExit(f"error: {where} min_pass_rate must be a number from 0 to 1")
+            rows = table.get("max_regression_rows", 0)
+            if not isinstance(rows, int) or rows < 0:
+                raise SystemExit(f"error: {where} max_regression_rows must be a whole number, 0 or more")
     return targets, contexts
 
 
@@ -639,7 +658,9 @@ async def run_target(
     tool_keys = [key for key in attached if key in registry]
     target = target_for_tools(target, tool_keys)
     dataset = dataset_for(target, args)
-    result = TargetResult(config=config, variation=variation, dataset=dataset, tools=tool_keys)
+    result = TargetResult(config=config, variation=variation, dataset=dataset, tools=tool_keys,
+                          min_pass_rate=target.get("min_pass_rate", DEFAULT_MIN_PASS_RATE),
+                          max_regression_rows=target.get("max_regression_rows", DEFAULT_MAX_REGRESSION_ROWS))
     unimplemented = [key for key in attached if key not in registry]
     if unimplemented:
         names = ", ".join(f"`{k}`" for k in unimplemented)
@@ -711,12 +732,43 @@ def compare_with_baseline(results: list[TargetResult], path: Path) -> bool:
         if r.error or b is None:
             continue
         r.baseline_passed = b["summary"]["passed"]
+        r.baseline_total = b["summary"]["total"]
         # Keyed by input and criterion: one row can fail several judges.
         before = {(m["input"], m["expected"]): ScoredRow(**m) for m in b["misses"]}
         after = {(m.input, m.expected): m for m in r.misses}
         r.newly_failing = [m for key, m in after.items() if key not in before]
         r.now_passing = [m for key, m in before.items() if key not in after]
     return True
+
+
+def apply_gate(results: list[TargetResult]) -> bool:
+    """Fill in each result's gate failures. Returns True if every result passes the gate.
+
+    A result fails the gate when it couldn't run, when any row errored (a variation
+    that can't be run isn't shown to be safe), when its pass rate is below its
+    min_pass_rate, or when it passes more than max_regression_rows fewer rows than
+    main's result for the same dataset. The regression check is skipped when the
+    dataset's row count changed since main, since the counts aren't comparable.
+    A skipped result (nothing to evaluate) passes.
+    """
+    for r in results:
+        r.gate_failures = []
+        if r.skipped:
+            continue
+        if r.error:
+            r.gate_failures.append("couldn't run")
+            continue
+        s = r.summary
+        if s["error"]:
+            r.gate_failures.append(f"{s['error']} {'row' if s['error'] == 1 else 'rows'} errored")
+        rate = s["passed"] / s["total"] if s["total"] else 0.0
+        if rate < r.min_pass_rate:
+            r.gate_failures.append(f"pass rate {rate:.0%} is below {r.min_pass_rate:.0%}")
+        if r.baseline_passed is not None and r.baseline_total == s["total"]:
+            drop = r.baseline_passed - s["passed"]
+            if drop > r.max_regression_rows:
+                r.gate_failures.append(f"{drop} rows fewer than `main` passed (at most {r.max_regression_rows} allowed)")
+    return not any(r.gate_failures for r in results)
 
 
 def cell(text: str) -> str:
@@ -736,7 +788,11 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
     links = not getattr(args, "no_run_links", False)
     mode = "quick" if args.quick else "full"
     lines = [
-        f"### LaunchDarkly evals ({mode}, advisory)",
+        f"### LaunchDarkly evals ({mode})",
+        "",
+        "A result fails if a row errored, its pass rate is below the target's `min_pass_rate`, or it passes more "
+        "than `max_regression_rows` fewer rows than `main` (both set in `evals/ci_targets.toml`). "
+        "Any failed result fails this check.",
         "",
         "| AI Config | Variation | Served to | Tools | Dataset | Rows passed | vs `main` | Verdict | Run |",
         "|---|---|---|---|---|---|---|---|---|",
@@ -746,7 +802,7 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
         served_to = ", ".join(f"{c['name']} ({c['reason']})" for c in r.contexts) or "–"
         tools = ", ".join(f"`{t}`" for t in r.tools) or "–"
         if r.error or r.skipped:
-            verdict = "error" if r.error else "skipped"
+            verdict = "failed: couldn't run" if r.error else "skipped"
             lines.append(f"| `{r.config}` | {variation} | {served_to} | {tools} | `{r.dataset}` | – | – | {verdict} | – |")
             continue
         s = r.summary
@@ -757,7 +813,9 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
         else:
             change = s["passed"] - r.baseline_passed
             delta = "no change" if change == 0 else f"{change:+d} (was {r.baseline_passed})"
-        verdict = "passed" if r.passed else "failed"
+            if r.baseline_total != s["total"]:
+                delta = f"was {r.baseline_passed}/{r.baseline_total}, not compared"
+        verdict = f"failed: {'; '.join(r.gate_failures)}" if r.gate_failures else "passed"
         run = f"[open]({r.url})" if links else f"`{r.key}`"
         lines.append(
             f"| `{r.config}` | {variation} | {served_to} | {tools} | `{r.dataset}` | {counts} | {delta} | {verdict} | {run} |"
@@ -877,6 +935,7 @@ async def main() -> int:
         await shutdown()
 
     compared = compare_with_baseline(results, Path(args.baseline)) if args.baseline else None
+    gate_passed = apply_gate(results)
     report = markdown(results, args, compared)
     print(report)
     if args.summary_file:
@@ -889,7 +948,9 @@ async def main() -> int:
                 indent=2,
             )
         )
-    return 1 if any(r.error for r in results) else 0
+    if not gate_passed:
+        print("error: the evals failed the merge gate (see the Verdict column)", file=sys.stderr)
+    return 0 if gate_passed else 1
 
 
 if __name__ == "__main__":

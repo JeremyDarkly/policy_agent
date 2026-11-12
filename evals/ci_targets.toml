@@ -8,6 +8,19 @@
 # exclude_variations: variation keys never evaluated, even when targeting or a
 #   test context serves them (for variations the eval runner can't call).
 #
+# --- Merge gate ----------------------------------------------------------------
+# Each result (one config, variation and dataset) fails the CI check, and so
+# blocks the merge, when:
+#   - any row errored (the model or judge call failed),
+#   - its pass rate (rows passing every scorer and judge / all rows) is below
+#     min_pass_rate (default 1.0), or
+#   - it passes more than max_regression_rows (default 1) fewer rows than the
+#     latest result from main for the same dataset. Skipped when the dataset's
+#     row count has changed since main.
+# A [<config>.tools] table can set its own. The floors below were set on
+# 2026-11-12 at one row under what main passed on the quick datasets then, so
+# one noisy judge call doesn't fail a PR. Raise them as the agents improve.
+#
 # Tools: a variation is run with the Library tools it attaches that the backend
 # implements (app/backend/src/tools/registry.py), backed by those
 # implementations, as the backend's tool loop runs it. Attached tools the
@@ -72,6 +85,7 @@ dataset = "triage_routing_dataset"
 quick_dataset = "triage_routing_dataset_quick"
 scorers = ["routed-to-expected-specialist"]
 judges = []
+min_pass_rate = 0.8  # main: 12/13 quick, 48/48 full
 # jev-choice routes with Jev (TypeSafe's decision model) over its own HTTP API,
 # not an LLM. The AI SDK's eval runner generates through LangChain and drops
 # model.custom, where the variation keeps its Jev question, so it can't run it.
@@ -89,6 +103,7 @@ quick_dataset = "account_agent_dataset_quick"
 # gemini-4-carbon (issue #79) isn't served by any rule; listing it runs it next to
 # the served variation. It needs GOOGLE_API_KEY (ci_eval.py's Gemini handler).
 variations = ["gemini-4-carbon"]
+min_pass_rate = 0.6  # main: 3/3 quick, 8/8 full
 judges = [
   { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = "{{account_info}}" },
 ]
@@ -96,6 +111,7 @@ judges = [
 [branch_agent]
 dataset = "branch_agent_dataset"
 quick_dataset = "branch_agent_dataset_quick"
+min_pass_rate = 0.6  # not run on main yet: both served variations have tools
 judges = [
   { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = "{{branch_info}}" },
 ]
@@ -105,6 +121,7 @@ judges = [
 [branch_agent.tools]
 dataset = "branch_agent_tools_dataset"
 quick_dataset = "branch_agent_tools_dataset_quick"
+min_pass_rate = 0.5  # main: 3/4 and 4/4 quick, 10/10 full
 judges = [
   { key = "ci-judge-tool-use", threshold = 0.8, ground_truth = "Expected tool calls (an empty list means no tool is needed): {{expected_tools}}" },
   { key = "ci-judge-coherence", threshold = 0.7 },
@@ -113,6 +130,9 @@ judges = [
 [scheduler_agent]
 dataset = "scheduler_agent_dataset"
 quick_dataset = "scheduler_agent_dataset_quick"
+# main: 0/3 quick, 1/8 full. No floor until the accuracy failures are fixed;
+# the regression check and row errors still apply.
+min_pass_rate = 0.0
 judges = [
   { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = "Available appointment slots (offer only these):\n{{available_slots}}" },
   { key = "ci-judge-coherence", threshold = 0.7 },
@@ -123,6 +143,7 @@ judges = [
 [scheduler_agent.tools]
 dataset = "scheduler_agent_tools_dataset"
 quick_dataset = "scheduler_agent_tools_dataset_quick"
+min_pass_rate = 0.25  # main: 2/4 quick, 5/10 full
 judges = [
   { key = "ci-judge-tool-use", threshold = 0.8, ground_truth = "Expected tool calls (an empty list means no tool is needed): {{expected_tools}}" },
   { key = "ci-judge-coherence", threshold = 0.7 },
@@ -134,6 +155,7 @@ quick_dataset = "brand_agent_dataset_quick"
 # The variation sets temperature and top_p, which Claude Haiku 4.5 rejects
 # together. The backend's Bedrock wrapper sends only temperature, so CI does too.
 drop_parameters = ["top_p", "top_k"]
+min_pass_rate = 0.5  # main: 3/4 quick, 5/8 full
 judges = [
   { key = "ci-judge-accuracy", threshold = 0.8, ground_truth = "The specialist's draft (every fact must be kept):\n{{specialist_response}}" },
   { key = "ci-judge-coherence", threshold = 0.7 },

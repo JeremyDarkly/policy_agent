@@ -1,19 +1,20 @@
 # CI evals: the LaunchDarkly evals GitHub Action
 
 `.github/workflows/evals.yml` runs `ci_eval.py` in GitHub Actions. It evaluates the AI Config variations the agents
-use against datasets stored in LaunchDarkly, and reports the results in the job summary and on the PR. Results are
-advisory: failing rows never block a merge.
+use against datasets stored in LaunchDarkly, and reports the results in the job summary and on the PR. The `evals`
+job fails when a result fails the merge gate (see "The merge gate" below). Branch protection on `main` requires that
+check, so a failing PR can't be merged.
 
 ## What triggers it
 
 | Trigger | When | Datasets |
 |---|---|---|
-| Pull request | A PR into any branch changes one of the files below | quick |
+| Pull request | Every PR into any branch. The evals run only when it changes one of the files below | quick |
 | Push to `main` | A merge or push to `main` changes one of the files below | quick |
 | Schedule | Nightly at 09:00 UTC | full |
 | Manual | **Actions > LaunchDarkly evals > Run workflow** | quick, or full if you tick **full** |
 
-The PR and push triggers only fire when the change touches one of these paths:
+The evals only run on a PR or push that touches one of these paths:
 
 - `app/backend/src/agents/**`: the agent code
 - `infrastructure/launchdarkly/ai_configs_resources.tf`: AI Config prompts, variations and judges
@@ -21,13 +22,16 @@ The PR and push triggers only fire when the change touches one of these paths:
 - `evals/ci_eval.py`, `evals/ci_targets.toml`, `evals/pyproject.toml`, `evals/uv.lock`: the eval runner and its setup
 - `.github/workflows/evals.yml`: the workflow itself
 
-For a PR, GitHub matches these paths against the PR's whole diff, not only the latest commit. Once a PR touches one of
-them, every later push to that PR runs the evals again. A new push cancels a PR's run that is still going. Push,
+For a push, the workflow's `paths` filter decides. For a PR, the workflow always starts, so the required check always
+reports, and its "Check for eval changes" step matches these paths against the PR's whole list of changed files. With
+no match, the job passes without running the evals. Once a PR touches one of them, every later push to that PR runs the
+evals again. Keep that step's list in step with the push `paths`. A new push cancels a PR's run that is still going. Push,
 nightly and manual runs each have their own queue, so a push to `main` doesn't cancel the nightly run.
 
 It doesn't run:
 
-- **On PRs from forks.** They get no secrets or AWS credentials.
+- **On PRs from forks.** They get no secrets or AWS credentials. The job is skipped, which GitHub counts as passing
+  the required check.
 - **When an AI Config changes in the LaunchDarkly UI.** Edits made there instead of through Terraform show up in the
   next nightly run. A trigger for those changes is planned (#19).
 
@@ -72,8 +76,25 @@ Manual runs take three optional inputs:
    - **Results artifact:** the `eval-results-quick` or `eval-results-full` JSON, kept for 90 days. The artifacts from
      runs on `main` are what later runs compare with.
 
-The job fails only when a target can't run at all, for example from an API error or a missing dataset. Rows that
-fail the eval show as "failed" in the summary but leave the job green.
+### The merge gate
+
+A row passes when it meets every scorer and judge threshold of its target. Each result (one AI Config, variation and
+dataset) then passes or fails the gate, and the job fails if any result fails. `apply_gate` in `ci_eval.py` fails a
+result when:
+
+- **it couldn't run**, for example from an API error or a missing dataset;
+- **any row errored**, for example a failed model or judge call. A variation CI can't run isn't shown to be safe;
+- **its pass rate is below `min_pass_rate`**, the target's floor in `ci_targets.toml` (default 1.0); or
+- **it passes more than `max_regression_rows` fewer rows than `main`** (default 1), compared with the latest
+  `main` result for the same config, variation and dataset. Skipped when the dataset's row count has changed since that
+  result, and when `main` has no result for it yet.
+
+A `[<config>.tools]` table can set its own floor and tolerance. The floor guards against quality drifting down across
+many PRs, and the regression check catches one PR making things worse. Both allow one row of slack because the judges
+are LLM calls and can score the same answer differently from run to run; if a PR fails by one row on a judged target,
+re-run the job before changing anything. Raise the floors in `ci_targets.toml` as the agents improve.
+
+The gate applies to every run, so a nightly or `main` run that fails it shows red too, though only PRs are blocked.
 
 The repository is public, so the workflow passes `--no-run-links`. The summary gives each LaunchDarkly evaluation run
 by name instead of linking to it. Find a run in LaunchDarkly under **Evaluations** by that name.

@@ -1,6 +1,11 @@
-# Advisory LaunchDarkly evals: evaluates AI Config variations against stored
-# datasets with evals/ci_eval.py, and reports in the job summary and on PRs.
-# Never blocks a merge. See evals/README.md ("CI evals").
+# LaunchDarkly evals: evaluates AI Config variations against stored datasets
+# with evals/ci_eval.py, and reports in the job summary and on PRs. The evals
+# job fails, and so blocks the merge when it's a required check, when a result
+# fails the gate set in evals/ci_targets.toml. See evals/CI_EVALS.md.
+#
+# It runs on every PR so the required check always reports. A PR that changes
+# none of the files listed in the "Check for eval changes" step passes without
+# running the evals. Pull requests from forks skip the job, which also passes.
 #
 # PRs and pushes to main use the quick datasets; the nightly run uses the full
 # ones. Every run on main keeps its results as the eval-results-quick or
@@ -9,16 +14,9 @@
 name: LaunchDarkly evals
 
 on:
+  # No paths filter: a required check from a workflow that doesn't run stays
+  # pending and blocks the PR. The "Check for eval changes" step filters instead.
   pull_request:
-    paths:
-      - app/backend/src/agents/**
-      - infrastructure/launchdarkly/ai_configs_resources.tf
-      - infrastructure/launchdarkly/model_configs.tf
-      - evals/ci_eval.py
-      - evals/ci_targets.toml
-      - evals/pyproject.toml
-      - evals/uv.lock
-      - .github/workflows/evals.yml
   push:
     branches: [main]
     paths:
@@ -82,24 +80,50 @@ jobs:
       # Whose targeting decides which variation is "served".
       LD_ENVIRONMENT: ${{ secrets.LD_ENVIRONMENT }}
     steps:
+      # Keep in step with the push paths above.
+      - name: Check for eval changes
+        id: changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then echo run=true >> "$GITHUB_OUTPUT"; exit 0; fi
+          files=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate --jq '.[].filename')
+          run=false
+          while IFS= read -r f; do
+            case "$f" in
+              app/backend/src/agents/* | infrastructure/launchdarkly/ai_configs_resources.tf | \
+              infrastructure/launchdarkly/model_configs.tf | evals/ci_eval.py | evals/ci_targets.toml | \
+              evals/pyproject.toml | evals/uv.lock | .github/workflows/evals.yml)
+                run=true; echo "Eval-relevant change: $f" ;;
+            esac
+          done <<< "$files"
+          [ "$run" = false ] && echo "No eval-relevant changes; skipping the evals."
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
+        if: steps.changes.outputs.run == 'true'
 
       - uses: astral-sh/setup-uv@v6
+        if: steps.changes.outputs.run == 'true'
         with:
           enable-cache: true
           cache-dependency-glob: evals/uv.lock
 
       - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.changes.outputs.run == 'true'
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
           role-session-name: policy-agent-ci-evals-${{ github.run_id }}
 
       - name: Install
+        if: steps.changes.outputs.run == 'true'
         working-directory: evals
         run: uv sync --locked
 
       - name: Download the latest main results
+        if: steps.changes.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -118,6 +142,7 @@ jobs:
           done
 
       - name: Run evals
+        if: steps.changes.outputs.run == 'true'
         working-directory: evals
         env:
           CONFIG: ${{ inputs.config }}
