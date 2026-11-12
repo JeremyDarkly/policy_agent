@@ -358,6 +358,36 @@ def azure_foundry_handler() -> ProviderHandler | None:
     return create_langchain_agents_handler(model, providers=AZURE_FOUNDRY_PROVIDERS)
 
 
+# The provider name on the Gemini model config (infrastructure/launchdarkly/model_configs.tf).
+GEMINI_PROVIDERS = ["Gemini"]
+
+
+def gemini_handler() -> ProviderHandler | None:
+    """An agents handler for Gemini variations (gemini-4-carbon), or None without GOOGLE_API_KEY.
+
+    Builds ChatGoogleGenerativeAI as the backend does (app/backend/src/utils/llm_config.py): the
+    variation's model name, max_tokens as max_output_tokens, and temperature only when set.
+    """
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        return None
+
+    def model(config: dict[str, Any]) -> Any:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        settings = config.get("model") or {}
+        parameters = settings.get("parameters") or {}
+        options: dict[str, Any] = {}
+        if parameters.get("temperature") is not None:
+            options["temperature"] = parameters["temperature"]
+        max_tokens = parameters.get("maxTokens") or parameters.get("max_tokens")
+        if max_tokens:
+            options["max_output_tokens"] = max_tokens
+        return ChatGoogleGenerativeAI(model=settings.get("name"), google_api_key=api_key, **options)
+
+    return create_langchain_agents_handler(model, providers=GEMINI_PROVIDERS)
+
+
 
 @dataclass
 class Selection:
@@ -633,8 +663,8 @@ async def run_target(
             generation=generation_for(target),
             # The agents are agent-mode AI Configs (instructions) and the judges are
             # messages-mode ones; the SDK picks the handler by the config's mode.
-            # The Azure handler is scoped to its provider, so the SDK picks it over the
-            # unscoped agents handler for Azure AI Foundry variations.
+            # The Azure and Gemini handlers are scoped to their providers, so the SDK picks
+            # them over the unscoped agents handler for those variations.
             handlers=[
                 recording_handler(handler, result, judges)
                 for handler in (*args.extra_handlers, create_langchain_agents_handler(),
@@ -826,8 +856,7 @@ async def main() -> int:
 
     targets, contexts = load_targets(Path(args.targets), args.config)
     args.tool_registry = load_tool_registry()
-    azure = azure_foundry_handler()
-    args.extra_handlers = [azure] if azure else []
+    args.extra_handlers = [h for h in (azure_foundry_handler(), gemini_handler()) if h]
     evals = init_evaluations()
     args.ld_client, args.test_contexts = None, {}
     if contexts and not args.variation and not args.no_contexts:

@@ -32,6 +32,25 @@ from .jev_judge import (
 # metric by scripts/register_metrics.py, so a specialist's guarded rollout can use it.
 SPECIALIST_ACCURACY_EVENT = "specialist-judge-accuracy"
 
+# 1 when a judge's reply didn't parse as the JSON its prompt asks for, 0 when it did. Sent on the
+# judge config and variation that replied, so a new judge model whose output format differs shows up
+# as a rate instead of as scores of 0. Registered by scripts/register_metrics.py.
+JUDGE_PARSE_ERROR_EVENT = "judge-parse-error"
+
+
+def _send_parse_result(model_invoker: Any, result: Dict[str, Any]) -> None:
+    """Send judge-parse-error (1 or 0) on the judge's own tracker data. Never raises."""
+    data = getattr(getattr(model_invoker, "tracker", None), "track_data", None)
+    context = getattr(model_invoker, "user_context", None)
+    if not isinstance(data, dict) or context is None:
+        return
+    try:
+        import ldclient
+
+        ldclient.get().track(JUDGE_PARSE_ERROR_EVENT, context, dict(data), 1.0 if result.get("error") else 0.0)
+    except Exception as e:
+        print(f"⚠️  Failed to send {JUDGE_PARSE_ERROR_EVENT}: {e}")
+
 
 def _print_jev(block: Dict[str, Any]) -> None:
     print(f"🔍 Jev judge ({block['mode']}, {block['model']}): {block['duration_ms']}ms, {block['cost_cents']:.4f}¢")
@@ -319,6 +338,7 @@ class BrandVoiceEvaluator:
 
         # Parse result
         result = self._parse_eval_response(response.content, threshold=0.8)
+        _send_parse_result(model_invoker, result)
         return result, model_name, tokens
 
     async def _evaluate_coherence(
@@ -369,6 +389,7 @@ class BrandVoiceEvaluator:
 
         # Parse result
         result = self._parse_eval_response(response.content, threshold=0.7)
+        _send_parse_result(model_invoker, result)
         return result, model_name, tokens
 
     def _parse_eval_response(self, response: str, threshold: float) -> Dict[str, Any]:

@@ -16,7 +16,8 @@ backend's own code:
 It prints, for each judge, how many verdicts match the labels, the failures it
 missed, the good replies it failed, p50 latency and cost per reply.
 
-By default nothing is tracked. --send sends what a chat would on jev-alongside:
+By default only the LLM judge configs' own call metrics are sent (tokens, duration,
+success, judge-parse-error), as ModelInvoker sends them. --send sends what a chat would on jev-alongside:
 the five classifications on the brand_agent tracker (for the same simulated
 user), and jev-judge-error, jev-judge-cost-cents and jev-judge-disagreement on
 the ai-judge-jev context, so the metrics get traffic. The LLM judges' own
@@ -28,6 +29,11 @@ Usage (from the repo root):
         python evals/run_judge_pilot.py --env-file .env.staging-org
     ... python evals/run_judge_pilot.py --env-file .env.staging-org --skip-llm --send
     ... python evals/run_judge_pilot.py --env-file .env.staging-org --skip-llm --send --fault
+    ... python evals/run_judge_pilot.py --env-file .env.staging-org --judge-model gemini-4-carbon
+
+--judge-model gemini-4-carbon scores with the judges' gemini-4-carbon variation
+(issue #79): it sets judge_model on each simulated user, which the --gemini-demo
+rule from scripts/set_ai_config_targeting.py matches. It needs GOOGLE_API_KEY.
 """
 
 from __future__ import annotations
@@ -54,13 +60,18 @@ DATASET = EVALS_DIR / "judge_labeled_dataset.jsonl"
 LLM_THRESHOLDS = {"accuracy": 0.8, "coherence": 0.7}
 
 
-def user_context(row: dict, run_id: str) -> dict:
-    return {
+def user_context(row: dict, run_id: str, judge_model: str = "default") -> dict:
+    ctx = {
         "user_key": f"judge-pilot-{run_id}-{row['id']}",
         "name": "Demo User",
         "domain": "togglebank",
         "judge_pilot": True,
     }
+    # The --gemini-demo rule (scripts/set_ai_config_targeting.py) serves the judges'
+    # gemini-4-carbon variation to contexts with this attribute.
+    if judge_model != "default":
+        ctx["judge_model"] = judge_model
+    return ctx
 
 
 class BrandTracker:
@@ -92,7 +103,7 @@ def run_row(row: dict, args, evaluator) -> dict:
     from src.evaluation import jev_judge
     from src.utils.launchdarkly_config import get_ld_client
 
-    ctx = user_context(row, args.run_id)
+    ctx = user_context(row, args.run_id, args.judge_model)
     out: dict = {"id": row["id"], "kind": row["kind"], "acc_ok": row["acc_ok"], "coh_ok": row["coh_ok"]}
     if evaluator is not None:
         out["llm"] = run_llm(evaluator, row, ctx)
@@ -196,6 +207,12 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--run-id", default=time.strftime("%m%d%H%M"), help="prefix that keeps user keys unique")
     parser.add_argument("--out", help="write per-row results as JSON here")
+    parser.add_argument(
+        "--judge-model",
+        choices=["default", "gemini-4-carbon"],
+        default="default",
+        help="which LLM judge variation to score with; gemini-4-carbon needs the --gemini-demo rule and GOOGLE_API_KEY",
+    )
     args = parser.parse_args()
 
     load_env(args.env_file)

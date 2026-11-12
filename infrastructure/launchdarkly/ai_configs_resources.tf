@@ -195,6 +195,21 @@ resource "launchdarkly_ai_config_variation" "account_agent" {
   ]
 }
 
+# Gemini 4 Carbon variation (issue #79): the default variation's instructions and tools,
+# read from it so they can't drift apart; only the model differs. Nothing serves it.
+# evals/ci_targets.toml lists it, so the CI evals run it on the account dataset next to
+# whatever the default rule serves.
+resource "launchdarkly_ai_config_variation" "account_agent_gemini_4_carbon" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.account_agent.key
+  key              = "gemini-4-carbon"
+  name             = "Gemini 4 Carbon"
+  model_config_key = launchdarkly_model_config.gemini_4_carbon.key
+  state            = "published"
+  instructions     = launchdarkly_ai_config_variation.account_agent.instructions
+  tool_keys        = launchdarkly_ai_config_variation.account_agent.tool_keys
+}
+
 resource "launchdarkly_ai_config" "branch_agent" {
   project_key = var.project_key
   key         = "branch_agent"
@@ -674,6 +689,33 @@ resource "launchdarkly_ai_config_variation" "ai_judge_coherence" {
   }]
 
   tool_keys = []
+}
+
+# Gemini 4 Carbon judge variations (issue #79). The same messages as each judge's default
+# variation, read from it so the rubrics can't drift apart; only the model differs. Nothing
+# serves them until a rule does: scripts/set_ai_config_targeting.py --gemini-demo serves
+# them to contexts with judge_model = "gemini-4-carbon", which only
+# evals/run_judge_pilot.py --judge-model gemini-4-carbon sets.
+resource "launchdarkly_ai_config_variation" "ai_judge_accuracy_gemini_4_carbon" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.ai_judge_accuracy.key
+  key              = "gemini-4-carbon"
+  name             = "Gemini 4 Carbon"
+  model_config_key = launchdarkly_model_config.gemini_4_carbon.key
+  state            = "published"
+  messages         = launchdarkly_ai_config_variation.ai_judge_accuracy.messages
+  tool_keys        = []
+}
+
+resource "launchdarkly_ai_config_variation" "ai_judge_coherence_gemini_4_carbon" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.ai_judge_coherence.key
+  key              = "gemini-4-carbon"
+  name             = "Gemini 4 Carbon"
+  model_config_key = launchdarkly_model_config.gemini_4_carbon.key
+  state            = "published"
+  messages         = launchdarkly_ai_config_variation.ai_judge_coherence.messages
+  tool_keys        = []
 }
 
 # Offline judges for evals/ci_eval.py. Same rubrics and models as the two online
