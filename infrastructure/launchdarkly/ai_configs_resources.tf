@@ -877,6 +877,68 @@ resource "launchdarkly_ai_config_variation" "ci_judge_coherence" {
   tool_keys = []
 }
 
+# Gemini 4 Carbon copies of the two offline judges. The eval runner picks one variation of a
+# judge per run (the one served to a fixed context), so a second variation of ci-judge-accuracy
+# couldn't run next to the first. These are separate judges instead, with their own metric keys,
+# and evals/ci_targets.toml ([judge_companions]) runs each one wherever its Sonnet 5 judge runs.
+# The messages are read from the Sonnet 5 variations, so the rubrics can't drift apart.
+
+resource "launchdarkly_ai_config" "ci_judge_accuracy_gemini" {
+  project_key = var.project_key
+  key         = "ci-judge-accuracy-gemini"
+  name        = "CI Judge: Accuracy (Gemini 4 Carbon)"
+  mode        = "judge"
+
+  evaluation_metric_key = "$ld:ai:judge:ci-accuracy-gemini"
+  # See ai_judge_accuracy: pin is_inverted to dodge the provider's
+  # null-vs-false "inconsistent result after apply" bug.
+  is_inverted = false
+  description = "ci-judge-accuracy on Gemini 4 Carbon, run beside it in CI evals to compare the two judge models."
+  tags = [
+    "demo",
+    "ci-evals",
+  ]
+}
+
+resource "launchdarkly_ai_config_variation" "ci_judge_accuracy_gemini" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.ci_judge_accuracy_gemini.key
+  key              = "default"
+  name             = "Default"
+  model_config_key = launchdarkly_model_config.gemini_4_carbon.key
+  state            = "published"
+  messages         = launchdarkly_ai_config_variation.ci_judge_accuracy.messages
+  tool_keys        = []
+}
+
+resource "launchdarkly_ai_config" "ci_judge_coherence_gemini" {
+  project_key = var.project_key
+  key         = "ci-judge-coherence-gemini"
+  name        = "CI Judge: Coherence (Gemini 4 Carbon)"
+  mode        = "judge"
+
+  evaluation_metric_key = "$ld:ai:judge:ci-coherence-gemini"
+  # See ai_judge_accuracy: pin is_inverted to dodge the provider's
+  # null-vs-false "inconsistent result after apply" bug.
+  is_inverted = false
+  description = "ci-judge-coherence on Gemini 4 Carbon, run beside it in CI evals to compare the two judge models."
+  tags = [
+    "demo",
+    "ci-evals",
+  ]
+}
+
+resource "launchdarkly_ai_config_variation" "ci_judge_coherence_gemini" {
+  project_key      = var.project_key
+  config_key       = launchdarkly_ai_config.ci_judge_coherence_gemini.key
+  key              = "default"
+  name             = "Default"
+  model_config_key = launchdarkly_model_config.gemini_4_carbon.key
+  state            = "published"
+  messages         = launchdarkly_ai_config_variation.ci_judge_coherence.messages
+  tool_keys        = []
+}
+
 # Offline tool-use judge for evals/ci_eval.py (issue #72). It grades the tool
 # trajectory, which the eval runner puts in {{message_history}}: the tools the
 # assistant could call, each call with its arguments and result or error, and the
@@ -973,6 +1035,8 @@ locals {
       launchdarkly_ai_config.ci_judge_accuracy,
       launchdarkly_ai_config.ci_judge_coherence,
       launchdarkly_ai_config.ci_judge_tool_use,
+      launchdarkly_ai_config.ci_judge_accuracy_gemini,
+      launchdarkly_ai_config.ci_judge_coherence_gemini,
     ] : r.key => r
   }
   # One variation per config (keyed by config key), so the second variations
@@ -989,6 +1053,8 @@ locals {
       launchdarkly_ai_config_variation.ci_judge_accuracy,
       launchdarkly_ai_config_variation.ci_judge_coherence,
       launchdarkly_ai_config_variation.ci_judge_tool_use,
+      launchdarkly_ai_config_variation.ci_judge_accuracy_gemini,
+      launchdarkly_ai_config_variation.ci_judge_coherence_gemini,
     ] : r.config_key => r
   }
 }
