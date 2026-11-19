@@ -462,7 +462,7 @@ tracked generation (duration, success, summed tokens), and each call sends:
 |---|---|---|
 | `$ld:ai:tool_call` (`tracker.track_tool_call`) | 1 per call, with `toolKey` | The config's Monitoring tab |
 | `ai-tool-call-error` | 1 when the call raised or found nothing (`not_found`), else 0 | A custom metric, for a guarded rollout |
-| `scheduler-unlisted-slot` | Per scheduler reply: 1 when it names a slot ID no tool call returned, else 0 | Same |
+| `scheduler-unlisted-slot` | Per scheduler reply: 1 when it names a slot ID or time no `get_available_slots` call returned, else 0. A slot ID is a `SLOT-…` ID or any ID-like token (`FRD-101`) next to a time (`code_checks.unlisted_slots`). Since #85 it also counts invented IDs in other formats and unlisted times, so its baseline may be higher than before. | Same |
 
 The UI terminal lists each call on the agent's node, and the chat API returns them in `agentFlow[].tool_calls`.
 

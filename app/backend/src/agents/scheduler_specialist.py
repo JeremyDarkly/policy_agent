@@ -1,7 +1,6 @@
 """Live agent scheduler specialist."""
 
 import json
-import re
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -14,22 +13,13 @@ from ..utils.served_model import served_model_id_of
 from ..utils import spend_ledger
 from ..utils.launchdarkly_config import get_ld_client
 from ..utils.tool_loop import run_tool_loop, tools_for
+from ..evaluation.code_checks import unlisted_slots  # noqa: F401  (re-exported for callers and tests)
 
 UNLISTED_SLOT_EVENT = "scheduler-unlisted-slot"
-SLOT_ID = re.compile(r"SLOT-\d{8}-\d{4}")
-
-
-def unlisted_slots(reply: str, calls: list[dict[str, Any]]) -> list[str]:
-    """Slot IDs the reply names that no get_available_slots call returned in this request."""
-    returned: set[str] = set()
-    for call in calls:
-        if call.get("tool") == "get_available_slots":
-            returned.update(SLOT_ID.findall(call.get("result") or ""))
-    return sorted(set(SLOT_ID.findall(reply or "")) - returned)
 
 
 def report_unlisted_slots(model_invoker: Any, unlisted: list[str]) -> None:
-    """Send scheduler-unlisted-slot: 1 when the reply names a slot no tool returned, else 0."""
+    """Send scheduler-unlisted-slot: 1 when the reply names a slot ID or time no tool returned, else 0."""
     if model_invoker.user_context is None:
         return
     try:
