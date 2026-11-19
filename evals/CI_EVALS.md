@@ -64,12 +64,21 @@ Manual runs take three optional inputs:
      tool trajectory against the row's `expected_tools`, and gives full marks to a control row that needs no tool
      when no tool is called. Each accuracy and coherence judge (Claude Sonnet 5) is followed by a Gemini 4 Carbon
      copy, `ci-judge-accuracy-gemini` and `ci-judge-coherence-gemini`, from `[judge_companions]` in
-     `ci_targets.toml`. A row has to pass both. The summary's "Rows each judge passed" table compares the two.
+     `ci_targets.toml`. A row has to pass both.
+   - **Runs code scorers beside the judges.** Each target's `scorers` in `ci_targets.toml` are deterministic checks
+     from `app/backend/src/evaluation/code_checks.py`: facts against the row's variables (`account-facts`,
+     `offered-listed-slots`, `draft-facts`), the tool trajectory (`called-expected-tools`, `unlisted-slots`) and
+     leaked prompt headings. They make no model calls and don't decide a row's verdict: the judges do, except for
+     triage, whose only criterion is the `routed-to-expected-specialist` scorer. LaunchDarkly needs a threshold on every
+     scorer, so the LaunchDarkly run page counts a scorer failure as a failed row; the summary says so when its count
+     differs. The summary's "Rows each scorer and judge passed" table lists every judge and scorer, with the rows each
+     scorer agreed with its judge on. `account_agent` also runs `demo-mentions-account-type`, a deliberately poor
+     check shown in a "Comparison only" table (see [README.md](README.md#a-good-check-and-a-bad-one)).
    - **Compares with `main`.** It matches rows to the downloaded results and lists the ones that newly fail and the
      ones that now pass.
 5. **Reports the results:**
    - **Job summary:** a table per config and variation with the tools given to the model, rows passed, the comparison with `main`, and a verdict,
-     followed by the failing rows with the judge's score and reason.
+     followed by the failing rows with the judge's score and reason, and the scorer failures with the scorer's reason.
    - **PR comment:** the same summary in one comment, which later runs update in place.
    - **Results artifact:** the `eval-results-quick` or `eval-results-full` JSON, kept for 90 days. The artifacts from
      runs on `main` are what later runs compare with.

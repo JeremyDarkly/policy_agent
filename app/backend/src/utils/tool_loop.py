@@ -179,6 +179,8 @@ def run_tool_loop(
                     "tool": name,
                     "args": call.get("args"),
                     "result": text[:MAX_RESULT_CHARS],
+                    # What the model saw, for checks against the whole result (code_checks.unlisted_slots).
+                    **({"full_result": text} if len(text) > MAX_RESULT_CHARS else {}),
                     "error": error,
                     "failed": failed,
                     "duration_ms": int((time.time() - started) * 1000),

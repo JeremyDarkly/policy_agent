@@ -20,6 +20,16 @@ and from app/backend/src/evaluation/judge.py after each chat's judges run:
                        when it did, on the judge's config and variation.
                        Averaged, it is the parse error rate. Lower is better.
 
+and from app/backend/src/evaluation/live_checks.py when response-code-checks
+serves true:
+
+  code-check-<name>    1 when the deterministic check failed on the reply, 0
+                       when it passed, for account-facts, draft-facts and
+                       leaked-headings. Averaged. Lower is better.
+  code-check-judge-disagreement  1 when account-facts and the LLM accuracy
+                       judge disagreed on an account reply, else 0. Lower is better.
+  code-check-error     1 when a check raised, else 0. Lower is better.
+
 LaunchDarkly records custom events without a metric, but a guarded rollout or
 experiment can only use a metric. This script creates the metrics through the
 REST API, so a fresh clone can repeat it after `terraform apply`.
@@ -109,6 +119,32 @@ METRICS = [
         "randomizationUnits": ["user"],
         "tags": ["AI", "judge"],
     },
+    *[
+        {
+            "key": f"code-check-{name}",
+            "name": f"Code check failure rate: {name}",
+            "description": (
+                f"Share of chat replies the deterministic {name} check failed (1 = failed, 0 = passed, averaged): "
+                f"{what}. Sent when response-code-checks serves true (app/backend/src/evaluation/live_checks.py)."
+            ),
+            "kind": "custom",
+            "eventKey": f"code-check-{name}",
+            "isNumeric": True,
+            "unit": "failure",
+            "unitAggregationType": "average",
+            "successCriteria": "LowerThanBaseline",
+            "randomizationUnits": ["user"],
+            "tags": ["AI", "code-check"],
+        }
+        for name, what in [
+            ("account-facts", "an account reply named an ID, amount, percentage, date, tier or account state "
+                              "the profile contradicts"),
+            ("draft-facts", "the brand voice reply dropped a number, ID, date or time from the specialist's draft"),
+            ("leaked-headings", "the reply printed a 'Step N:' line from its prompt"),
+            ("judge-disagreement", "account-facts and the LLM accuracy judge gave different verdicts on an account reply"),
+            ("error", "a check raised instead of returning a result"),
+        ]
+    ],
 ]
 
 

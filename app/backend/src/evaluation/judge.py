@@ -16,6 +16,7 @@ from opentelemetry import trace
 
 from ..utils.llm_config import get_model_invoker
 from ..utils.launchdarkly_config import get_ld_client
+from . import live_checks
 from .jev_judge import (
     MODE_ALONGSIDE,
     MODE_DISABLED,
@@ -89,6 +90,7 @@ class BrandVoiceEvaluator:
         user_context: Dict[str, Any],
         brand_tracker: Any,
         specialist_track_data: Optional[Dict[str, Any]] = None,
+        code_check_inputs: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Evaluate brand voice output asynchronously.
@@ -101,6 +103,8 @@ class BrandVoiceEvaluator:
             brand_tracker: The tracker from brand_agent for sending judgment metrics
             specialist_track_data: Track data of the specialist that answered (agent_data's
                 ``track_data``), so its accuracy score lands on that config and variation
+            code_check_inputs: live_checks.CheckInputs for the deterministic checks that run
+                beside the judges when ``response-code-checks`` serves true
 
         Returns:
             Dict with evaluation results
@@ -200,6 +204,15 @@ class BrandVoiceEvaluator:
                 if not user_context.get("is_fallback", False):
                     self._send_specialist_accuracy(accuracy_result, brand_tracker, specialist_track_data)
 
+            # Deterministic checks, after the judges and beside them: they never change a judge's result.
+            code_checks_block = live_checks.evaluate(
+                code_check_inputs,
+                brand_voice_output,
+                getattr(brand_tracker, "user_context", None),
+                None if user_context.get("is_fallback", False) else accuracy_result,
+                specialist_track_data,
+            )
+
             jev_block = None
             if run_jev:
                 disagrees = (
@@ -242,6 +255,8 @@ class BrandVoiceEvaluator:
             }
             if jev_block is not None:
                 result["jev"] = jev_block
+            if code_checks_block is not None:
+                result["code_checks"] = code_checks_block
             return result
 
         except Exception as e:
@@ -615,6 +630,7 @@ async def evaluate_brand_voice_async(
     request_id: Optional[str] = None,
     results_store: Optional[Dict[str, Any]] = None,
     specialist_track_data: Optional[Dict[str, Any]] = None,
+    code_check_inputs: Optional[Any] = None,
 ) -> None:
     """
     Evaluate system output asynchronously without blocking.
@@ -630,6 +646,7 @@ async def evaluate_brand_voice_async(
         brand_tracker: The ModelInvoker from brand_agent (contains tracker + LD context)
         request_id: Optional request ID to store results for later retrieval
         specialist_track_data: Track data of the specialist that answered, if one did
+        code_check_inputs: live_checks.CheckInputs for the response-code-checks checks
     """
     evaluator = get_evaluator()
 
@@ -640,6 +657,7 @@ async def evaluate_brand_voice_async(
             results = await evaluator.evaluate_async(
                 original_query, account_context, brand_voice_output, user_context, brand_tracker,
                 specialist_track_data=specialist_track_data,
+                code_check_inputs=code_check_inputs,
             )
             _add_evaluation_events(span, results)
 
