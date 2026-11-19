@@ -14,6 +14,7 @@ from ..utils.served_model import served_model_id_of
 from ..utils import spend_ledger
 from ..utils.launchdarkly_config import get_ld_client
 from ..evaluation.judge import evaluate_brand_voice_async
+from ..evaluation.live_checks import CheckInputs
 
 
 # Default AI Config fallback for brand_agent
@@ -572,6 +573,16 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
                     account_context = ctx
                     break
 
+        # What the response-code-checks checks read: the answering specialist and its draft
+        answered_by = next((s for s in ("account_specialist", "branch_specialist", "scheduler_specialist")
+                            if s in agent_data), "")
+        code_check_inputs = CheckInputs(
+            specialist=answered_by,
+            query=original_query,
+            specialist_response=specialist_response,
+            account_context=account_context if answered_by == "account_specialist" else "",
+        )
+
         # The judges send the accuracy score on the answering specialist's config too
         specialist_track_data = next(
             (agent_data[s].get("track_data") for s in ("account_specialist", "branch_specialist",
@@ -640,6 +651,7 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
                     request_id=request_id,
                     results_store=results_store,
                     specialist_track_data=specialist_track_data,
+                    code_check_inputs=code_check_inputs,
                 )
             )
         except RuntimeError:
@@ -659,6 +671,7 @@ def brand_voice_node(state: AgentState) -> dict[str, Any]:
                         request_id=request_id,
                         results_store=results_store,
                         specialist_track_data=specialist_track_data,
+                        code_check_inputs=code_check_inputs,
                     )
                 )
 
