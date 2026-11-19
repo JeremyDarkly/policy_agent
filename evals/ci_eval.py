@@ -25,6 +25,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import hashlib
+import inspect
 import json
 import os
 import re
@@ -44,7 +46,7 @@ from ldclient import Context
 from ldclient.config import Config
 from launchdarkly_ai_langchain_agents import create_langchain_agents_handler
 from launchdarkly_ai_langchain_messages import create_langchain_messages_handler
-from launchdarkly_ai_server.judge_scoring import numeric_score, parse_judge_response
+from launchdarkly_ai_server.judge_scoring import judge_text, numeric_score, parse_judge_response
 from launchdarkly_ai_server import (
     AIConfig,
     DatasetRow,
@@ -58,6 +60,12 @@ from launchdarkly_ai_server import (
 
 EVALS_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = EVALS_DIR.parent / "app" / "backend"
+# The backend's tool registry and code checks use only the standard library, so CI
+# imports them without the backend's dependencies.
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+from src.evaluation import code_checks  # noqa: E402
 
 # The app's .env uses LAUNCHDARKLY_* names; the AI SDK reads LD_* names.
 ENV_MAP = {
@@ -109,6 +117,18 @@ class TargetResult:
     misses: list[ScoredRow] = field(default_factory=list)
     # Judge key -> [rows scored, rows at or above the threshold], to compare judges on the same rows.
     judge_counts: dict[str, list[int]] = field(default_factory=dict)
+    # Scorer name -> [rows scored, rows passed], from the scores ci_eval.py records as each scorer runs.
+    scorer_counts: dict[str, list[int]] = field(default_factory=dict)
+    # Row key -> criterion -> passed, for judges and scorers, to compare them row by row.
+    # The key is a hash of the row's input and generated output (row_key).
+    verdicts: dict[str, dict[str, bool]] = field(default_factory=dict)
+    # Failures of comparison-only scorers (COMPARISON_ONLY), kept out of misses.
+    comparison_misses: list[ScoredRow] = field(default_factory=list)
+    # The run summary's per-criterion counts from LaunchDarkly: name -> {passed, failed, error, ...}.
+    criterion_summaries: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # LaunchDarkly's own row counts, which count a scorer failure as a failed row. summary
+    # and passed hold the verdicts from the judges (and DECIDING_SCORERS) instead.
+    ld_summary: dict[str, int] = field(default_factory=dict)
     error: str = ""
     # Distinct errors raised while generating or judging rows. The SDK counts
     # those rows as errors but doesn't say why.
@@ -118,13 +138,40 @@ class TargetResult:
     baseline_passed: int | None = None
     newly_failing: list[ScoredRow] = field(default_factory=list)
     now_passing: list[ScoredRow] = field(default_factory=list)
+    # Scorer name -> [rows scored, rows passed] in the baseline result.
+    baseline_scorer_counts: dict[str, list[int]] = field(default_factory=dict)
 
 
 # --- Scorers -----------------------------------------------------------------
-# Each scorer records its misses on the current TargetResult for the summary,
-# since LaunchDarkly's run summary only reports row counts.
+# Each scorer records its result on the current TargetResult for the summary, since
+# LaunchDarkly's run summary only reports counts. Scorers don't decide a row's verdict;
+# the judges do. LaunchDarkly needs a threshold on every scorer (a scorer with none is
+# rejected with 400 "options.threshold is required for kind 'scorer'", checked
+# 2026-11-18), so scorers run with a threshold of 1.0 and LaunchDarkly's own row counts
+# include scorer failures. ci_eval.py therefore takes each row's verdict from the judges'
+# per-row results (row_verdicts), plus DECIDING_SCORERS.
 
 current: TargetResult | None = None
+# Row trajectory key -> the tool calls the row made, as {tool, arguments, result}.
+# Filled by recording_handler for the run in progress (see trajectory_key).
+trajectories: dict[str, list[dict[str, Any]]] = {}
+
+# A scorer that is its target's only criterion keeps a threshold, or its rows would have no verdict.
+DECIDING_SCORERS = {"routed-to-expected-specialist"}
+# Scorers shown for comparison only: a "Comparison only" table in the summary, and their
+# failures kept out of the failing rows. demo-mentions-account-type is deliberately poor.
+COMPARISON_ONLY = {"demo-mentions-account-type"}
+# The judge each scorer is compared with in the agreement column, when the target runs it.
+# A comparison-only scorer is also compared with the scorer it's meant to contrast with.
+AGREES_WITH = {
+    "called-expected-tools": ["ci-judge-tool-use"],
+    "unlisted-slots": ["ci-judge-tool-use"],
+    "offered-listed-slots": ["ci-judge-accuracy"],
+    "account-facts": ["ci-judge-accuracy"],
+    "draft-facts": ["ci-judge-accuracy"],
+    "leaked-headings": ["ci-judge-coherence"],
+    "demo-mentions-account-type": ["account-facts", "ci-judge-accuracy"],
+}
 
 QUERY_TYPE_TO_SPECIALIST = {
     "account_question": "account_specialist",
@@ -132,6 +179,55 @@ QUERY_TYPE_TO_SPECIALIST = {
     "schedule_agent": "scheduler_specialist",
     "general_question": "brand_voice",
 }
+
+
+def row_key(row_input: str | None, output: Any) -> str:
+    """Joins a row's judge and scorer results: a hash of its input and generated output.
+
+    A judge sees the output as judge_text renders it ({{response_to_evaluate}}), so the
+    scorer side renders it the same way.
+    """
+    text = f"{row_input or ''}\0{judge_text(output)}"
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def trajectory_key(row_input: str | None, variables: dict[str, Any] | None) -> str:
+    """The key a row's tool calls are recorded under: its input and variables.
+
+    The generation handler and the scorer both see these, so the scorer can find the calls
+    the SDK doesn't pass it (issue #86). Rows with the same input and variables would share
+    a key, which load_targets rules out. Remove this when the SDK passes tool calls to a scorer.
+    """
+    return f"{row_input or ''}\0{json.dumps(variables or {}, sort_keys=True, default=str)}"
+
+
+def recorded_calls(row: DatasetRow) -> list[dict[str, Any]]:
+    """The tool calls this row made, or raise so the SDK records a scorer error for it.
+
+    A missing key means the recorder didn't see the row; passing would hide that.
+    """
+    key = trajectory_key(row.input, row.variables)
+    if key not in trajectories:
+        raise RuntimeError("trajectory not recorded")
+    return trajectories[key]
+
+
+def record_scorer(name: str, row: DatasetRow, output: Any, result: code_checks.CheckResult,
+                  expected: str | None = None) -> float:
+    """Record a scorer's result on the current TargetResult and return its float score."""
+    if current is not None:
+        counts = current.scorer_counts.setdefault(name, [0, 0])
+        counts[0] += 1
+        counts[1] += result.passed
+        current.verdicts.setdefault(row_key(row.input, output), {})[name] = result.passed
+        if not result.passed:
+            miss = ScoredRow(
+                input=row_label(row.input or ""),
+                expected=expected or f"{name} (scorer)",
+                actual=f"{result.score:.2f}: {result.reason}" if expected is None else result.reason,
+            )
+            (current.comparison_misses if name in COMPARISON_ONLY else current.misses).append(miss)
+    return float(result.score)
 
 
 def parse_triage_json(content: str) -> dict[str, Any]:
@@ -169,13 +265,48 @@ def score_routing(row: DatasetRow, output: str | None) -> float:
     """1.0 when the triage output routes to the row's expected specialist."""
     expected = (row.metadata or {}).get("expected_specialist", "")
     actual = triage_route(output)
-    if actual != expected and current is not None:
-        current.misses.append(ScoredRow(input=row.input or "", expected=expected, actual=actual))
-    return 1.0 if actual == expected else 0.0
+    check = code_checks.CheckResult(1.0 if actual == expected else 0.0, actual)
+    return record_scorer("routed-to-expected-specialist", row, output, check, expected=expected)
+
+
+def row_query(row: DatasetRow) -> str:
+    return (row.metadata or {}).get("query") or row_label(row.input or "")
+
+
+def code_check_scorer(name: str, check: Any) -> Any:
+    """An SDK scorer fn for a code check: check(row, reply) -> CheckResult.
+
+    A missing row variable raises, so the SDK records an error for the row instead of a pass.
+    """
+
+    def fn(row: DatasetRow, output: Any) -> float:
+        return record_scorer(name, row, output, check(row, judge_text(output)))
+
+    fn.__name__ = name.replace("-", "_")
+    return fn
 
 
 SCORERS = {
     "routed-to-expected-specialist": score_routing,
+    # Scheduler without tools: the slots are in the row's available_slots.
+    "offered-listed-slots": code_check_scorer(
+        "offered-listed-slots", lambda row, reply: code_checks.offered_listed_slots(reply, row.variables["available_slots"])),
+    # Tool rows: the slots and tools come from the calls the row made.
+    "unlisted-slots": code_check_scorer(
+        "unlisted-slots", lambda row, reply: code_checks.check_unlisted_slots(reply, recorded_calls(row))),
+    "called-expected-tools": code_check_scorer(
+        "called-expected-tools",
+        lambda row, reply: code_checks.called_expected_tools(recorded_calls(row), row.variables["expected_tools"])),
+    "account-facts": code_check_scorer(
+        "account-facts",
+        lambda row, reply: code_checks.account_facts(reply, row.variables["account_info"], row_query(row))),
+    "demo-mentions-account-type": code_check_scorer(
+        "demo-mentions-account-type",
+        lambda row, reply: code_checks.mentions_account_type(reply, row.variables["account_info"])),
+    "draft-facts": code_check_scorer(
+        "draft-facts", lambda row, reply: code_checks.draft_facts(reply, row.variables["specialist_response"])),
+    "leaked-headings": code_check_scorer(
+        "leaked-headings", lambda row, reply: code_checks.leaked_headings(reply)),
 }
 
 
@@ -290,6 +421,11 @@ def recording_handler(
     """
 
     async def recorded(config, user_input=None, tool_handlers=None, variables=None, history=None):
+        if not config.get("evaluationMetricKey"):
+            # A generation, not a judge: record the row's tool calls for the trajectory scorers.
+            calls: list[dict[str, Any]] = []
+            trajectories[trajectory_key(user_input, variables)] = calls
+            tool_handlers = recording_tools(tool_handlers, calls)
         try:
             output = await inner(config, user_input, tool_handlers, variables, history)
         except Exception as error:
@@ -307,7 +443,10 @@ def recording_handler(
             if score is not None:
                 counts = result.judge_counts.setdefault(judge.key, [0, 0])
                 counts[0] += 1
-                counts[1] += judge.threshold is None or score >= judge.threshold
+                passed = judge.threshold is None or score >= judge.threshold
+                counts[1] += passed
+                key = row_key(variables.get("input"), variables.get("response_to_evaluate"))
+                result.verdicts.setdefault(key, {})[judge.key] = bool(passed)
             if score is not None and judge.threshold is not None and score < judge.threshold:
                 result.misses.append(
                     ScoredRow(
@@ -320,6 +459,36 @@ def recording_handler(
 
     return ProviderHandler(recorded, provides_for=inner.provides_for, capture_content=inner.capture_content,
                            providers=inner.providers)
+
+
+def recording_tools(tool_handlers: dict[str, Any] | None, calls: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The row's tool handlers, each also appending {tool, arguments, result} to calls.
+
+    A sync tool stays sync, as the SDK's own recorder keeps it.
+    """
+    if not tool_handlers:
+        return tool_handlers
+
+    def wrap(name: str, implementation: Any) -> Any:
+        if not callable(implementation):
+            return implementation
+
+        async def finish(arguments: Any, awaitable: Any) -> Any:
+            output = await awaitable
+            calls.append({"tool": name, "arguments": arguments, "result": output})
+            return output
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            arguments = args[0] if len(args) == 1 and not kwargs else (kwargs or list(args))
+            output = implementation(*args, **kwargs)
+            if inspect.isawaitable(output):
+                return finish(arguments, output)
+            calls.append({"tool": name, "arguments": arguments, "result": output})
+            return output
+
+        return call
+
+    return {name: wrap(name, implementation) for name, implementation in tool_handlers.items()}
 
 
 # The provider name on the Azure AI Foundry model config (infrastructure/launchdarkly/model_configs.tf).
@@ -563,13 +732,40 @@ def load_targets(path: Path, only: list[str]) -> tuple[dict[str, dict[str, Any]]
         for table in (target, target.get("tools", {})):
             if "judges" in table:
                 table["judges"] = with_companions(table["judges"], companions)
-        for name in target.get("scorers", []):
-            if name not in SCORERS:
-                raise SystemExit(f"error: {key} uses unknown scorer {name!r}")
+        for table in (target, target.get("tools", {})):
+            for name in table.get("scorers", []):
+                if name not in SCORERS:
+                    raise SystemExit(f"error: {key} uses unknown scorer {name!r}")
+            for field_name in ("dataset", "quick_dataset"):
+                if table.get(field_name):
+                    check_unique_rows(table[field_name])
         unknown = sorted(set(target.get("contexts", [])) - set(contexts))
         if unknown:
             raise SystemExit(f"error: {key} uses unknown context {', '.join(unknown)}")
     return targets, contexts
+
+
+def check_unique_rows(dataset: str) -> None:
+    """Stop if the local copy of a dataset has two rows with the same input and variables.
+
+    Such rows would share a trajectory key, so a scorer could read the other row's tool calls.
+    Datasets with no local copy (ci_datasets/<key>.jsonl or <key>.jsonl) aren't checked.
+    """
+    for path in (EVALS_DIR / "ci_datasets" / f"{dataset}.jsonl", EVALS_DIR / f"{dataset}.jsonl"):
+        if path.is_file():
+            break
+    else:
+        return
+    seen: dict[str, int] = {}
+    for number, line in enumerate(path.read_text().splitlines(), start=1):
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        key = trajectory_key(row.get("input"), row.get("variables"))
+        if key in seen:
+            raise SystemExit(f"error: {path.name} lines {seen[key]} and {number} have the same input and "
+                             "variables, so their tool calls can't be told apart")
+        seen[key] = number
 
 
 def with_companions(judges: list[str | dict[str, Any]], companions: dict[str, list[str]]) -> list[str | dict[str, Any]]:
@@ -619,8 +815,41 @@ def generation_for(target: dict[str, Any]) -> dict[str, Any] | None:
     return {"parameters": {name: None for name in dropped}} if dropped else None
 
 
+def scorer_for(name: str) -> Scorer:
+    """A scorer from ci_targets.toml, with a threshold of 1.0.
+
+    LaunchDarkly rejects a scorer with no threshold, so every scorer has one, and a row
+    that fails a scorer shows as failed on the run page. Only DECIDING_SCORERS count toward
+    the row verdicts ci_eval.py reports (row_verdicts).
+    """
+    return Scorer(name=name, fn=SCORERS[name], threshold=1.0)
+
+
+def deciding_criteria(target: dict[str, Any]) -> set[str]:
+    """The criteria that decide a row's verdict: the judges, and any DECIDING_SCORERS."""
+    judges = {entry if isinstance(entry, str) else entry["key"] for entry in target.get("judges", [])}
+    return judges | (set(target.get("scorers", [])) & DECIDING_SCORERS)
+
+
+def row_verdicts(result: TargetResult, deciding: set[str], total: int) -> dict[str, int]:
+    """Row counts from the deciding criteria alone.
+
+    A row passes when every deciding criterion passed, and fails when one failed. A row
+    with a deciding criterion missing (its generation or a judge errored) is an error, as
+    are rows that never produced a result. With nothing deciding, every row with a result passes.
+    """
+    passed = failed = 0
+    for verdict in result.verdicts.values():
+        decided = {name: ok for name, ok in verdict.items() if name in deciding}
+        if any(ok is False for ok in decided.values()):
+            failed += 1
+        elif set(decided) == deciding:
+            passed += 1
+    return {"total": total, "passed": passed, "failed": failed, "error": max(total - passed - failed, 0)}
+
+
 def criteria_for(target: dict[str, Any]) -> list[Judge | Scorer]:
-    criteria: list[Judge | Scorer] = [Scorer(name=name, fn=SCORERS[name]) for name in target.get("scorers", [])]
+    criteria: list[Judge | Scorer] = [scorer_for(name) for name in target.get("scorers", [])]
     criteria += [judge_for(entry) for entry in target.get("judges", [])]
     return criteria
 
@@ -679,6 +908,7 @@ async def run_target(
     print(f"running {config}/{variation} on dataset {dataset}"
           + (f" with tools {', '.join(tool_keys)}" if tool_keys else ""), flush=True)
     current = result
+    trajectories.clear()
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     result.key = f"ci-{args.label}-{config}-{variation}-{stamp}".lower()
     try:
@@ -709,16 +939,40 @@ async def run_target(
         return result
     finally:
         current = None
-    result.passed = run.passed
+        trajectories.clear()
     result.url = run.url
+    result.criterion_summaries = criterion_summaries(evals, run.url)
     s = run.summary
-    result.summary = {
+    result.ld_summary = {
         "total": s.total_rows,
         "passed": s.passed_rows,
         "failed": s.failed_rows,
         "error": s.error_rows,
     }
+    result.summary = row_verdicts(result, deciding_criteria(target), s.total_rows)
+    result.passed = result.summary["failed"] == 0 and result.summary["error"] == 0
     return result
+
+
+def criterion_summaries(evals: Any, url: str) -> dict[str, dict[str, Any]]:
+    """The run summary's per-criterion counts (criterionSummaries), by criterion name.
+
+    The SDK's RunSummary keeps only row counts, so this reads the same endpoint again. The
+    evaluation and run IDs are in the run URL the SDK builds. Empty if it can't be read.
+    """
+    match = re.search(r"/evaluations/([^/]+)/runs/([^/?#]+)", url or "")
+    if not match:
+        return {}
+    try:
+        data = ld_get(f"projects/{evals.project_key}/evaluations/{match.group(1)}/runs/{match.group(2)}/summary")
+    except EvaluationsError as error:
+        print(f"  couldn't read the run's criterion summaries: {error}", flush=True)
+        return {}
+    summaries = data.get("criterionSummaries") or {}
+    if isinstance(summaries, list):
+        summaries = {str(s.get("criterionType") or s.get("name") or s.get("key")): s for s in summaries
+                     if isinstance(s, dict)}
+    return {str(name): dict(value) for name, value in summaries.items() if isinstance(value, dict)}
 
 
 def compare_with_baseline(results: list[TargetResult], path: Path) -> bool:
@@ -739,6 +993,7 @@ def compare_with_baseline(results: list[TargetResult], path: Path) -> bool:
         if r.error or b is None:
             continue
         r.baseline_passed = b["summary"]["passed"]
+        r.baseline_scorer_counts = b.get("scorer_counts") or {}
         # Keyed by input and criterion: one row can fail several judges.
         before = {(m["input"], m["expected"]): ScoredRow(**m) for m in b["misses"]}
         after = {(m.input, m.expected): m for m in r.misses}
@@ -796,17 +1051,16 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
                   "ci_targets.toml. *chosen*: from `--variation`. *Served to*: the test contexts LaunchDarkly "
                   "serves the variation to, and why. *Tools*: the Library tools the run gave the model, backed by "
                   "the backend's implementations."]
-    judged = [r for r in results if r.judge_counts]
-    if judged:
-        lines += ["", "**Rows each judge passed**", "", "| AI Config | Variation | Judges |", "|---|---|---|"]
-        for r in judged:
-            counts = " · ".join(f"`{key}` {passed}/{scored}" for key, (scored, passed) in r.judge_counts.items())
-            lines.append(f"| `{r.config}` | `{r.variation}` | {counts} |")
+    lines += criteria_tables(results)
     if not links:
         lines += ["", "Find a run in LaunchDarkly under **Evaluations** by the name in the Run column."]
     if compared is False:
         lines += ["", "No `main` result to compare with yet."]
     for r in results:
+        if r.ld_summary and r.ld_summary.get("passed") != r.summary.get("passed"):
+            lines += ["", f"**{r.config}** `{r.variation}`: the LaunchDarkly run page counts scorer failures as "
+                      f"failed rows, so it shows {r.ld_summary['passed']}/{r.ld_summary['total']} passed. Rows "
+                      "passed above comes from the judges."]
         for note in r.notes:
             lines += ["", f"**{r.config}**: {note}"]
         if r.skipped:
@@ -819,9 +1073,83 @@ def markdown(results: list[TargetResult], args: argparse.Namespace, compared: bo
             lines += details(f"{r.config}: {len(r.newly_failing)} newly failing since `main`", r.newly_failing)
         if r.now_passing:
             lines += details(f"{r.config}: {len(r.now_passing)} now passing since `main`", r.now_passing, "Got on `main`")
-        if r.misses:
-            lines += details(f"{r.config}: {len(r.misses)} failing", r.misses)
+        judge_misses = [m for m in r.misses if not is_scorer_miss(m)]
+        scorer_misses = [m for m in r.misses if is_scorer_miss(m)]
+        if judge_misses:
+            lines += details(f"{r.config}: {len(judge_misses)} failing", judge_misses)
+        if scorer_misses:
+            lines += details(f"{r.config}: {len(scorer_misses)} scorer failures (advisory; judges decide the verdict)",
+                             scorer_misses, "Score: reason")
     return "\n".join(lines) + "\n"
+
+
+def is_scorer_miss(miss: ScoredRow) -> bool:
+    return miss.expected.endswith("(scorer)")
+
+
+def judge_passes(r: TargetResult, key: str) -> tuple[int, int] | None:
+    """(rows passed, rows scored) for a judge: LaunchDarkly's criterion summary when it has
+    one, else the scores recording_handler read."""
+    summary = r.criterion_summaries.get(key)
+    if summary and isinstance(summary.get("passed"), int):
+        total = sum(int(summary.get(k) or 0) for k in ("passed", "failed", "error"))
+        return summary["passed"], total
+    if key in r.judge_counts:
+        scored, passed = r.judge_counts[key]
+        return passed, scored
+    return None
+
+
+def agreement(r: TargetResult, scorer: str, other: str) -> str:
+    """"a/b": rows where the scorer and the other criterion gave the same verdict, of rows both scored."""
+    both = [v for v in r.verdicts.values() if scorer in v and other in v]
+    if not both:
+        return ""
+    same = sum(v[scorer] == v[other] for v in both)
+    return f"`{other}` {same}/{len(both)}"
+
+
+def scorer_cell(r: TargetResult, name: str) -> tuple[str, str]:
+    scored, passed = r.scorer_counts[name]
+    counts = f"{passed}/{scored}"
+    before = r.baseline_scorer_counts.get(name)
+    if before:
+        change = passed - before[1]
+        counts += " (no change)" if change == 0 else f" ({change:+d}, was {before[1]}/{before[0]})"
+    agrees = " · ".join(a for a in (agreement(r, name, other) for other in AGREES_WITH.get(name, [])) if a)
+    return counts, agrees or "–"
+
+
+def criteria_tables(results: list[TargetResult]) -> list[str]:
+    """"Rows each scorer and judge passed", and the "Comparison only" table."""
+    lines: list[str] = []
+    rows: list[str] = []
+    comparison: list[str] = []
+    for r in results:
+        if r.error or r.skipped:
+            continue
+        for key in r.judge_counts:
+            counts = judge_passes(r, key)
+            if counts:
+                rows.append(f"| `{r.config}` | `{r.variation}` | `{key}` | judge | {counts[0]}/{counts[1]} | – |")
+        for name in r.scorer_counts:
+            counts, agrees = scorer_cell(r, name)
+            kind = "scorer, decides" if name in DECIDING_SCORERS else "scorer"
+            line = f"| `{r.config}` | `{r.variation}` | `{name}` | {kind} | {counts} | {agrees} |"
+            (comparison if name in COMPARISON_ONLY else rows).append(line)
+    header = ["| AI Config | Variation | Criterion | Kind | Rows passed | Same verdict as |", "|---|---|---|---|---|---|"]
+    if rows:
+        lines += ["", "**Rows each scorer and judge passed**", "", *header, *rows,
+                  "", "Scorers are deterministic code checks (`app/backend/src/evaluation/code_checks.py`). They "
+                  "don't decide a row's verdict in this summary, except where marked *decides*; the LaunchDarkly "
+                  "run page does count them. *Same verdict as*: rows where the scorer and that judge agreed, of "
+                  "the rows both scored."]
+    if comparison:
+        lines += ["", "**Comparison only**", "", *header, *comparison,
+                  "", "`demo-mentions-account-type` is a deliberately poor check, kept to compare with "
+                  "`account-facts` (`evals/README.md`, \"A good check and a bad one\"). Its failures aren't listed "
+                  "with the failing rows."]
+    return lines
 
 
 def start_ld_client(project_key: str, environment: str) -> Any:
