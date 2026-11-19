@@ -262,6 +262,44 @@ it sends `jev-judge-error` = 1, and the LLM judges still run unless `jev-only` i
 `TYPESAFE_API_KEY`. Setup, the labeled pilot and the demo steps are in
 [evals/README.md](evals/README.md#jev-judge).
 
+#### Code checks beside the judges
+
+`response-code-checks` (a boolean flag, not an AI Config) adds deterministic checks to each reply, from
+`app/backend/src/evaluation/code_checks.py`, the same functions the CI evals run as scorers. They make no model calls.
+They run after the judges and beside them: the judges run and report the same whichever way the flag serves, and a
+failed check never changes the reply.
+
+| Variation | Behavior |
+|---|---|
+| `false` (default) | No code checks on live replies. `scheduler-unlisted-slot` still runs on tool-calling scheduler replies. |
+| `true` | The checks for the specialist that answered run on the final reply and send the events below. |
+
+| Metric (event) | Per reply | Regression looks like |
+|---|---|---|
+| `code-check-account-facts` | 1 when an account reply names an ID, amount, percentage, date, tier or account state (autopay, billing, status) the profile contradicts, else 0 | rate more than 5 points over the `false` baseline |
+| `code-check-draft-facts` | 1 when the brand voice reply dropped a number, ID, date or time from the specialist's draft, else 0 | rate more than 5 points up |
+| `code-check-leaked-headings` | 1 when the reply prints a Markdown heading or `Step N:` line from its prompt (#22), else 0 | rate goes up |
+| `code-check-judge-disagreement` | 1 when `account-facts` or `draft-facts` and the accuracy judge gave different verdicts, else 0 | rises after a judge or prompt change |
+| `code-check-error` | 1 when a check raised instead of returning a result, else 0 | any value above 0 |
+
+Each `code-check-<name>` event carries the answering specialist's `configKey` and `variationKey`, as
+`specialist-judge-accuracy` does. `scripts/register_metrics.py` registers the metrics. `specialist-judge-accuracy` is
+the guardrail that shows the flag leaves the judges alone: it should be the same whichever way the flag serves.
+
+**Demo.**
+
+```bash
+python3 scripts/register_metrics.py --env-file .env.staging-org
+python3 scripts/set_ai_config_targeting.py --env-file .env.staging-org --code-checks-demo --rules-only
+python3 scripts/tool_load.py -n 40          # employees get true; customers are split 50/50 by key
+python3 scripts/foundry_load.py --url http://localhost:8000 --name "Demo User"
+```
+
+`--code-checks-demo` turns the flag's targeting on, serves `true` to users whose `role` is `employee`, and splits
+everyone else 50/50. With the flag on, the backend log prints a `🔎 Code checks` line per reply, and the chat API's
+evaluation result has a `code_checks` block with each check's verdict and reason. For a guarded rollout of
+`response-code-checks`, use the `code-check-*` metrics and `specialist-judge-accuracy` as guardrails.
+
 ### Served model
 
 A variation names the model to request, but the API can answer with another one. An alias resolves to a dated

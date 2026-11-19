@@ -265,3 +265,68 @@ doesn't send either.
 `.github/workflows/evals.yml` runs `ci_eval.py` in GitHub Actions on PRs, pushes to `main`, nightly and by hand.
 [CI_EVALS.md](CI_EVALS.md) describes what triggers it, what a run does, the quick and full datasets, and the
 secrets and AWS role it needs.
+
+### Code scorers
+
+Every target also runs deterministic scorers next to its judges (`scorers` in `ci_targets.toml`). Each one is a plain
+function in `app/backend/src/evaluation/code_checks.py`, which the backend uses on live traffic too
+(`response-code-checks`, see the [README](../README.md#code-checks-beside-the-judges)), so a check gives the same
+answer offline and online. They make no model calls.
+
+| Scorer | Targets | Passes when |
+| --- | --- | --- |
+| `routed-to-expected-specialist` | `triage_agent` | the triage output routes to the row's expected specialist. Triage's only criterion, so it decides the verdict. |
+| `account-facts` | `account_agent` | no ID, amount, percentage, date, tier name or account state (autopay, billing, status) in the reply contradicts `account_info` |
+| `offered-listed-slots` | `scheduler_agent` | every slot ID and time in the reply is in the row's `available_slots` |
+| `called-expected-tools` | `scheduler_agent.tools`, `branch_agent.tools` | the set of tools called equals `expected_tools`; a control row calls none |
+| `unlisted-slots` | `scheduler_agent.tools` | every slot ID and time in the reply came from a `get_available_slots` call. A slot ID is a `SLOT-…` ID or any ID-like token next to a time (`FRD-101`). |
+| `draft-facts` | `brand_agent` | the reply keeps every number, ID, date and time in `specialist_response`. Scores the fraction kept. |
+| `leaked-headings` | `scheduler_agent`, `branch_agent`, `brand_agent` (and their tool tables) | no Markdown heading line and no `Step N:` line (#22) |
+| `demo-mentions-account-type` | `account_agent` | the reply names the profile's account type. Deliberately poor; see below. |
+
+**Scorers don't decide a row's verdict; the judges do.** LaunchDarkly rejects a scorer without a threshold (`400
+options.threshold is required for kind 'scorer'`, 2026-11-18), so every scorer runs with threshold 1.0, and the
+LaunchDarkly run page counts a scorer failure as a failed row. `ci_eval.py` takes each row's verdict from its judges'
+per-row results instead (plus `routed-to-expected-specialist`), and says so in the summary when the two counts differ.
+The summary's "Rows each scorer and judge passed" table lists every judge and scorer, with a *Same verdict as* column:
+the rows on which a scorer and its judge agreed. Scorer failures, with the scorer's reason, are listed in their own
+section below the judge failures. The SDK sends a scorer's reason to LaunchDarkly as empty, so the summary is where to
+read it.
+
+**Tool calls.** The SDK doesn't give a scorer the row's tool calls (#86). `ci_eval.py` wraps each row's tool handlers
+and records the calls under the row's input and variables, and the trajectory scorers look them up there. A row whose
+calls weren't recorded is a scorer error, not a pass. `load_targets` stops if a local dataset has two rows with the
+same input and variables.
+
+### A good check and a bad one
+
+`account-facts` and `demo-mentions-account-type` both check `account_agent` replies against `account_info`, and both
+are deterministic. They differ in design only.
+
+| | `account-facts` (well-considered) | `demo-mentions-account-type` (poorly-considered) |
+| --- | --- | --- |
+| Passes when | no ID, amount, percentage, date, tier name or account state in the reply contradicts the profile | the reply contains the profile's account type, for example `Gold Checking` |
+| Question it answers | "Did the reply state anything the profile contradicts?", the question the accuracy judge asks | "Did the reply mention the right product?", a proxy for accuracy |
+| Direction | looks for what is wrong, so a reply that says nothing checkable passes | looks for one thing that is right, so an accurate reply about something else fails |
+| Inputs | typed tokens, normalized (case, `$`, commas, date formats) before comparing | one case-insensitive substring |
+| Known limit | can't check a claim with no token or state phrase ("everything's fine") | any invented fact passes if the product is named: `Your Gold Checking balance is $4,218.37` |
+
+`measure_code_checks.py` runs both over the 48 labeled replies in `judge_labeled_dataset.jsonl`, with no model calls:
+
+```sh
+python3 evals/measure_code_checks.py --show-misses
+```
+
+On 2026-11-18 it gave:
+
+| Check | Accuracy right | Planted inaccuracies missed | Accurate replies failed | `good` replies failed | Flags that were right | Model calls |
+| --- | --- | --- | --- | --- | --- | --- |
+| `account_facts` | 45/48 | 1 | 2 | 1/12 | 23/25 | 0 |
+| `mentions_account_type` | 30/48 | 3 | 15 | 8/12 | 21/36 | 0 |
+| LLM judges, Claude Sonnet 5 (pilot, 2026-11-03) | 39/48 | 0 | 9 | – | – | 48 |
+
+`account_facts` misses one rude reply that states nothing checkable ("Everything's fine. Stop worrying."), and its two
+false alarms name the Platinum account the customer asked to upgrade to. The account-state phrases were written after
+reading these replies, so its numbers are optimistic. A check that fails more than 10% of `good` replies isn't added
+to `ci_targets.toml`; `demo-mentions-account-type` is the exception, kept on purpose and shown in the summary's
+"Comparison only" table, with its failures left out of the failing rows.
