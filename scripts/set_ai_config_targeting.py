@@ -39,6 +39,12 @@ that serves their `gemini-4-carbon` variation (issue #79) to contexts whose
 --judge-model gemini-4-carbon sets that attribute, so real chats keep the
 default judges.
 
+With --code-checks-demo it sets up the `response-code-checks` flag (issue #85),
+a plain boolean flag, not an AI Config: it turns targeting on, adds a rule that
+serves `true` to users whose `role` is `employee`, and splits everyone else
+50/50 between `true` and `false` by user key. scripts/tool_load.py and
+scripts/foundry_load.py then send both kinds of traffic.
+
 --rules-only adds the demo rules without moving any fallthrough, for a config
 whose default rule was deliberately moved off `Default` (for example by a
 guarded rollout).
@@ -51,6 +57,7 @@ Usage:
     python scripts/set_ai_config_targeting.py --config branch_agent --azure-demo   # touch branch_agent only
     python scripts/set_ai_config_targeting.py --config scheduler_agent --config branch_agent --tools-demo --rules-only
     python scripts/set_ai_config_targeting.py --config ai-judge-accuracy --config ai-judge-coherence --gemini-demo --rules-only
+    python scripts/set_ai_config_targeting.py --code-checks-demo --rules-only
 
 LAUNCHDARKLY_API_HOST selects a non-production instance (default
 https://app.launchdarkly.com).
@@ -290,6 +297,52 @@ def add_gemini_demo_rule(api_base: str, project: str, environment: str, token: s
     return True
 
 
+# --code-checks-demo: response-code-checks serves true to employees and 50/50 to everyone else.
+CODE_CHECKS_FLAG = "response-code-checks"
+CODE_CHECKS_RULE_DESCRIPTION = "Code checks demo: employees"
+
+
+def set_code_checks_demo(api_base: str, project: str, environment: str, token: str, dry_run: bool) -> bool:
+    """Target response-code-checks for the demo. Returns False on failure."""
+    url = f"{api_base}/flags/{project}/{CODE_CHECKS_FLAG}"
+    status, body = request_status("GET", f"{url}?env={environment}", token)
+    if status != 200:
+        print(f"  {CODE_CHECKS_FLAG:<20} SKIP  GET returned HTTP {status}: create the flag first (issue #85)")
+        return False
+    flag = json.loads(body)
+    ids = {v.get("value"): v.get("_id") for v in flag.get("variations", [])}
+    if True not in ids or False not in ids:
+        print(f"  {CODE_CHECKS_FLAG:<20} SKIP  not a boolean flag")
+        return False
+    env_state = (flag.get("environments") or {}).get(environment)
+    if env_state is None:
+        print(f"  {CODE_CHECKS_FLAG:<20} SKIP  environment '{environment}' not found")
+        return False
+
+    instructions: list[dict] = []
+    if not env_state.get("on"):
+        instructions.append({"kind": "turnFlagOn"})
+    if not any(is_tools_demo_clause(c) for rule in env_state.get("rules", []) for c in rule.get("clauses", [])):
+        instructions.append({"kind": "addRule", "description": CODE_CHECKS_RULE_DESCRIPTION,
+                             "clauses": [TOOLS_DEMO_CLAUSE], "variationId": ids[True]})
+    weights = {v["variation"]: v["weight"] for v in ((env_state.get("fallthrough") or {}).get("rollout") or {})
+               .get("variations", [])}
+    if sorted(weights.values()) != [50000, 50000]:
+        instructions.append({"kind": "updateFallthroughVariationOrRollout",
+                             "rolloutWeights": {ids[True]: 50000, ids[False]: 50000}, "rolloutContextKind": "user"})
+    if not instructions:
+        print(f"  {CODE_CHECKS_FLAG:<20} ok    demo targeting already set")
+        return True
+    summary = ", ".join(i["kind"] for i in instructions)
+    if dry_run:
+        print(f"  {CODE_CHECKS_FLAG:<20} would apply: {summary}")
+        return True
+    request("PATCH", url, token, {"environmentKey": environment, "instructions": instructions,
+                                  "comment": "Code checks demo (issue #85)"})
+    print(f"  {CODE_CHECKS_FLAG:<20} applied: {summary} (employees -> true, everyone else 50/50)")
+    return True
+
+
 def request_status(method: str, url: str, token: str, body: dict | None = None) -> tuple[int, str]:
     """A plain JSON request that returns (HTTP status, response body) instead of exiting on an error."""
     data = json.dumps(body).encode() if body is not None else None
@@ -333,6 +386,11 @@ def main() -> int:
         "--gemini-demo",
         action="store_true",
         help="also serve the judges' gemini-4-carbon variation to contexts with judge_model = gemini-4-carbon",
+    )
+    parser.add_argument(
+        "--code-checks-demo",
+        action="store_true",
+        help="also target the response-code-checks flag: true for employees, 50/50 for everyone else",
     )
     parser.add_argument(
         "--rules-only",
@@ -424,6 +482,9 @@ def main() -> int:
         for key in GEMINI_DEMO_CONFIGS:
             if key in config_keys and not add_gemini_demo_rule(api_base, project, environment, token, key, args.dry_run):
                 failed += 1
+
+    if args.code_checks_demo and not set_code_checks_demo(api_base, project, environment, token, args.dry_run):
+        failed += 1
 
     verb = "would change" if args.dry_run else "changed"
     print(f"\n{verb} {changed}, failed {failed}, total {len(config_keys)}")
