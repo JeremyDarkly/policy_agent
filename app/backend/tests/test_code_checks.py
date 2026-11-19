@@ -202,6 +202,10 @@ def test_leaked_headings():
     assert not cc.leaked_headings("**Step 1:** Acknowledge\nThanks for reaching out.").passed
     assert cc.leaked_headings("Thanks for reaching out! Here are two times:\n- 9 AM\n- 2 PM").passed
     assert cc.leaked_headings("We have #1 rated service.").passed
+    assert not cc.leaked_headings("### Paso 1: Reconocer y Empatizar\nEntiendo.").passed
+    # Titles are formatting, not leaked prompt steps.
+    assert cc.leaked_headings("# Your Gold Checking Account Monthly Fee\n## How to Avoid the Fee\n- Keep $1,500").passed
+    assert cc.leaked_headings("There are 3 steps: first, call us.").passed
 
 
 def test_every_check_returns_a_float_score():

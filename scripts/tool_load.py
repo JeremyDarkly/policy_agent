@@ -23,6 +23,7 @@ Usage (backend running, e.g. `docker compose up`):
     python scripts/tool_load.py                    # 40 requests, half employee, half customer
     python scripts/tool_load.py -n 10 --concurrency 2
     python scripts/tool_load.py -n 100 --users 50 --employees-only
+    python scripts/tool_load.py -n 40 --account-questions   # also account questions (response-code-checks)
 
 Stdlib only. Each request runs the whole graph (triage, specialist, brand voice),
 plus one more model call per tool round, so N requests are about 3-4N model calls.
@@ -56,7 +57,15 @@ QUESTIONS = [
     ("Thanks, I don't need an appointment after all. Goodbye!", False),
 ]
 
-SPECIALISTS = {"scheduler_specialist": "scheduler", "branch_specialist": "branch"}
+# --account-questions mixes these in, so response-code-checks' account-facts check (issue #85) gets traffic.
+ACCOUNT_QUESTIONS = [
+    ("What type of account do I have, and what tier is it?", False),
+    ("Is autopay turned on for my account?", False),
+    ("How long have I been a customer?", False),
+    ("Is my account in good standing?", False),
+]
+
+SPECIALISTS = {"scheduler_specialist": "scheduler", "branch_specialist": "branch", "account_specialist": "account"}
 
 # role decides the variation; the other attributes match app/ui/src/lib/demoUser.ts.
 PRESETS = {
@@ -107,14 +116,17 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=180, help="seconds per request (default 180)")
     parser.add_argument("--users", type=int, default=10, help="spread each path's requests over this many keys")
     parser.add_argument("--employees-only", action="store_true", help="send only tool-calling (employee) traffic")
+    parser.add_argument("--account-questions", action="store_true",
+                        help="mix in account questions, for the response-code-checks account-facts check")
     args = parser.parse_args()
+    questions = QUESTIONS + (ACCOUNT_QUESTIONS if args.account_questions else [])
 
     prefix = key_prefix(args.name)
     jobs = []
     for i in range(args.n):
         preset = "employee" if args.employees_only or i % 2 == 0 else "customer"
         user = PRESETS[preset]
-        question, needs_tool = QUESTIONS[(i // (1 if args.employees_only else 2)) % len(QUESTIONS)]
+        question, needs_tool = questions[(i // (1 if args.employees_only else 2)) % len(questions)]
         jobs.append((preset, needs_tool, {
             "userInput": question,
             "userName": args.name,

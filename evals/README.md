@@ -281,7 +281,7 @@ answer offline and online. They make no model calls.
 | `called-expected-tools` | `scheduler_agent.tools`, `branch_agent.tools` | the set of tools called equals `expected_tools`; a control row calls none |
 | `unlisted-slots` | `scheduler_agent.tools` | every slot ID and time in the reply came from a `get_available_slots` call. A slot ID is a `SLOT-…` ID or any ID-like token next to a time (`FRD-101`). |
 | `draft-facts` | `brand_agent` | the reply keeps every number, ID, date and time in `specialist_response`. Scores the fraction kept. |
-| `leaked-headings` | `scheduler_agent`, `branch_agent`, `brand_agent` (and their tool tables) | no Markdown heading line and no `Step N:` line (#22) |
+| `leaked-headings` | `scheduler_agent`, `branch_agent`, `brand_agent` (and their tool tables) | no `Step N:` line from the prompt (#22), as a heading, in bold or plain, in any language seen so far (`Paso 1:`). Other headings pass: brand voice writes titles on purpose. |
 | `demo-mentions-account-type` | `account_agent` | the reply names the profile's account type. Deliberately poor; see below. |
 
 **Scorers don't decide a row's verdict; the judges do.** LaunchDarkly rejects a scorer without a threshold (`400

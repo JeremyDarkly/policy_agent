@@ -5,9 +5,10 @@ When the flag serves `true` for the user, BrandVoiceEvaluator runs the code chec
 
 - `code-check-<name>` per check: 1 when the check failed, else 0. The data carries the
   answering specialist's configKey and variationKey, as `specialist-judge-accuracy` does.
-- `code-check-judge-disagreement`: 1 when an accuracy check (account-facts, draft-facts)
-  and the LLM accuracy judge gave different verdicts on the reply, else 0. Not sent when
-  the judge failed or no accuracy check ran.
+- `code-check-judge-disagreement`: 1 when account-facts and the LLM accuracy judge gave
+  different verdicts on the reply, else 0. Only account-facts is compared: the judge's
+  ground truth is the account profile, which only account replies carry. Not sent when
+  the judge failed or account-facts didn't run.
 - `code-check-error`: 1 when a check raised instead of returning a result, else 0.
 
 `false` (and the default, when the flag can't be read) runs no checks. The judges run
@@ -26,8 +27,10 @@ FLAG_KEY = "response-code-checks"
 EVENT_PREFIX = "code-check-"
 DISAGREEMENT_EVENT = "code-check-judge-disagreement"
 ERROR_EVENT = "code-check-error"
-# The checks whose verdict is compared with the accuracy judge's.
-ACCURACY_CHECKS = ("account-facts", "draft-facts")
+# The checks whose verdict is compared with the accuracy judge's. The judge grades against the
+# account profile, so draft-facts (which reads the specialist's draft) isn't comparable: on
+# scheduler and branch replies the judge scored 0.05-0.15 while draft-facts passed (2026-11-18).
+ACCURACY_CHECKS = ("account-facts",)
 
 
 @dataclass

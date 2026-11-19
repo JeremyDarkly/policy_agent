@@ -221,9 +221,10 @@ def record_scorer(name: str, row: DatasetRow, output: Any, result: code_checks.C
         counts[1] += result.passed
         current.verdicts.setdefault(row_key(row.input, output), {})[name] = result.passed
         if not result.passed:
+            # A deciding scorer's miss reads like a judge's: what was expected and what came out.
             miss = ScoredRow(
                 input=row_label(row.input or ""),
-                expected=expected or f"{name} (scorer)",
+                expected=f"{name} (scorer)" if expected is None else (expected or "(no expected value)"),
                 actual=f"{result.score:.2f}: {result.reason}" if expected is None else result.reason,
             )
             (current.comparison_misses if name in COMPARISON_ONLY else current.misses).append(miss)
@@ -280,7 +281,16 @@ def code_check_scorer(name: str, check: Any) -> Any:
     """
 
     def fn(row: DatasetRow, output: Any) -> float:
-        return record_scorer(name, row, output, check(row, judge_text(output)))
+        try:
+            check_result = check(row, judge_text(output))
+        except Exception as error:
+            # The SDK records the row as a scorer error without saying why; keep the reason.
+            if current is not None:
+                message = f"{name}: {type(error).__name__}: {error}"[:300]
+                if message not in current.row_errors and len(current.row_errors) < MAX_ROW_ERRORS + 3:
+                    current.row_errors.append(message)
+            raise
+        return record_scorer(name, row, output, check_result)
 
     fn.__name__ = name.replace("-", "_")
     return fn

@@ -26,8 +26,8 @@ serves true:
   code-check-<name>    1 when the deterministic check failed on the reply, 0
                        when it passed, for account-facts, draft-facts and
                        leaked-headings. Averaged. Lower is better.
-  code-check-judge-disagreement  1 when an accuracy check and the LLM
-                       accuracy judge disagreed, else 0. Lower is better.
+  code-check-judge-disagreement  1 when account-facts and the LLM accuracy
+                       judge disagreed on an account reply, else 0. Lower is better.
   code-check-error     1 when a check raised, else 0. Lower is better.
 
 LaunchDarkly records custom events without a metric, but a guarded rollout or
@@ -140,8 +140,8 @@ METRICS = [
             ("account-facts", "an account reply named an ID, amount, percentage, date, tier or account state "
                               "the profile contradicts"),
             ("draft-facts", "the brand voice reply dropped a number, ID, date or time from the specialist's draft"),
-            ("leaked-headings", "the reply printed a Markdown heading or a 'Step N:' line from its prompt"),
-            ("judge-disagreement", "an accuracy check and the LLM accuracy judge gave different verdicts"),
+            ("leaked-headings", "the reply printed a 'Step N:' line from its prompt"),
+            ("judge-disagreement", "account-facts and the LLM accuracy judge gave different verdicts on an account reply"),
             ("error", "a check raised instead of returning a result"),
         ]
     ],

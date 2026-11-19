@@ -434,20 +434,22 @@ def _describe(kind: str, token: Any) -> str:
 
 # --- Formatting ---------------------------------------------------------------
 
-HEADING = re.compile(r"^\s{0,3}#{1,6}\s+\S.*$", re.MULTILINE)
-STEP_LINE = re.compile(r"^\s*(?:[*_]{1,2})?\s*Step\s+\d+\s*[:.)]", re.MULTILINE | re.IGNORECASE)
+# A prompt's step heading, in any of the languages the replies have used:
+# "### Step 1: Acknowledge & Empathize", "**Step 2:**", "### Paso 1: Reconocer".
+STEP_WORDS = r"(?:step|paso|passo|étape|etape|schritt|stap)"
+STEP_LINE = re.compile(rf"^\s*(?:#{{1,6}}\s*)?(?:[*_]{{1,2}})?\s*{STEP_WORDS}\s+\d+\s*(?:[*_]{{1,2}})?\s*[:.)\-–]",
+                       re.IGNORECASE)
 
 
 def leaked_headings(reply: str) -> CheckResult:
-    """Passes when the reply has no Markdown heading line and no "Step N:" line.
+    """Passes when the reply has no "Step N:" line, as a heading, in bold or plain.
 
-    Those come from the prompt's own step headings (issue #22) and aren't meant for the
-    customer.
+    Those are the prompt's own step headings (issue #22) and aren't meant for the customer.
+    Other Markdown headings pass: brand voice and branch replies use titles such as
+    "# Your Gold Checking Account" on purpose (seen in CI on 2026-11-18).
     """
-    found = [m.group(0).strip() for m in HEADING.finditer(reply or "")]
-    found += [line.strip() for line in (reply or "").splitlines() if STEP_LINE.match(line)
-              and line.strip() not in found]
+    found = [line.strip() for line in (reply or "").splitlines() if STEP_LINE.match(line)]
     if found:
         shown = "; ".join(f"`{line[:60]}`" for line in found[:3])
-        return CheckResult(0.0, f"{len(found)} heading line{'s' if len(found) != 1 else ''}: {shown}")
+        return CheckResult(0.0, f"{len(found)} step heading line{'s' if len(found) != 1 else ''}: {shown}")
     return CheckResult(1.0)
